@@ -2,7 +2,6 @@ window.__ModuleLoader__.load({
   id: 'dsh-model-visibility',
   factory(require) {
     const React = require('react')
-    const ReactDOM = require('react-dom')
     const h = React.createElement
 
     /** Dictionary namespace owned by this plugin. */
@@ -11,8 +10,6 @@ window.__ModuleLoader__.load({
     const ENTRY = 'model-visibility'
     /** Config field persisted by the Host settings document. */
     const FIELD = 'hidden'
-    /** Composer slot that owns the model selector. */
-    const MODEL_SLOT = 'conversation.input.model'
     /** Settings section id. */
     const SECTION_ID = 'model-visibility'
 
@@ -33,16 +30,6 @@ window.__ModuleLoader__.load({
         'group.showAll': '全组显示',
         'group.hideAll': '全组隐藏',
         'provider.account': 'DeepSeek 账号',
-        'composer.triggerFallback': '选择模型',
-        'composer.loading': '正在加载模型…',
-        'composer.empty':
-          '所有模型都已隐藏。请到“设置 → 模型显示”中打开至少一个模型。',
-        'composer.search': '搜索模型…',
-        'composer.noResults': '没有匹配的模型。',
-        'composer.menuLabel': '选择模型',
-        'composer.selectAria': '选择模型，当前 {model}',
-        'composer.switchFailed': '切换模型失败：{message}',
-        'effort.default': '默认',
       },
       en: {
         'nav': 'Model visibility',
@@ -60,43 +47,10 @@ window.__ModuleLoader__.load({
         'group.showAll': 'Show all',
         'group.hideAll': 'Hide all',
         'provider.account': 'DeepSeek Account',
-        'composer.triggerFallback': 'Select model',
-        'composer.loading': 'Loading models…',
-        'composer.empty':
-          'Every model is hidden. Open at least one in Settings → Model visibility.',
-        'composer.search': 'Search models…',
-        'composer.noResults': 'No matching models.',
-        'composer.menuLabel': 'Select model',
-        'composer.selectAria': 'Select model, current {model}',
-        'composer.switchFailed': 'Could not switch models: {message}',
-        'effort.default': 'Default',
       },
     }
 
     const CSS = `
-.mv_root{position:relative;min-width:0;display:flex;align-items:center}
-.mv_trigger{box-sizing:border-box;border-radius:var(--dsw-radius-sm,6px);min-width:0;max-width:min(360px,45cqw);height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;outline:none;align-items:center;gap:4px;padding:0 4px 0 8px;font-family:inherit;font-size:13px;font-weight:400;line-height:20px;display:flex}
-.mv_trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-.mv_trigger:focus-visible{box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary))}
-.mv_trigger:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
-.mv_triggerIcon{display:var(--dsh-composer-model-icon-display,none);flex:none;align-items:center;justify-content:center}
-.mv_triggerLabel{display:var(--dsh-composer-model-text-display,block);text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}
-.mv_triggerEffort{display:var(--dsh-composer-model-text-display,block);text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary);flex-shrink:1000;overflow:hidden}
-.mv_chevron{color:var(--dsw-alias-label-tertiary);flex:none;display:flex;align-items:center}
-.mv_menu{position:fixed;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(260px,calc(100vw - 32px));max-width:min(420px,calc(100vw - 32px));max-height:min(360px,calc(100vh - 96px));box-shadow:var(--dsw-elevation-prominent,0 8px 24px rgba(0,0,0,.28));color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md,10px);flex-direction:column;padding:4px;display:flex;overflow:hidden}
-.mv_scroll{flex-direction:column;gap:2px;min-height:0;display:flex;overflow-y:auto}
-.mv_group{flex-direction:column;display:flex}
-.mv_groupLabel{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;padding:6px 8px 2px;position:sticky;top:0;background:var(--dsw-alias-bg-layer-2)}
-.mv_option{border-radius:var(--dsw-radius-sm,6px);width:100%;min-width:0;color:inherit;text-align:left;cursor:pointer;background:0 0;border:none;outline:none;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;font-family:inherit;font-size:13px;line-height:20px;display:flex}
-.mv_option:hover:not(:disabled),.mv_option:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-.mv_option:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
-.mv_optionName{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}
-.mv_check{flex:none;width:16px;height:16px;color:var(--dsw-alias-brand-primary);display:flex;align-items:center;justify-content:center}
-.mv_searchRow{flex:none;border-bottom:.5px solid var(--dsw-alias-border-l1);align-items:center;gap:6px;padding:4px 6px 6px;margin-bottom:4px;display:flex}
-.mv_searchInput{flex:1;min-width:0;height:24px;color:var(--dsw-alias-label-primary);background:0 0;border:none;outline:none;font-family:inherit;font-size:13px}
-.mv_status{color:var(--dsw-alias-label-tertiary);padding:8px;font-size:12px;line-height:18px}
-.mv_error{color:var(--dsw-alias-state-error-primary);border-radius:var(--dsw-radius-sm,6px);background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));gap:8px;align-items:center;padding:8px;font-size:12px;line-height:18px;display:flex}
-.mv_retry{color:inherit;cursor:pointer;background:0 0;border:none;flex:none;padding:0;font-family:inherit;font-size:12px;text-decoration:underline}
 .mvp_page{box-sizing:border-box;width:100%;height:100%;min-height:0;flex-direction:column;display:flex;overflow-y:auto;padding-bottom:24px}
 .mvp_head{flex:none;flex-direction:column;gap:6px;padding:4px 0 14px;display:flex}
 .mvp_title{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
@@ -142,35 +96,6 @@ window.__ModuleLoader__.load({
       return group.id === 'deepseek-account' ? t('provider.account') : group.name
     }
 
-    function findModel(groups, selection) {
-      if (!selection) return undefined
-      for (const group of groups || []) {
-        if (group.id !== selection.provider) continue
-        for (const model of group.models || []) {
-          if (model.id === selection.model) return { group, model }
-        }
-      }
-      return undefined
-    }
-
-    /** Visible groups, optionally narrowed by a case-insensitive query. */
-    function visibleGroups(groups, hidden, query) {
-      const q = query ? query.trim().toLowerCase() : ''
-      const out = []
-      for (const group of groups || []) {
-        const models = (group.models || []).filter((model) => {
-          if (hidden.has(keyOf(group.id, model.id))) return false
-          if (q === '') return true
-          return (
-            String(model.name || '').toLowerCase().includes(q) ||
-            String(model.id || '').toLowerCase().includes(q)
-          )
-        })
-        if (models.length > 0) out.push({ ...group, models })
-      }
-      return out
-    }
-
     function countModels(groups) {
       let total = 0
       for (const group of groups || []) total += (group.models || []).length
@@ -195,24 +120,6 @@ window.__ModuleLoader__.load({
       const snapshot = useSource(form)
       const hidden = React.useMemo(() => hiddenSetOf(snapshot), [snapshot])
       return { hidden, snapshot }
-    }
-
-    const IDLE_STATE = {
-      current: null,
-      routable: false,
-      groups: [],
-      failures: [],
-      status: 'idle',
-      pending: null,
-      error: null,
-    }
-    const IDLE_STORE = {
-      subscribe() {
-        return () => {}
-      },
-      getSnapshot() {
-        return IDLE_STATE
-      },
     }
 
     /** Host-generation catalog, shared by the settings page. */
@@ -280,406 +187,156 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /* ---------------------------------------------------------- small svg */
+    /* ------------------------------------------------------ composer filter */
 
-    function CheckIcon() {
-      return h(
-        'svg',
-        {
-          width: 14,
-          height: 14,
-          viewBox: '0 0 16 16',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 1.8,
-          strokeLinecap: 'round',
-          strokeLinejoin: 'round',
-          'aria-hidden': 'true',
-        },
-        h('path', { d: 'M3.5 8.5l3 3 6-7' }),
-      )
+    /** Hidden model keys as the plain array the Host stores. */
+    function hiddenListOf(snapshot) {
+      const value = snapshot && snapshot.value
+      return value && Array.isArray(value[FIELD]) ? value[FIELD] : []
     }
 
-    function ChevronIcon() {
-      return h(
-        'svg',
-        {
-          width: 12,
-          height: 12,
-          viewBox: '0 0 16 16',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 1.6,
-          strokeLinecap: 'round',
-          strokeLinejoin: 'round',
-          'aria-hidden': 'true',
-        },
-        h('path', { d: 'M4 6.5l4 4 4-4' }),
-      )
-    }
+    /**
+     * Rewrite one directory store in place so its snapshots omit hidden models.
+     *
+     * The shipped composer seat may capture the directory store before this plugin
+     * applies, so replacing the store object would never reach it; rewriting
+     * getSnapshot/subscribe on the captured object does. The session's active
+     * model stays listed even while hidden, because the shipped trigger
+     * resolves its label from this same catalog.
+     */
+    function patchDirectoryStore(store, form) {
+      const readBase = store.getSnapshot.bind(store)
+      const subscribeBase = store.subscribe.bind(store)
+      const originalGet = store.getSnapshot
+      const originalSubscribe = store.subscribe
+      const listeners = new Set()
+      let snapshot = null
+      let lastBase
+      let lastSignature
 
-    function LayersIcon() {
-      return h(
-        'svg',
-        {
-          width: 16,
-          height: 16,
-          viewBox: '0 0 16 16',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 1.4,
-          strokeLinecap: 'round',
-          strokeLinejoin: 'round',
-          'aria-hidden': 'true',
-        },
-        h('path', { d: 'M8 2.5l5 2.6-5 2.6-5-2.6 5-2.6z' }),
-        h('path', { d: 'M3 8.2l5 2.6 5-2.6' }),
-      )
-    }
-
-    /* ------------------------------------------------------ composer seat */
-
-    function makeSelect(form) {
-      /**
-       * The composer's model seat: a trigger showing the current model, and a
-       * menu that lists only models the settings page has left visible.
-       */
-      return function ModelVisibilitySelect(props) {
-        const { available, store, load, select, locked, t } = props
-        const { hidden } = useHidden(form)
-        const state = useSource(store)
-        const [open, setOpen] = React.useState(false)
-        const [query, setQuery] = React.useState('')
-        const [pos, setPos] = React.useState(null)
-        const [error, setError] = React.useState(null)
-        const [busy, setBusy] = React.useState(false)
-        const rootRef = React.useRef(null)
-        const triggerRef = React.useRef(null)
-        const menuRef = React.useRef(null)
-        const searchRef = React.useRef(null)
-
-        React.useEffect(() => {
-          if (available && typeof load === 'function') load()
-          // The catalog is loaded once per seat mount; reopening reloads it.
-          // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [available])
-
-        const close = React.useCallback((restoreFocus) => {
-          setOpen(false)
-          setQuery('')
-          setError(null)
-          if (restoreFocus) {
-            queueMicrotask(() => {
-              if (triggerRef.current) triggerRef.current.focus()
-            })
+      const build = (baseSnapshot) => {
+        const hidden = new Set(hiddenListOf(form.getSnapshot()))
+        const activeSelection = baseSnapshot.current
+        const groups = []
+        for (const group of baseSnapshot.groups || []) {
+          const all = group.models || []
+          const models = []
+          for (const model of all) {
+            const key = keyOf(group.id, model.id)
+            const active =
+              activeSelection !== null &&
+              activeSelection !== undefined &&
+              activeSelection.provider === group.id &&
+              activeSelection.model === model.id
+            if (!hidden.has(key) || active) models.push(model)
           }
-        }, [])
-
-        React.useEffect(() => {
-          if (!open) return undefined
-          const onPointerDown = (event) => {
-            if (rootRef.current && rootRef.current.contains(event.target)) return
-            if (menuRef.current && menuRef.current.contains(event.target)) return
-            close(false)
-          }
-          const onKeyDown = (event) => {
-            if (event.key !== 'Escape') return
-            event.stopPropagation()
-            close(true)
-          }
-          document.addEventListener('mousedown', onPointerDown)
-          document.addEventListener('keydown', onKeyDown, true)
-          return () => {
-            document.removeEventListener('mousedown', onPointerDown)
-            document.removeEventListener('keydown', onKeyDown, true)
-          }
-        }, [open, close])
-
-        const groups = visibleGroups(state.groups, hidden, '')
-        const showSearch = countModels(groups) > 6
-        const currentEntry = findModel(state.groups, state.current)
-        const reasoning = currentEntry === undefined ? undefined : currentEntry.model.reasoning
-        const effort =
-          state.current === null
-            ? undefined
-            : state.current.reasoningEffort === undefined
-              ? reasoning === undefined
-                ? undefined
-                : reasoning.defaultEffort
-              : state.current.reasoningEffort
-        const effortName =
-          reasoning === undefined
-            ? undefined
-            : Array.isArray(reasoning.efforts)
-              ? reasoning.efforts.find((level) => level.id === effort)
-              : undefined
-        let effortLabel
-        if (currentEntry !== undefined) {
-          if (reasoning === undefined) effortLabel = state.retainedEffort
-          else if (effort === undefined) effortLabel = t('effort.default')
-          else effortLabel = effortName !== undefined ? effortName.name : effort
+          if (models.length === 0) continue
+          groups.push(models.length === all.length ? group : { ...group, models })
         }
-        const currentName =
-          currentEntry !== undefined
-            ? currentEntry.model.name
-            : state.current !== null
-              ? state.current.model
-              : state.status === 'loading' || state.status === 'idle'
-                ? t('composer.loading')
-                : t('composer.triggerFallback')
-
-        React.useLayoutEffect(() => {
-          if (!open) {
-            setPos(null)
-            return undefined
-          }
-          const place = () => {
-            const trigger = triggerRef.current
-            const menu = menuRef.current
-            if (trigger === null) return
-            const rect = trigger.getBoundingClientRect()
-            const MARGIN = 12
-            const width = menu === null ? 280 : menu.offsetWidth
-            const height = menu === null ? 220 : menu.offsetHeight
-            let left = rect.right - width
-            let top = rect.top - 8 - height
-            left = Math.min(Math.max(left, MARGIN), window.innerWidth - width - MARGIN)
-            top = Math.min(Math.max(top, MARGIN), window.innerHeight - height - MARGIN)
-            setPos({ left, top })
-          }
-          place()
-          window.addEventListener('scroll', place, true)
-          window.addEventListener('resize', place)
-          const menu = menuRef.current
-          const observer =
-            typeof ResizeObserver !== 'undefined' && menu !== null ? new ResizeObserver(place) : null
-          if (observer !== null) observer.observe(menu)
-          return () => {
-            if (observer !== null) observer.disconnect()
-            window.removeEventListener('scroll', place, true)
-            window.removeEventListener('resize', place)
-          }
-        }, [open, state, query, hidden])
-
-        React.useLayoutEffect(() => {
-          if (!open) return
-          if (showSearch) {
-            const input = searchRef.current
-            if (input !== null) input.focus()
-            return
-          }
-          const menu = menuRef.current
-          if (menu === null) return
-          const checked = menu.querySelector('[role="menuitemradio"][aria-checked="true"]')
-          const target = checked !== null ? checked : menu.querySelector('[role="menuitemradio"]')
-          if (target !== null) target.focus()
-        }, [open, showSearch])
-
-        if (!available) return null
-
-        const choose = (group, model) => {
-          if (busy) return
-          const effortId =
-            model.reasoning !== undefined && model.reasoning.defaultEffort !== undefined
-              ? model.reasoning.defaultEffort
-              : undefined
-          const selection = { provider: group.id, model: model.id }
-          if (effortId !== undefined) selection.reasoningEffort = effortId
-          setBusy(true)
-          setError(null)
-          Promise.resolve(select(selection)).then(
-            (result) => {
-              setBusy(false)
-              if (result && result.ok === false) {
-                const failure = result.error
-                const message = failure
-                  ? String(failure.code) + ': ' + String(failure.message)
-                  : ''
-                setError(t('composer.switchFailed', { message }))
-                return
-              }
-              close(true)
-            },
-            (failure) => {
-              setBusy(false)
-              setError(
-                t('composer.switchFailed', {
-                  message: String(failure && failure.message ? failure.message : failure),
-                }),
-              )
-            },
-          )
-        }
-
-        const filtered = visibleGroups(state.groups, hidden, showSearch ? query : '')
-        const rows = []
-        for (const group of filtered) {
-          const options = group.models.map((model) =>
-            h(
-              'button',
-              {
-                key: model.id,
-                type: 'button',
-                role: 'menuitemradio',
-                'aria-checked':
-                  state.current !== null &&
-                  state.current.provider === group.id &&
-                  state.current.model === model.id,
-                className: 'mv_option',
-                title: model.name,
-                disabled: busy,
-                onClick: () => choose(group, model),
-              },
-              h('span', { className: 'mv_optionName' }, model.name),
-              h(
-                'span',
-                { className: 'mv_check' },
-                state.current !== null &&
-                  state.current.provider === group.id &&
-                  state.current.model === model.id
-                  ? h(CheckIcon)
-                  : null,
-              ),
-            ),
-          )
-          rows.push(
-            h(
-              'div',
-              { key: group.id, className: 'mv_group', role: 'group', 'aria-label': providerLabel(group, t) },
-              h('div', { className: 'mv_groupLabel' }, providerLabel(group, t)),
-              options,
-            ),
-          )
-        }
-
-        const emptyText =
-          state.groups.length === 0
-            ? t('page.empty')
-            : countModels(groups) === 0
-              ? t('composer.empty')
-              : t('composer.noResults')
-
-        const onMenuKeyDown = (event) => {
-          if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-          const menu = menuRef.current
-          if (menu === null) return
-          const nodes = Array.from(menu.querySelectorAll('[role="menuitemradio"]:not(:disabled)'))
-          if (nodes.length === 0) return
-          event.preventDefault()
-          const index = nodes.indexOf(document.activeElement)
-          const delta = event.key === 'ArrowDown' ? 1 : -1
-          const next = index < 0 ? (delta > 0 ? 0 : nodes.length - 1) : (index + delta + nodes.length) % nodes.length
-          nodes[next].focus()
-        }
-
-        const menu =
-          open && typeof document !== 'undefined'
-            ? ReactDOM.createPortal(
-                h(
-                  'div',
-                  {
-                    ref: menuRef,
-                    className: 'mv_menu',
-                    role: 'menu',
-                    'aria-label': t('composer.menuLabel'),
-                    style: {
-                      left: pos === null ? 0 : pos.left,
-                      top: pos === null ? 0 : pos.top,
-                      visibility: pos === null ? 'hidden' : 'visible',
-                    },
-                    onKeyDown: onMenuKeyDown,
-                  },
-                  showSearch
-                    ? h(
-                        'div',
-                        { className: 'mv_searchRow' },
-                        h('input', {
-                          ref: searchRef,
-                          className: 'mv_searchInput',
-                          type: 'text',
-                          value: query,
-                          placeholder: t('composer.search'),
-                          'aria-label': t('composer.search'),
-                          onChange: (event) => setQuery(event.target.value),
-                          onKeyDown: (event) => {
-                            if (event.key !== 'Enter') return
-                            const first = filtered[0] !== undefined ? filtered[0].models[0] : undefined
-                            if (first !== undefined) choose(filtered[0], first)
-                          },
-                        }),
-                      )
-                    : null,
-                  h(
-                    'div',
-                    { className: 'mv_scroll' },
-                    error !== null ? h('div', { className: 'mv_error', role: 'alert' }, error) : null,
-                    state.status === 'loading' && state.groups.length === 0
-                      ? h('div', { className: 'mv_status' }, t('composer.loading'))
-                      : null,
-                    state.error !== null
-                      ? h(
-                          'div',
-                          { className: 'mv_error' },
-                          h('span', null, state.error),
-                          h(
-                            'button',
-                            {
-                              type: 'button',
-                              className: 'mv_retry',
-                              onClick: () => {
-                                if (typeof load === 'function') load()
-                              },
-                            },
-                            t('page.refresh'),
-                          ),
-                        )
-                      : null,
-                    rows.length > 0 ? rows : null,
-                    rows.length === 0 && !(state.status === 'loading' && state.groups.length === 0)
-                      ? h('div', { className: 'mv_status' }, emptyText)
-                      : null,
-                  ),
-                ),
-                document.body,
-              )
-            : null
-
-        return h(
-          React.Fragment,
-          null,
-          h(
-            'div',
-            { className: 'mv_root', ref: rootRef },
-            h(
-              'button',
-              {
-                ref: triggerRef,
-                type: 'button',
-                className: 'mv_trigger',
-                disabled: locked === true,
-                'aria-haspopup': 'menu',
-                'aria-expanded': open,
-                'aria-label': t('composer.selectAria', { model: currentName }),
-                onClick: () => {
-                  if (open) {
-                    close(true)
-                    return
-                  }
-                  setError(null)
-                  setQuery('')
-                  setOpen(true)
-                  if (typeof load === 'function') load()
-                },
-              },
-              h('span', { className: 'mv_triggerIcon' }, h(LayersIcon)),
-              h('span', { className: 'mv_triggerLabel' }, currentName),
-              effortLabel !== undefined ? h('span', { className: 'mv_triggerEffort' }, effortLabel) : null,
-              h('span', { className: 'mv_chevron' }, h(ChevronIcon)),
-            ),
-          ),
-          menu,
-        )
+        return { ...baseSnapshot, groups }
       }
+
+      const current = () => {
+        const baseSnapshot = readBase()
+        const signature = hiddenListOf(form.getSnapshot()).join('\u0000')
+        if (snapshot !== null && baseSnapshot === lastBase && signature === lastSignature) {
+          return snapshot
+        }
+        lastBase = baseSnapshot
+        lastSignature = signature
+        snapshot = build(baseSnapshot)
+        return snapshot
+      }
+
+      const emit = () => {
+        const previous = snapshot
+        const next = current()
+        if (previous === next) return
+        for (const listener of Array.from(listeners)) listener()
+      }
+
+      Object.defineProperties(store, {
+        __modelVisibilityPatched: { value: true, configurable: true },
+        getSnapshot: { value: current, configurable: true, writable: true },
+        subscribe: {
+          value(listener) {
+            listeners.add(listener)
+            const stop = subscribeBase(listener)
+            return () => {
+              listeners.delete(listener)
+              stop()
+            }
+          },
+          configurable: true,
+          writable: true,
+        },
+      })
+
+      return {
+        emit,
+        restore() {
+          Object.defineProperties(store, {
+            getSnapshot: { value: originalGet, configurable: true, writable: true },
+            subscribe: { value: originalSubscribe, configurable: true, writable: true },
+          })
+          delete store.__modelVisibilityPatched
+          listeners.clear()
+        },
+      }
+    }
+
+    /**
+     * Patch every model directory — the ones already live when the plugin
+     * applies and every directory resolved later — so the shipped seat keeps
+     * owning the trigger, the Model / Effort rows, and third-party menu
+     * enhancements such as the reasoning-effort slider.
+     */
+    function installComposerFilter(scope, form) {
+      const models = scope.modelDirectories
+      const original = models.directoryFor
+      if (typeof original !== 'function') return
+      const records = new Set()
+
+      const ensure = (directory) => {
+        if (directory === undefined || directory === null) return directory
+        const store = directory.store
+        if (store === undefined || store === null || store.__modelVisibilityPatched === true) {
+          return directory
+        }
+        try {
+          records.add(patchDirectoryStore(store, form))
+        } catch (_error) {
+          // Fail open: an unwritable store simply keeps showing every model.
+        }
+        return directory
+      }
+
+      scope.effect(() => {
+        const live = models.live && models.live.directories ? models.live.directories.values : null
+        if (live instanceof Set) for (const directory of live) ensure(directory)
+
+        const stopForm = form.subscribe(() => {
+          for (const record of records) record.emit()
+        })
+
+        const wrapper = function directoryFor(sessionId) {
+          return ensure(original.call(this, sessionId))
+        }
+        Object.defineProperty(models, 'directoryFor', {
+          value: wrapper,
+          configurable: true,
+          writable: true,
+        })
+
+        return () => {
+          stopForm()
+          for (const record of records) record.restore()
+          records.clear()
+          if (Object.getOwnPropertyDescriptor(models, 'directoryFor')?.value === wrapper) {
+            delete models.directoryFor
+          }
+        }
+      }, 'model-visibility: filtered model directory')
     }
 
     /* ----------------------------------------------------- settings page */
@@ -865,7 +522,7 @@ window.__ModuleLoader__.load({
 
     /* --------------------------------------------------------------- plugin */
 
-    const inject = ['slots', 'locale', 'configForms', 'sessions', 'remote', 'remote.session']
+    const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.session']
 
     function apply(ctx) {
       ctx.effect(() => ctx.locale.register(NS, DICT), 'model-visibility: dictionaries')
@@ -926,60 +583,11 @@ window.__ModuleLoader__.load({
         'model-visibility: settings section',
       )
 
-      ctx.inject(['slots', 'modelDirectories', 'sessions'], (scope) => {
-        const models = scope.modelDirectories
-        const sessions = scope.sessions
-        const Select = makeSelect(form)
-
-        scope.effect(
-          () =>
-            scope.slots.inject(MODEL_SLOT, () =>
-              scope.slots.register(
-                {
-                  name: MODEL_SLOT,
-                  // Lowest priority wins the single-slot seat, so this occupant
-                  // shadows the shipped selector while the plugin is loaded.
-                  priority: -1,
-                  locale: NS,
-                  inject: (sessionId) => {
-                    let directory
-                    try {
-                      directory = models.directoryFor(sessionId)
-                    } catch (_error) {
-                      directory = undefined
-                    }
-                    if (directory === undefined) {
-                      return {
-                        available: false,
-                        store: IDLE_STORE,
-                        load: () => {},
-                        select: () => Promise.resolve(undefined),
-                      }
-                    }
-                    const available =
-                      typeof sessions.subagentAddress === 'function'
-                        ? sessions.subagentAddress(sessionId) === undefined
-                        : true
-                    return {
-                      available,
-                      store: directory.store,
-                      load: () => {
-                        if (available) directory.load().catch(() => {})
-                      },
-                      select: (selection) =>
-                        available ? directory.select(selection) : Promise.resolve(undefined),
-                    }
-                  },
-                },
-                Select,
-              ),
-            ),
-          'model-visibility: composer model seat',
-        )
+      ctx.inject(['modelDirectories'], (scope) => {
+        installComposerFilter(scope, form)
       })
     }
 
     return { inject, apply }
   },
 })
-
