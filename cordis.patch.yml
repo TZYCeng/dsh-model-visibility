@@ -1,0 +1,7 @@
+# dsh-model-visibility: one Host row owns the `model-visibility` settings
+# namespace (the persisted list of hidden models); package.json's dsh.client
+# declares the browser half, which binds to this same row id.
+- insert:
+    - id: model-visibility
+      name: dsh-model-visibility
+      config: {}

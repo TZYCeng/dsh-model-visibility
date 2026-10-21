@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Visibility",
+    "description": "Choose which models appear in the chat composer's model list, and show or hide a whole provider group at once."
+  }
+}
