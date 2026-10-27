@@ -12,13 +12,24 @@ window.__ModuleLoader__.load({
     const FIELD = 'hidden'
     /** Settings section id. */
     const SECTION_ID = 'model-visibility'
+    /**
+     * Same-origin route the Host half registers through `connection.fetch`.
+     * Resolved against the page base so a reverse-proxy prefix is preserved.
+     */
+    const API = (() => {
+      try {
+        return new URL('api/dsh-model-visibility', document.baseURI).pathname
+      } catch (_error) {
+        return '/api/dsh-model-visibility'
+      }
+    })()
 
     const DICT = {
       zh: {
         'nav': '模型显示',
         'page.title': '模型显示',
         'page.description':
-          '关闭的模型不会出现在聊天输入框的模型下拉列表中；这里的改动立即生效，之后仍可随时重新打开。',
+          '关闭的模型不会出现在聊天输入框的模型下拉列表中；这里的改动立即生效，之后仍可随时重新打开。每个模型还单独标注推理支持、思考强度、上下文窗口与多模态能力。',
         'page.summary': '已显示 {visible} / {total} 个模型',
         'page.hiddenSummary': '已关闭 {count} 个',
         'page.loading': '正在加载模型列表…',
@@ -27,15 +38,42 @@ window.__ModuleLoader__.load({
         'page.saveFailed': '保存失败，请重试。',
         'page.refresh': '刷新',
         'page.showAll': '全部显示',
+        'page.legend':
+          '标签说明：推理 = 可调推理等级；思考强度 = 额度档位；上下文 = 输入窗口；多模态 = 可输入图像。悬停标签可看详情。',
+        'page.metaFallback':
+          '模型能力信息暂不可用：上下文与模态显示为未知，推理档位仍来自官方目录。',
+        'page.providerFailures': '部分提供方暂时读不到模型：{names}',
         'group.showAll': '全组显示',
         'group.hideAll': '全组隐藏',
+        'group.capabilities': '{reasoning} 支持推理 · {multimodal} 多模态',
+        'tag.reasoning': '支持推理',
+        'tag.noReasoning': '不支持推理',
+        'tag.reasoningUnknown': '推理未知',
+        'tag.effort': '思考强度',
+        'tag.context': '上下文',
+        'tag.unknown': '未知',
+        'tag.multimodal': '多模态',
+        'tag.textOnly': '纯文本',
+        'tag.modalityUnknown': '模态未知',
+        'tag.reasoningTitle': '支持推理，可用档位：{levels}',
+        'tag.effortTitle': '可用档位：{levels}；默认：{fallback}',
+        'tag.effortTitleNoFallback': '可用档位：{levels}',
+        'tag.contextTitle': '上下文窗口 {tokens} tokens',
+        'tag.modalityTitle': '输入模态：{modalities}',
+        'tag.unknownTitle': '适配器没有公布这项信息',
+        'tag.infoErrorTitle': '模型能力读取失败：{message}',
+        'modality.text': '文本',
+        'modality.image': '图像',
+        'modality.audio': '音频',
+        'modality.video': '视频',
+        'modality.file': '文件',
         'provider.account': 'DeepSeek 账号',
       },
       en: {
         'nav': 'Model visibility',
         'page.title': 'Model visibility',
         'page.description':
-          'Models turned off here disappear from the chat composer model list. Changes apply immediately and can be turned back on at any time.',
+          'Models turned off here disappear from the chat composer model list. Changes apply immediately and can be turned back on at any time. Each model also shows its reasoning support, effort levels, context window and multimodal capability.',
         'page.summary': 'Showing {visible} of {total} models',
         'page.hiddenSummary': '{count} hidden',
         'page.loading': 'Loading model list…',
@@ -44,8 +82,35 @@ window.__ModuleLoader__.load({
         'page.saveFailed': 'Could not save this change. Try again.',
         'page.refresh': 'Refresh',
         'page.showAll': 'Show all',
+        'page.legend':
+          'Tags: Reasoning = adjustable levels; Effort = published levels; Context = input window; Multimodal = accepts images. Hover a tag for details.',
+        'page.metaFallback':
+          'Model capability details are unavailable right now: context and modalities show as unknown, while effort levels still come from the shipped catalog.',
+        'page.providerFailures': 'Some providers could not be read: {names}',
         'group.showAll': 'Show all',
         'group.hideAll': 'Hide all',
+        'group.capabilities': '{reasoning} reasoning · {multimodal} multimodal',
+        'tag.reasoning': 'Reasoning',
+        'tag.noReasoning': 'No reasoning',
+        'tag.reasoningUnknown': 'Reasoning unknown',
+        'tag.effort': 'Effort',
+        'tag.context': 'Context',
+        'tag.unknown': 'unknown',
+        'tag.multimodal': 'Multimodal',
+        'tag.textOnly': 'Text only',
+        'tag.modalityUnknown': 'Modality unknown',
+        'tag.reasoningTitle': 'Reasoning supported; levels: {levels}',
+        'tag.effortTitle': 'Available levels: {levels}; default: {fallback}',
+        'tag.effortTitleNoFallback': 'Available levels: {levels}',
+        'tag.contextTitle': 'Context window {tokens} tokens',
+        'tag.modalityTitle': 'Input modalities: {modalities}',
+        'tag.unknownTitle': 'The adapter does not publish this fact',
+        'tag.infoErrorTitle': 'Could not read model capabilities: {message}',
+        'modality.text': 'text',
+        'modality.image': 'image',
+        'modality.audio': 'audio',
+        'modality.video': 'video',
+        'modality.file': 'file',
         'provider.account': 'DeepSeek Account',
       },
     }
@@ -77,6 +142,14 @@ window.__ModuleLoader__.load({
 .mvp_switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .mvp_thumb{position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-secondary);transition:transform .15s ease,background-color .15s ease}
 .mvp_switch[aria-checked="true"] .mvp_thumb{background:var(--dsw-alias-label-primary);transform:translateX(16px)}
+.mvp_tags{flex-wrap:wrap;align-items:center;gap:4px;margin-top:4px;display:flex}
+.mvp_tag{box-sizing:border-box;max-width:100%;height:18px;color:var(--dsw-alias-label-secondary);white-space:nowrap;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:4px;align-items:center;padding:0 6px;font-size:11px;line-height:16px;display:inline-flex;overflow:hidden;text-overflow:ellipsis}
+.mvp_tag--accent{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent)}
+.mvp_tag--vision{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent)}
+.mvp_tag--muted{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l1)}
+.mvp_groupCap{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:400;line-height:16px}
+.mvp_legend{color:var(--dsw-alias-label-tertiary);flex:none;padding:8px 0 2px;font-size:11px;line-height:16px}
+.mvp_fallback{color:var(--dsw-alias-label-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);border-radius:var(--dsw-radius-sm,6px);padding:6px 8px;font-size:11px;line-height:16px;margin-top:8px}
 `
 
     /* ---------------------------------------------------------------- data */
@@ -102,6 +175,108 @@ window.__ModuleLoader__.load({
       return total
     }
 
+    /** Human context size: 1048576 → "1M", 128000 → "128K". */
+    function formatContext(tokens) {
+      if (!Number.isFinite(tokens) || tokens <= 0) return null
+      if (tokens >= 1_000_000) return Math.round(tokens / 100_000) / 10 + 'M'
+      if (tokens >= 1_000) return Math.round(tokens / 100) / 10 + 'K'
+      return String(tokens)
+    }
+
+    /** Effort display names in catalog order. */
+    function effortNames(reasoning) {
+      const efforts = reasoning && Array.isArray(reasoning.efforts) ? reasoning.efforts : []
+      const names = []
+      for (const effort of efforts) {
+        if (effort === null || typeof effort !== 'object') continue
+        const label = effort.name || effort.id
+        if (typeof label === 'string' && label !== '') names.push(label)
+      }
+      return names
+    }
+
+    /** Display name of the default effort, or null when none is published. */
+    function defaultEffortName(reasoning) {
+      if (!reasoning || typeof reasoning.defaultEffort !== 'string') return null
+      const efforts = Array.isArray(reasoning.efforts) ? reasoning.efforts : []
+      const found = efforts.find((effort) => effort !== null && effort.id === reasoning.defaultEffort)
+      return found && typeof found.name === 'string' && found.name !== ''
+        ? found.name
+        : reasoning.defaultEffort
+    }
+
+    /** Localized name of one input modality. */
+    function modalityLabel(id, t) {
+      const key = 'modality.' + id
+      const label = t(key)
+      return label === key ? id : label
+    }
+
+    /**
+     * Per-model capability tags. The same model may know only part of its
+     * capabilities: an adapter that cannot answer produces `infoError`, and the
+     * unknown facts are shown as such instead of being guessed.
+     */
+    function capabilityTags(model, t) {
+      const tags = []
+      const reasoning = model.reasoning
+      const levels = effortNames(reasoning)
+      const errorTitle =
+        typeof model.infoError === 'string' && model.infoError !== ''
+          ? t('tag.infoErrorTitle', { message: model.infoError })
+          : t('tag.unknownTitle')
+
+      if (levels.length > 0) {
+        tags.push({
+          key: 'reasoning',
+          tone: 'accent',
+          label: t('tag.reasoning'),
+          title: t('tag.reasoningTitle', { levels: levels.join(' / ') }),
+        })
+        const fallback = defaultEffortName(reasoning)
+        tags.push({
+          key: 'effort',
+          tone: 'neutral',
+          label: t('tag.effort') + ' ' + levels.join('/'),
+          title:
+            fallback === null
+              ? t('tag.effortTitleNoFallback', { levels: levels.join(' / ') })
+              : t('tag.effortTitle', { levels: levels.join(' / '), fallback }),
+        })
+      } else if (typeof model.infoError === 'string') {
+        tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.reasoningUnknown'), title: errorTitle })
+      } else {
+        tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.noReasoning'), title: t('tag.unknownTitle') })
+      }
+
+      const context = formatContext(model.contextWindow)
+      tags.push({
+        key: 'context',
+        tone: context === null ? 'muted' : 'neutral',
+        label: t('tag.context') + ' ' + (context === null ? t('tag.unknown') : context),
+        title:
+          context === null
+            ? errorTitle
+            : t('tag.contextTitle', { tokens: Number(model.contextWindow).toLocaleString() }),
+      })
+
+      const modalities = Array.isArray(model.inputModalities) ? model.inputModalities : null
+      if (modalities === null || modalities.length === 0) {
+        tags.push({ key: 'modality', tone: 'muted', label: t('tag.modalityUnknown'), title: errorTitle })
+      } else {
+        const vision = modalities.includes('image')
+        tags.push({
+          key: 'modality',
+          tone: vision ? 'vision' : 'neutral',
+          label: vision ? t('tag.multimodal') : t('tag.textOnly'),
+          title: t('tag.modalityTitle', {
+            modalities: modalities.map((id) => modalityLabel(id, t)).join(' / '),
+          }),
+        })
+      }
+      return tags
+    }
+
     function subscribeOf(source) {
       return (fn) => source.subscribe(fn)
     }
@@ -125,7 +300,15 @@ window.__ModuleLoader__.load({
     /** Host-generation catalog, shared by the settings page. */
     function createCatalog(ctx) {
       const listeners = new Set()
-      let state = { status: 'idle', groups: [], failures: [], error: null }
+      let state = {
+        status: 'idle',
+        groups: [],
+        failures: [],
+        error: null,
+        detailsError: null,
+        source: null,
+        generatedAt: 0,
+      }
       let inflight = null
 
       const publish = (next) => {
@@ -133,40 +316,90 @@ window.__ModuleLoader__.load({
         for (const listener of listeners) listener()
       }
 
-      const load = () => {
+      /** Message of a failed Remote envelope. */
+      const failureMessage = (response) => {
+        const failure = response && response.error
+        return failure
+          ? String(failure.code) + ': ' + String(failure.message)
+          : 'unknown error'
+      }
+
+      /**
+       * Read the enriched catalog from the Host half. It carries the same
+       * groups as `session.modelCatalog` plus context windows and modalities.
+       */
+      const fetchHostCatalog = async (fresh) => {
+        const response = await fetch(API + '/models' + (fresh ? '?fresh=1' : ''), {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          redirect: 'error',
+        })
+        if (!response.ok) throw new Error('HTTP ' + response.status)
+        const body = await response.json()
+        const value = body && body.ok === true ? body.value : null
+        if (value === null || !Array.isArray(value.groups)) {
+          throw new Error('malformed capability catalog')
+        }
+        return value
+      }
+
+      /** Read the shipped catalog; the fallback when the route is unavailable. */
+      const fetchOfficialCatalog = async () => {
+        const response = await ctx.remote.session.modelCatalog()
+        if (!response || response.ok !== true) throw new Error(failureMessage(response))
+        const value = response.value || {}
+        return {
+          groups: Array.isArray(value.groups) ? value.groups : [],
+          failures: Array.isArray(value.failures) ? value.failures : [],
+          generatedAt: 0,
+        }
+      }
+
+      const load = (options) => {
         if (inflight !== null) return inflight
         if (state.status !== 'ready') {
           publish({ ...state, status: 'loading', error: null })
         }
-        inflight = Promise.resolve()
-          .then(() => ctx.remote.session.modelCatalog())
-          .then((response) => {
-            if (!response || response.ok !== true) {
-              const failure = response && response.error
-              const message = failure
-                ? String(failure.code) + ': ' + String(failure.message)
-                : 'unknown error'
-              publish({ ...state, status: 'error', error: message })
-              return
-            }
-            const value = response.value || {}
+        const fresh = options !== null && typeof options === 'object' && options.fresh === true
+        inflight = (async () => {
+          try {
+            const value = await fetchHostCatalog(fresh)
             publish({
               status: 'ready',
               groups: Array.isArray(value.groups) ? value.groups : [],
               failures: Array.isArray(value.failures) ? value.failures : [],
               error: null,
+              detailsError: null,
+              source: 'host',
+              generatedAt: Number.isFinite(value.generatedAt) ? value.generatedAt : 0,
             })
-          })
-          .catch((error) => {
-            publish({
-              ...state,
-              status: 'error',
-              error: String(error && error.message ? error.message : error),
-            })
-          })
-          .finally(() => {
+            return
+          } catch (detailError) {
+            const detail = String(detailError && detailError.message ? detailError.message : detailError)
+            try {
+              const value = await fetchOfficialCatalog()
+              publish({
+                status: 'ready',
+                groups: value.groups,
+                failures: value.failures,
+                error: null,
+                detailsError: detail,
+                source: 'catalog',
+                generatedAt: value.generatedAt,
+              })
+            } catch (error) {
+              publish({
+                ...state,
+                status: 'error',
+                error: String(error && error.message ? error.message : error),
+              })
+            }
+          } finally {
             inflight = null
-          })
+          }
+        })()
         return inflight
       }
 
@@ -182,7 +415,7 @@ window.__ModuleLoader__.load({
         },
         load,
         refresh() {
-          return load()
+          return load({ fresh: true })
         },
       }
     }
@@ -403,6 +636,10 @@ window.__ModuleLoader__.load({
           const models = group.models || []
           const shown = models.filter((model) => !hidden.has(keyOf(group.id, model.id))).length
           const allShown = shown === models.length
+          const reasoningCount = models.filter((model) => model.reasoning !== undefined).length
+          const multimodalCount = models.filter(
+            (model) => Array.isArray(model.inputModalities) && model.inputModalities.includes('image'),
+          ).length
           rows.push(
             h(
               'div',
@@ -415,6 +652,16 @@ window.__ModuleLoader__.load({
                   { className: 'mvp_groupTitle' },
                   h('span', null, providerLabel(group, t)),
                   h('span', { className: 'mvp_groupCount' }, shown + '/' + models.length),
+                  reasoningCount > 0 || multimodalCount > 0
+                    ? h(
+                        'span',
+                        { className: 'mvp_groupCap' },
+                        t('group.capabilities', {
+                          reasoning: reasoningCount,
+                          multimodal: multimodalCount,
+                        }),
+                      )
+                    : null,
                 ),
                 h(
                   'button',
@@ -429,6 +676,7 @@ window.__ModuleLoader__.load({
               ),
               models.map((model) => {
                 const shownModel = !hidden.has(keyOf(group.id, model.id))
+                const tags = capabilityTags(model, t)
                 return h(
                   'div',
                   { key: model.id, className: 'mvp_row' },
@@ -439,6 +687,29 @@ window.__ModuleLoader__.load({
                     model.id === model.name
                       ? null
                       : h('div', { className: 'mvp_rowMeta' }, model.id),
+                    h(
+                      'div',
+                      { className: 'mvp_tags' },
+                      tags.map((tag) =>
+                        h(
+                          'span',
+                          {
+                            key: tag.key,
+                            className:
+                              'mvp_tag' +
+                              (tag.tone === 'accent'
+                                ? ' mvp_tag--accent'
+                                : tag.tone === 'vision'
+                                  ? ' mvp_tag--vision'
+                                  : tag.tone === 'muted'
+                                    ? ' mvp_tag--muted'
+                                    : ''),
+                            title: tag.title || undefined,
+                          },
+                          tag.label,
+                        ),
+                      ),
+                    ),
                   ),
                   h(
                     'button',
@@ -502,12 +773,32 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'mvp_button',
                   disabled: busy,
-                  onClick: () => catalog.load(),
+                  onClick: () => catalog.refresh(),
                 },
                 t('page.refresh'),
               ),
             ),
           ),
+          h('div', { className: 'mvp_legend' }, t('page.legend')),
+          state.detailsError !== null && state.source === 'catalog'
+            ? h('div', { className: 'mvp_fallback' }, t('page.metaFallback'))
+            : null,
+          state.failures.length > 0
+            ? h(
+                'div',
+                {
+                  className: 'mvp_fallback',
+                  title: state.failures
+                    .map((failure) => (failure.name || failure.id) + ': ' + failure.message)
+                    .join('\n'),
+                },
+                t('page.providerFailures', {
+                  names: state.failures
+                    .map((failure) => failure.name || failure.id)
+                    .join(' · '),
+                }),
+              )
+            : null,
           error !== null ? h('div', { className: 'mvp_error', role: 'alert' }, error) : null,
           state.error !== null
             ? h('div', { className: 'mvp_error', role: 'alert' }, t('page.error', { message: state.error }))
@@ -548,11 +839,27 @@ window.__ModuleLoader__.load({
           }),
         )
         if (ctx.remote !== undefined && typeof ctx.remote.$on === 'function') {
+          // A route change can alter capabilities (an adapter may report a new
+          // effort ladder), so that read bypasses the Host-side cache.
           disposers.push(
             ctx.remote.$on('llm/adapters-updated', () => {
               catalog.refresh()
             }),
           )
+          // Settings and credential writes can also change what the registry
+          // knows, but hiding a model writes settings too — a normal read lets
+          // the Host cache absorb that write instead of re-probing every model.
+          for (const event of [
+            'settings/document-updated',
+            'credentials/record-updated',
+            'credentials/reference-updated',
+          ]) {
+            disposers.push(
+              ctx.remote.$on(event, () => {
+                catalog.load()
+              }),
+            )
+          }
         }
         return () => {
           for (const dispose of disposers) {

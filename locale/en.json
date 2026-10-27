@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Model Visibility",
-    "description": "Choose which models appear in the chat composer's model list, and show or hide a whole provider group at once."
+    "description": "Choose which models appear in the chat composer's model list, toggle whole provider groups at once, and read each model's reasoning support, effort levels, context window and multimodal inputs."
   }
 }

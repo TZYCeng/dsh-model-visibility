@@ -26,6 +26,8 @@ import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
+import { createModelInfoService } from './lib/model-info.js'
+
 /** Settings namespace this entry owns; also the loader row id. */
 const ENTRY = 'model-visibility'
 /** Config field carrying the hidden model keys. */
@@ -33,6 +35,8 @@ const FIELD = 'hidden'
 /** Shadow store location below `$DSH_HOME`. */
 const STORE_DIR = 'dsh-model-visibility'
 const STORE_FILE = 'hidden.json'
+/** Authenticated same-origin route prefix used by the settings page. */
+const API = '/api/dsh-model-visibility'
 
 /** Absolute path of the shadow copy. */
 function storeFile() {
@@ -151,4 +155,91 @@ export function apply(ctx, config) {
     persist()
     return () => persist()
   }, 'model-visibility: shadow baseline')
+
+  // The capability catalog is a read-only projection of the live LLM registry.
+  // It is served over an authenticated same-origin route because the shipped
+  // `session.modelCatalog` projection drops context windows and modalities.
+  ctx.inject(['llm', 'connection'], (scope) => {
+    const connection = scope.connection
+    if (scope.llm === undefined) {
+      if (typeof logger.warn === 'function') {
+        logger.warn('model-visibility: llm service unavailable; capability route not registered')
+      }
+      return
+    }
+    if (connection === undefined || typeof connection.fetch?.register !== 'function') {
+      if (typeof logger.warn === 'function') {
+        logger.warn('model-visibility: connection.fetch unavailable; capability route not registered')
+      }
+      return
+    }
+
+    const service = createModelInfoService(scope.llm)
+
+    /** Answer with JSON; the route is diagnostics-friendly on purpose. */
+    const json = (value, status = 200) =>
+      new Response(JSON.stringify(value), {
+        status,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      })
+
+    scope.effect(
+      () =>
+        connection.fetch.register({
+          path: `${API}/models`,
+          methods: ['GET'],
+          requestBody: 'buffered',
+          async fetch(request) {
+            let fresh = false
+            try {
+              fresh = new URL(request.url).searchParams.get('fresh') !== null
+            } catch (_error) {
+              // A malformed URL simply means "use the cached read".
+            }
+            try {
+              return json({ ok: true, value: await service.read({ fresh }) })
+            } catch (error) {
+              if (typeof logger.warn === 'function') {
+                logger.warn('model-visibility: capability probe failed')
+                logger.warn(error)
+              }
+              return json(
+                {
+                  ok: false,
+                  error: {
+                    code: 'model-info/failed',
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                },
+                500,
+              )
+            }
+          },
+        }),
+      'model-visibility: capability route',
+    )
+
+    // A route/credential change invalidates both the probe cache and any page
+    // that is already open; the browser mirrors the same two events.
+    scope.effect(() => {
+      const offs = []
+      const invalidate = () => service.invalidate()
+      if (typeof scope.on === 'function') {
+        offs.push(scope.on('llm/adapters-updated', invalidate))
+        offs.push(scope.on('settings/document-updated', invalidate))
+      }
+      return () => {
+        for (const off of offs) {
+          try {
+            if (typeof off === 'function') off()
+          } catch (_error) {
+            // The service may already be gone during teardown.
+          }
+        }
+      }
+    }, 'model-visibility: capability cache')
+  })
 }
