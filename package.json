@@ -1,9 +1,9 @@
 {
   "name": "dsh-model-visibility",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
-  "description": "Choose which models appear in the chat composer's model list, with per-provider group show/hide and per-model capability tags (reasoning support, reasoning efforts, context window, multimodal inputs).",
+  "description": "Choose which models appear in the chat composer's model list, with per-provider groups, per-model capability tags sourced from the adapter, the relay model list and a built-in catalog, and separate labels for image/video generation models.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -19,7 +19,8 @@
     "icon.svg"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "catalog": "node scripts/build-catalog.mjs"
   },
   "dsh": {
     "bundle": {

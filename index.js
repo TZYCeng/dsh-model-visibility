@@ -27,6 +27,7 @@ import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import { createModelInfoService } from './lib/model-info.js'
+import { createProviderProbe } from './lib/provider-probe.js'
 
 /** Settings namespace this entry owns; also the loader row id. */
 const ENTRY = 'model-visibility'
@@ -78,6 +79,8 @@ const RESTORED = readStored()
 /** Model keys the composer must stop offering, in the order they were hidden. */
 export const Config = z.object({
   hidden: z.array(z.string()).default(RESTORED).volatile(),
+  /** Probe relay endpoints for capability metadata (set MODEL_VISIBILITY_PROBE=0 to disable). */
+  probe: z.boolean().default(true),
 })
 
 /**
@@ -156,9 +159,11 @@ export function apply(ctx, config) {
     return () => persist()
   }, 'model-visibility: shadow baseline')
 
-  // The capability catalog is a read-only projection of the live LLM registry.
-  // It is served over an authenticated same-origin route because the shipped
-  // `session.modelCatalog` projection drops context windows and modalities.
+  // The capability catalog is a read-only projection of the live LLM registry,
+  // enriched with the provider profile (settings) and the relay's own model
+  // listing. It is served over an authenticated same-origin route because the
+  // shipped `session.modelCatalog` projection drops context windows and
+  // modalities, and a custom relay reports `input: []` for almost everything.
   ctx.inject(['llm', 'connection'], (scope) => {
     const connection = scope.connection
     if (scope.llm === undefined) {
@@ -174,7 +179,19 @@ export function apply(ctx, config) {
       return
     }
 
-    const service = createModelInfoService(scope.llm)
+    // Optional services: without them the page still renders adapter + catalog
+    // facts, it just cannot probe relay endpoints.
+    const settings = typeof scope.get === 'function' ? scope.get('settings') : undefined
+    const credentials = typeof scope.get === 'function' ? scope.get('credentials') : undefined
+    const probeEnabled = config?.probe !== false && process.env.MODEL_VISIBILITY_PROBE !== '0'
+    const probe =
+      probeEnabled && settings !== undefined
+        ? createProviderProbe({ settings, credentials, logger })
+        : null
+
+    const service = createModelInfoService(scope.llm, {
+      enrichment: probe === null ? undefined : ({ fresh }) => probe.read({ fresh }),
+    })
 
     /** Answer with JSON; the route is diagnostics-friendly on purpose. */
     const json = (value, status = 200) =>
@@ -222,14 +239,30 @@ export function apply(ctx, config) {
       'model-visibility: capability route',
     )
 
-    // A route/credential change invalidates both the probe cache and any page
-    // that is already open; the browser mirrors the same two events.
+    // A route/credential change invalidates both the capability cache and (when
+    // it actually changed routing facts) the relay-probe cache. Ordinary
+    // settings writes — hiding one model — only invalidate the capability
+    // snapshot, so a toggle never fans out into a network sweep.
     scope.effect(() => {
       const offs = []
-      const invalidate = () => service.invalidate()
+      const invalidateAll = () => {
+        service.invalidate()
+        probe?.invalidate()
+      }
+      const noteSettings = () => {
+        service.invalidate()
+        probe?.noteSettingsChanged()
+      }
       if (typeof scope.on === 'function') {
-        offs.push(scope.on('llm/adapters-updated', invalidate))
-        offs.push(scope.on('settings/document-updated', invalidate))
+        offs.push(scope.on('llm/adapters-updated', invalidateAll))
+        offs.push(scope.on('settings/document-updated', noteSettings))
+        for (const event of ['credentials/record-updated', 'credentials/reference-updated']) {
+          try {
+            offs.push(scope.on(event, invalidateAll))
+          } catch (_error) {
+            // Older hosts do not emit every credential event.
+          }
+        }
       }
       return () => {
         for (const off of offs) {

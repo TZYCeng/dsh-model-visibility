@@ -29,23 +29,40 @@ window.__ModuleLoader__.load({
         'nav': '模型显示',
         'page.title': '模型显示',
         'page.description':
-          '关闭的模型不会出现在聊天输入框的模型下拉列表中；这里的改动立即生效，之后仍可随时重新打开。每个模型还单独标注推理支持、思考强度、上下文窗口与多模态能力。',
+          '关闭的模型不会出现在聊天输入框的模型下拉列表中；这里的改动立即生效，之后仍可随时重新打开。每个模型标注真实能力：适配器声明优先，其次读中转站的模型列表，再用内置目录补全；生图、生视频等生成类模型单独标记。',
         'page.summary': '已显示 {visible} / {total} 个模型',
         'page.hiddenSummary': '已关闭 {count} 个',
+        'page.kindSummary': '{count} 个生图/生视频模型',
         'page.loading': '正在加载模型列表…',
         'page.empty': '暂无可用模型。',
+        'page.filterEmpty': '当前筛选下没有模型。',
         'page.error': '模型列表加载失败：{message}',
         'page.saveFailed': '保存失败，请重试。',
         'page.refresh': '刷新',
         'page.showAll': '全部显示',
         'page.legend':
-          '标签说明：推理 = 可调推理等级；思考强度 = 额度档位；上下文 = 输入窗口；多模态 = 可输入图像。悬停标签可看详情。',
+          '标签说明：推理 = 可调推理等级；上下文 = 输入窗口；多模态 = 可输入图像。实线标签来自适配器或中转站，虚线标签来自内置目录或模型名推断。生图 / 生视频 / 嵌入等模型只标类型，不显示思考强度与文本标签。',
         'page.metaFallback':
           '模型能力信息暂不可用：上下文与模态显示为未知，推理档位仍来自官方目录。',
         'page.providerFailures': '部分提供方暂时读不到模型：{names}',
+        'page.probeSummary': '中转站探测：{ok} 个已读取模型列表，{caps} 个公布了能力字段',
+        'page.probeSummaryNone': '中转站探测：暂无可读取的路由配置',
+        'page.catalogNote': '内置目录：pi-ai {version} 快照（{date}），共 {models} 个模型',
+        'page.filterLabel': '筛选',
+        'page.filter.all': '全部',
+        'page.filter.chat': '对话',
+        'page.filter.image': '生图',
+        'page.filter.video': '生视频',
+        'page.filter.other': '其它',
         'group.showAll': '全组显示',
         'group.hideAll': '全组隐藏',
-        'group.capabilities': '{reasoning} 支持推理 · {multimodal} 多模态',
+        'group.showFiltered': '显示筛选结果',
+        'group.hideFiltered': '隐藏筛选结果',
+        'group.capabilities': '{chat} 对话 · {image} 生图 · {video} 生视频 · {other} 其它',
+        'group.probeOk': '中转站 {models} 个模型 · {caps} 个带能力字段',
+        'group.probeNoCaps': '中转站 {models} 个模型 · 未公布能力字段',
+        'group.probeFailed': '中转站读取失败',
+        'group.probeSkipped': '未探测中转站',
         'tag.reasoning': '支持推理',
         'tag.noReasoning': '不支持推理',
         'tag.reasoningUnknown': '推理未知',
@@ -55,13 +72,36 @@ window.__ModuleLoader__.load({
         'tag.multimodal': '多模态',
         'tag.textOnly': '纯文本',
         'tag.modalityUnknown': '模态未知',
-        'tag.reasoningTitle': '支持推理，可用档位：{levels}',
-        'tag.effortTitle': '可用档位：{levels}；默认：{fallback}',
-        'tag.effortTitleNoFallback': '可用档位：{levels}',
-        'tag.contextTitle': '上下文窗口 {tokens} tokens',
-        'tag.modalityTitle': '输入模态：{modalities}',
-        'tag.unknownTitle': '适配器没有公布这项信息',
+        'tag.kind.image': '生图',
+        'tag.kind.video': '生视频',
+        'tag.kind.embedding': '嵌入',
+        'tag.kind.rerank': '重排',
+        'tag.kind.audio': '音频',
+        'tag.kind.classifier': '审核',
+        'tag.kind.translation': '翻译',
+        'tag.kind.unknown': '模型',
+        'tag.kindTitle': '模型类型：{kind}；类型来源：{source}',
+        'tag.kindImageTitle': '图像生成模型（输出图像）；类型来源：{source}',
+        'tag.kindVideoTitle': '视频生成模型（输出视频）；类型来源：{source}',
+        'tag.resolution': '分辨率',
+        'tag.resolutionTitle': '模型名标注了 {value} 输出档位',
+        'tag.imageInput': '可改图',
+        'tag.imageInputTitle': '支持图像输入（图生图 / 参考图）',
+        'tag.reasoningTitle': '支持推理，可用档位：{levels}（来源：{source}）',
+        'tag.reasoningCatalogTitle': '支持推理；适配器未公布档位，此结论来自{source}',
+        'tag.effortTitle': '可用档位：{levels}；默认：{fallback}（来源：{source}）',
+        'tag.effortTitleNoFallback': '可用档位：{levels}（来源：{source}）',
+        'tag.contextTitle': '上下文窗口 {tokens} tokens；来源：{source}',
+        'tag.modalityTitle': '输入模态：{modalities}；来源：{source}',
+        'tag.outputTitle': '输出模态：{modalities}；来源：{source}',
+        'tag.unknownTitle': '适配器与中转站都没有公布这项信息',
         'tag.infoErrorTitle': '模型能力读取失败：{message}',
+        'source.config': '适配器配置',
+        'source.adapter': '适配器',
+        'source.provider': '中转站模型列表',
+        'source.catalog': '内置模型目录',
+        'source.inferred': '模型名推断',
+        'source.unknown': '未知',
         'modality.text': '文本',
         'modality.image': '图像',
         'modality.audio': '音频',
@@ -73,23 +113,40 @@ window.__ModuleLoader__.load({
         'nav': 'Model visibility',
         'page.title': 'Model visibility',
         'page.description':
-          'Models turned off here disappear from the chat composer model list. Changes apply immediately and can be turned back on at any time. Each model also shows its reasoning support, effort levels, context window and multimodal capability.',
+          'Models turned off here disappear from the chat composer model list. Changes apply immediately and can be turned back on at any time. Every model shows its real capabilities: adapter declarations first, then the relay model list, then a built-in catalog; image, video and other generation models are labelled separately.',
         'page.summary': 'Showing {visible} of {total} models',
         'page.hiddenSummary': '{count} hidden',
+        'page.kindSummary': '{count} image/video models',
         'page.loading': 'Loading model list…',
         'page.empty': 'No models available.',
+        'page.filterEmpty': 'No models match this filter.',
         'page.error': 'Could not load the model list: {message}',
         'page.saveFailed': 'Could not save this change. Try again.',
         'page.refresh': 'Refresh',
         'page.showAll': 'Show all',
         'page.legend':
-          'Tags: Reasoning = adjustable levels; Effort = published levels; Context = input window; Multimodal = accepts images. Hover a tag for details.',
+          'Tags: Reasoning = adjustable levels; Context = input window; Multimodal = accepts images. Solid tags come from the adapter or the relay; dashed tags come from the built-in catalog or the model name. Image, video, embedding and other generation models show only their kind, never effort or text tags.',
         'page.metaFallback':
           'Model capability details are unavailable right now: context and modalities show as unknown, while effort levels still come from the shipped catalog.',
         'page.providerFailures': 'Some providers could not be read: {names}',
+        'page.probeSummary': 'Relay probe: {ok} model lists read, {caps} published capability fields',
+        'page.probeSummaryNone': 'Relay probe: no readable route configuration',
+        'page.catalogNote': 'Built-in catalog: pi-ai {version} snapshot ({date}), {models} models',
+        'page.filterLabel': 'Filter',
+        'page.filter.all': 'All',
+        'page.filter.chat': 'Chat',
+        'page.filter.image': 'Image',
+        'page.filter.video': 'Video',
+        'page.filter.other': 'Other',
         'group.showAll': 'Show all',
         'group.hideAll': 'Hide all',
-        'group.capabilities': '{reasoning} reasoning · {multimodal} multimodal',
+        'group.showFiltered': 'Show filtered',
+        'group.hideFiltered': 'Hide filtered',
+        'group.capabilities': '{chat} chat · {image} image · {video} video · {other} other',
+        'group.probeOk': 'relay: {models} models · {caps} with capability fields',
+        'group.probeNoCaps': 'relay: {models} models · no capability fields',
+        'group.probeFailed': 'relay read failed',
+        'group.probeSkipped': 'relay not probed',
         'tag.reasoning': 'Reasoning',
         'tag.noReasoning': 'No reasoning',
         'tag.reasoningUnknown': 'Reasoning unknown',
@@ -99,13 +156,36 @@ window.__ModuleLoader__.load({
         'tag.multimodal': 'Multimodal',
         'tag.textOnly': 'Text only',
         'tag.modalityUnknown': 'Modality unknown',
-        'tag.reasoningTitle': 'Reasoning supported; levels: {levels}',
-        'tag.effortTitle': 'Available levels: {levels}; default: {fallback}',
-        'tag.effortTitleNoFallback': 'Available levels: {levels}',
-        'tag.contextTitle': 'Context window {tokens} tokens',
-        'tag.modalityTitle': 'Input modalities: {modalities}',
-        'tag.unknownTitle': 'The adapter does not publish this fact',
+        'tag.kind.image': 'Image',
+        'tag.kind.video': 'Video',
+        'tag.kind.embedding': 'Embedding',
+        'tag.kind.rerank': 'Rerank',
+        'tag.kind.audio': 'Audio',
+        'tag.kind.classifier': 'Moderation',
+        'tag.kind.translation': 'Translation',
+        'tag.kind.unknown': 'Model',
+        'tag.kindTitle': 'Model kind: {kind}; kind source: {source}',
+        'tag.kindImageTitle': 'Image generation model (outputs images); kind source: {source}',
+        'tag.kindVideoTitle': 'Video generation model (outputs video); kind source: {source}',
+        'tag.resolution': 'Resolution',
+        'tag.resolutionTitle': 'The model name advertises a {value} output tier',
+        'tag.imageInput': 'Image edit',
+        'tag.imageInputTitle': 'Accepts image input (image-to-image / reference images)',
+        'tag.reasoningTitle': 'Reasoning supported; levels: {levels} (source: {source})',
+        'tag.reasoningCatalogTitle': 'Reasoning supported; the adapter publishes no levels, so this comes from {source}',
+        'tag.effortTitle': 'Available levels: {levels}; default: {fallback} (source: {source})',
+        'tag.effortTitleNoFallback': 'Available levels: {levels} (source: {source})',
+        'tag.contextTitle': 'Context window {tokens} tokens; source: {source}',
+        'tag.modalityTitle': 'Input modalities: {modalities}; source: {source}',
+        'tag.outputTitle': 'Output modalities: {modalities}; source: {source}',
+        'tag.unknownTitle': 'Neither the adapter nor the relay publishes this fact',
         'tag.infoErrorTitle': 'Could not read model capabilities: {message}',
+        'source.config': 'adapter configuration',
+        'source.adapter': 'adapter',
+        'source.provider': 'relay model list',
+        'source.catalog': 'built-in model catalog',
+        'source.inferred': 'model name inference',
+        'source.unknown': 'unknown',
         'modality.text': 'text',
         'modality.image': 'image',
         'modality.audio': 'audio',
@@ -121,7 +201,7 @@ window.__ModuleLoader__.load({
 .mvp_title{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
 .mvp_desc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px}
 .mvp_toolbar{border-bottom:.5px solid var(--dsw-alias-border-l2);flex:none;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;display:flex}
-.mvp_summary{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.mvp_summary{color:var(--dsw-alias-label-secondary);flex:1;min-width:0;font-size:12px;line-height:18px}
 .mvp_actions{flex:none;align-items:center;gap:8px;display:flex}
 .mvp_button{box-sizing:border-box;height:28px;color:var(--dsw-alias-label-primary);cursor:pointer;background:0 0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 10px;font-family:inherit;font-size:12px;line-height:18px}
 .mvp_button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
@@ -129,9 +209,10 @@ window.__ModuleLoader__.load({
 .mvp_button:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
 .mvp_group{flex:none;flex-direction:column;display:flex}
 .mvp_groupHead{justify-content:space-between;align-items:center;gap:12px;padding:14px 0 6px;display:flex}
-.mvp_groupTitle{color:var(--dsw-alias-label-primary);align-items:baseline;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex}
+.mvp_groupTitle{color:var(--dsw-alias-label-primary);align-items:baseline;row-gap:2px;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex;flex-wrap:wrap}
 .mvp_groupCount{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}
 .mvp_row{border-bottom:.5px solid var(--dsw-alias-border-l1);justify-content:space-between;align-items:center;gap:16px;padding:10px 0;display:flex}
+.mvp_row--gen{background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
 .mvp_rowText{flex-direction:column;gap:2px;min-width:0;display:flex}
 .mvp_rowTitle{color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
 .mvp_rowMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px;overflow:hidden}
@@ -146,8 +227,18 @@ window.__ModuleLoader__.load({
 .mvp_tag{box-sizing:border-box;max-width:100%;height:18px;color:var(--dsw-alias-label-secondary);white-space:nowrap;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:4px;align-items:center;padding:0 6px;font-size:11px;line-height:16px;display:inline-flex;overflow:hidden;text-overflow:ellipsis}
 .mvp_tag--accent{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent)}
 .mvp_tag--vision{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent)}
+.mvp_tag--kind{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);font-weight:500}
+.mvp_tag--inferred{border-style:dashed}
 .mvp_tag--muted{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l1)}
 .mvp_groupCap{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:400;line-height:16px}
+.mvp_groupProbe{color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l2);border-radius:4px;max-width:100%;white-space:nowrap;text-overflow:ellipsis;padding:0 5px;font-size:10px;line-height:15px;overflow:hidden}
+.mvp_filters{align-items:center;gap:6px;padding:8px 0 2px;display:flex;flex-wrap:wrap}
+.mvp_filterLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.mvp_filter{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 9px;font-family:inherit;font-size:11px;line-height:18px}
+.mvp_filter:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
+.mvp_filter[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
+.mvp_filter:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.mvp_note{color:var(--dsw-alias-label-tertiary);flex:none;padding:6px 0 0;font-size:10px;line-height:15px}
 .mvp_legend{color:var(--dsw-alias-label-tertiary);flex:none;padding:8px 0 2px;font-size:11px;line-height:16px}
 .mvp_fallback{color:var(--dsw-alias-label-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);border-radius:var(--dsw-radius-sm,6px);padding:6px 8px;font-size:11px;line-height:16px;margin-top:8px}
 `
@@ -212,15 +303,105 @@ window.__ModuleLoader__.load({
       return label === key ? id : label
     }
 
+    /** Localized provenance label ("adapter", "relay model list", …). */
+    function sourceLabel(source, t) {
+      const key = 'source.' + (source || 'unknown')
+      const label = t(key)
+      return label === key ? t('source.unknown') : label
+    }
+
+    /** Per-field provenance recorded by the Host. */
+    function sourceOf(model, field) {
+      const sources = model && model.sources
+      return sources && typeof sources[field] === 'string' ? sources[field] : 'unknown'
+    }
+
+    /** Catalog and name heuristics are completed values, not declarations. */
+    function isInferredSource(source) {
+      return source === 'catalog' || source === 'inferred'
+    }
+
+    /** Kind with a safe fallback for records from an older Host. */
+    function kindOf(model) {
+      return model && typeof model.kind === 'string' && model.kind !== '' ? model.kind : 'chat'
+    }
+
+    /** Filter bucket: chat / image / video / other. */
+    function bucketOf(kind) {
+      if (kind === 'image') return 'image'
+      if (kind === 'video') return 'video'
+      if (kind === 'chat') return 'chat'
+      return 'other'
+    }
+
+    function isGenerationKind(kind) {
+      return kind === 'image' || kind === 'video' || kind === 'audio'
+    }
+
+    /** Resolution tier advertised in the model id ("-4k", "2K"). */
+    function resolutionOf(model) {
+      const text = String((model && model.id) || '')
+      const match = /(?:^|[-_/])(4k|2k|8k|uhd|hd)(?:$|[-_/])/i.exec(text)
+      return match === null ? null : match[1].toUpperCase()
+    }
+
+    /** "文本 / 图像" for one modality array. */
+    function modalityNames(modalities, t) {
+      return (Array.isArray(modalities) ? modalities : []).map((id) => modalityLabel(id, t)).join(' / ')
+    }
+
+    /** Tags for image / video / embedding / rerank / audio / moderation models. */
+    function generationTags(model, t) {
+      const kind = kindOf(model)
+      const kindSource = sourceOf(model, 'kind')
+      const kindLabel = t('tag.kind.' + kind) === 'tag.kind.' + kind ? t('tag.kind.unknown') : t('tag.kind.' + kind)
+      const titleKey = kind === 'image' ? 'tag.kindImageTitle' : kind === 'video' ? 'tag.kindVideoTitle' : 'tag.kindTitle'
+      const tags = [
+        {
+          key: 'kind',
+          tone: 'kind',
+          label: kindLabel,
+          title: t(titleKey, { kind: kindLabel, source: sourceLabel(kindSource, t) }),
+          inferred: isInferredSource(kindSource),
+        },
+      ]
+      const resolution = resolutionOf(model)
+      if (resolution !== null && (kind === 'image' || kind === 'video')) {
+        tags.push({
+          key: 'resolution',
+          tone: 'neutral',
+          label: resolution,
+          title: t('tag.resolutionTitle', { value: resolution }),
+        })
+      }
+      // Image editing capability is the one input fact worth showing on a
+      // generation row; it never turns into the chat "multimodal" tag.
+      if (kind === 'image' && Array.isArray(model.inputModalities) && model.inputModalities.includes('image')) {
+        tags.push({
+          key: 'image-input',
+          tone: 'neutral',
+          label: t('tag.imageInput'),
+          title: t('tag.imageInputTitle'),
+        })
+      }
+      return tags
+    }
+
     /**
      * Per-model capability tags. The same model may know only part of its
      * capabilities: an adapter that cannot answer produces `infoError`, and the
-     * unknown facts are shown as such instead of being guessed.
+     * unknown facts are shown as such instead of being guessed. Each tag knows
+     * whether its value is a declaration (solid border) or a completion from the
+     * built-in catalog / name heuristics (dashed border).
      */
     function capabilityTags(model, t) {
+      const kind = kindOf(model)
+      if (kind !== 'chat') return generationTags(model, t)
+
       const tags = []
       const reasoning = model.reasoning
       const levels = effortNames(reasoning)
+      const reasoningSource = sourceOf(model, 'reasoning')
       const errorTitle =
         typeof model.infoError === 'string' && model.infoError !== ''
           ? t('tag.infoErrorTitle', { message: model.infoError })
@@ -231,7 +412,10 @@ window.__ModuleLoader__.load({
           key: 'reasoning',
           tone: 'accent',
           label: t('tag.reasoning'),
-          title: t('tag.reasoningTitle', { levels: levels.join(' / ') }),
+          title: t('tag.reasoningTitle', {
+            levels: levels.join(' / '),
+            source: sourceLabel(reasoningSource, t),
+          }),
         })
         const fallback = defaultEffortName(reasoning)
         tags.push({
@@ -240,15 +424,37 @@ window.__ModuleLoader__.load({
           label: t('tag.effort') + ' ' + levels.join('/'),
           title:
             fallback === null
-              ? t('tag.effortTitleNoFallback', { levels: levels.join(' / ') })
-              : t('tag.effortTitle', { levels: levels.join(' / '), fallback }),
+              ? t('tag.effortTitleNoFallback', {
+                  levels: levels.join(' / '),
+                  source: sourceLabel(reasoningSource, t),
+                })
+              : t('tag.effortTitle', {
+                  levels: levels.join(' / '),
+                  fallback,
+                  source: sourceLabel(reasoningSource, t),
+                }),
         })
-      } else if (typeof model.infoError === 'string') {
-        tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.reasoningUnknown'), title: errorTitle })
+      } else if (model.reasoningSupported === true) {
+        tags.push({
+          key: 'reasoning',
+          tone: 'accent',
+          label: t('tag.reasoning'),
+          title: t('tag.reasoningCatalogTitle', { source: sourceLabel(reasoningSource, t) }),
+          inferred: isInferredSource(reasoningSource),
+        })
+      } else if (model.reasoningSupported === false) {
+        tags.push({
+          key: 'reasoning',
+          tone: 'muted',
+          label: t('tag.noReasoning'),
+          title: sourceLabel(reasoningSource, t),
+          inferred: isInferredSource(reasoningSource),
+        })
       } else {
-        tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.noReasoning'), title: t('tag.unknownTitle') })
+        tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.reasoningUnknown'), title: errorTitle })
       }
 
+      const contextSource = sourceOf(model, 'context')
       const context = formatContext(model.contextWindow)
       tags.push({
         key: 'context',
@@ -257,10 +463,15 @@ window.__ModuleLoader__.load({
         title:
           context === null
             ? errorTitle
-            : t('tag.contextTitle', { tokens: Number(model.contextWindow).toLocaleString() }),
+            : t('tag.contextTitle', {
+                tokens: Number(model.contextWindow).toLocaleString(),
+                source: sourceLabel(contextSource, t),
+              }),
+        inferred: context !== null && isInferredSource(contextSource),
       })
 
       const modalities = Array.isArray(model.inputModalities) ? model.inputModalities : null
+      const modalitySource = sourceOf(model, 'modalities')
       if (modalities === null || modalities.length === 0) {
         tags.push({ key: 'modality', tone: 'muted', label: t('tag.modalityUnknown'), title: errorTitle })
       } else {
@@ -270,8 +481,10 @@ window.__ModuleLoader__.load({
           tone: vision ? 'vision' : 'neutral',
           label: vision ? t('tag.multimodal') : t('tag.textOnly'),
           title: t('tag.modalityTitle', {
-            modalities: modalities.map((id) => modalityLabel(id, t)).join(' / '),
+            modalities: modalityNames(modalities, t),
+            source: sourceLabel(modalitySource, t),
           }),
+          inferred: isInferredSource(modalitySource),
         })
       }
       return tags
@@ -304,6 +517,8 @@ window.__ModuleLoader__.load({
         status: 'idle',
         groups: [],
         failures: [],
+        providers: [],
+        catalog: null,
         error: null,
         detailsError: null,
         source: null,
@@ -370,6 +585,8 @@ window.__ModuleLoader__.load({
               status: 'ready',
               groups: Array.isArray(value.groups) ? value.groups : [],
               failures: Array.isArray(value.failures) ? value.failures : [],
+              providers: Array.isArray(value.providers) ? value.providers : [],
+              catalog: value.catalog && typeof value.catalog === 'object' ? value.catalog : null,
               error: null,
               detailsError: null,
               source: 'host',
@@ -384,6 +601,8 @@ window.__ModuleLoader__.load({
                 status: 'ready',
                 groups: value.groups,
                 failures: value.failures,
+                providers: [],
+                catalog: null,
                 error: null,
                 detailsError: detail,
                 source: 'catalog',
@@ -574,6 +793,59 @@ window.__ModuleLoader__.load({
 
     /* ----------------------------------------------------- settings page */
 
+    /** Count models per filter bucket for one group. */
+    function countKinds(models) {
+      const counts = { chat: 0, image: 0, video: 0, other: 0 }
+      for (const model of models || []) counts[bucketOf(kindOf(model))] += 1
+      return counts
+    }
+
+    /** Compact label + tooltip for one provider probe diagnostic. */
+    function probeOf(state, group, t) {
+      const list = Array.isArray(state.providers) ? state.providers : []
+      const diagnostic = list.find((item) => item && item.id === group.id)
+      if (diagnostic === undefined) return null
+      const details = [
+        diagnostic.host ? 'host: ' + diagnostic.host : null,
+        diagnostic.status ? 'status: ' + diagnostic.status : null,
+        diagnostic.message ? 'message: ' + diagnostic.message : null,
+        diagnostic.pricing && diagnostic.pricing !== 'skipped' ? 'pricing: ' + diagnostic.pricing : null,
+      ]
+        .filter(Boolean)
+        .join('\n')
+      if (diagnostic.status === 'ok') {
+        return {
+          label:
+            Number(diagnostic.capabilities) > 0
+              ? t('group.probeOk', {
+                  models: diagnostic.models ?? 0,
+                  caps: diagnostic.capabilities,
+                })
+              : t('group.probeNoCaps', { models: diagnostic.models ?? 0 }),
+          title: details,
+        }
+      }
+      if (diagnostic.status === 'failed' || diagnostic.status === 'unauthorized') {
+        return { label: t('group.probeFailed'), title: details }
+      }
+      return { label: t('group.probeSkipped'), title: details }
+    }
+
+    /** Class list for one capability tag. */
+    function tagClassOf(tag) {
+      const tone =
+        tag.tone === 'accent'
+          ? ' mvp_tag--accent'
+          : tag.tone === 'vision'
+            ? ' mvp_tag--vision'
+            : tag.tone === 'kind'
+              ? ' mvp_tag--kind'
+              : tag.tone === 'muted'
+                ? ' mvp_tag--muted'
+                : ''
+      return 'mvp_tag' + tone + (tag.inferred === true ? ' mvp_tag--inferred' : '')
+    }
+
     function makeSection(form, catalog) {
       return function ModelVisibilitySection({ t }) {
         const { hidden, snapshot } = useHidden(form)
@@ -595,6 +867,16 @@ window.__ModuleLoader__.load({
             (group.models || []).filter((model) => hidden.has(keyOf(group.id, model.id))).length,
           0,
         )
+        const allKinds = countKinds(groups.flatMap((group) => group.models || []))
+        const generationCount = allKinds.image + allKinds.video
+        const [filter, setFilter] = React.useState('all')
+        const filteredGroups = []
+        for (const group of groups) {
+          const models = (group.models || []).filter(
+            (model) => filter === 'all' || bucketOf(kindOf(model)) === filter,
+          )
+          if (models.length > 0) filteredGroups.push({ ...group, models })
+        }
         const disabled = busy || !writable
 
         const commit = (next) => {
@@ -621,9 +903,9 @@ window.__ModuleLoader__.load({
           commit(next)
         }
 
-        const setGroup = (group, visible) => {
+        const setGroup = (group, subset, visible) => {
           const next = new Set(hidden)
-          for (const model of group.models || []) {
+          for (const model of subset) {
             const key = keyOf(group.id, model.id)
             if (visible) next.delete(key)
             else next.add(key)
@@ -632,14 +914,21 @@ window.__ModuleLoader__.load({
         }
 
         const rows = []
-        for (const group of groups) {
+        for (const group of filteredGroups) {
+          const allGroupModels =
+            (groups.find((candidate) => candidate.id === group.id) || group).models || []
           const models = group.models || []
-          const shown = models.filter((model) => !hidden.has(keyOf(group.id, model.id))).length
-          const allShown = shown === models.length
-          const reasoningCount = models.filter((model) => model.reasoning !== undefined).length
-          const multimodalCount = models.filter(
-            (model) => Array.isArray(model.inputModalities) && model.inputModalities.includes('image'),
+          const shown = allGroupModels.filter(
+            (model) => !hidden.has(keyOf(group.id, model.id)),
           ).length
+          const allShown = models.every((model) => !hidden.has(keyOf(group.id, model.id)))
+          const kinds = countKinds(allGroupModels)
+          const kindParts = []
+          if (kinds.chat > 0) kindParts.push(t('page.filter.chat') + ' ' + kinds.chat)
+          if (kinds.image > 0) kindParts.push(t('page.filter.image') + ' ' + kinds.image)
+          if (kinds.video > 0) kindParts.push(t('page.filter.video') + ' ' + kinds.video)
+          if (kinds.other > 0) kindParts.push(t('page.filter.other') + ' ' + kinds.other)
+          const probe = probeOf(state, group, t)
           rows.push(
             h(
               'div',
@@ -651,16 +940,12 @@ window.__ModuleLoader__.load({
                   'div',
                   { className: 'mvp_groupTitle' },
                   h('span', null, providerLabel(group, t)),
-                  h('span', { className: 'mvp_groupCount' }, shown + '/' + models.length),
-                  reasoningCount > 0 || multimodalCount > 0
-                    ? h(
-                        'span',
-                        { className: 'mvp_groupCap' },
-                        t('group.capabilities', {
-                          reasoning: reasoningCount,
-                          multimodal: multimodalCount,
-                        }),
-                      )
+                  h('span', { className: 'mvp_groupCount' }, shown + '/' + allGroupModels.length),
+                  kindParts.length > 0
+                    ? h('span', { className: 'mvp_groupCap' }, kindParts.join(' · '))
+                    : null,
+                  probe !== null
+                    ? h('span', { className: 'mvp_groupProbe', title: probe.title || undefined }, probe.label)
                     : null,
                 ),
                 h(
@@ -669,17 +954,27 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'mvp_button',
                     disabled: disabled,
-                    onClick: () => setGroup(group, !allShown),
+                    onClick: () => setGroup(group, models, !allShown),
                   },
-                  allShown ? t('group.hideAll') : t('group.showAll'),
+                  allShown
+                    ? filter === 'all'
+                      ? t('group.hideAll')
+                      : t('group.hideFiltered')
+                    : filter === 'all'
+                      ? t('group.showAll')
+                      : t('group.showFiltered'),
                 ),
               ),
               models.map((model) => {
                 const shownModel = !hidden.has(keyOf(group.id, model.id))
                 const tags = capabilityTags(model, t)
+                const generation = isGenerationKind(kindOf(model))
                 return h(
                   'div',
-                  { key: model.id, className: 'mvp_row' },
+                  {
+                    key: model.id,
+                    className: 'mvp_row' + (generation ? ' mvp_row--gen' : ''),
+                  },
                   h(
                     'div',
                     { className: 'mvp_rowText' },
@@ -695,15 +990,7 @@ window.__ModuleLoader__.load({
                           'span',
                           {
                             key: tag.key,
-                            className:
-                              'mvp_tag' +
-                              (tag.tone === 'accent'
-                                ? ' mvp_tag--accent'
-                                : tag.tone === 'vision'
-                                  ? ' mvp_tag--vision'
-                                  : tag.tone === 'muted'
-                                    ? ' mvp_tag--muted'
-                                    : ''),
+                            className: tagClassOf(tag),
                             title: tag.title || undefined,
                           },
                           tag.label,
@@ -731,6 +1018,38 @@ window.__ModuleLoader__.load({
         }
 
         const loading = state.status === 'loading' || state.status === 'idle'
+        const providerList = Array.isArray(state.providers) ? state.providers : []
+        const probeOk = providerList.filter((provider) => provider && provider.status === 'ok').length
+        const probeCaps = providerList.reduce(
+          (count, provider) => count + (Number(provider && provider.capabilities) || 0),
+          0,
+        )
+        const probeNote =
+          state.source === 'host'
+            ? providerList.length > 0
+              ? t('page.probeSummary', { ok: probeOk, caps: probeCaps })
+              : t('page.probeSummaryNone')
+            : null
+        const catalogMeta = state.catalog && typeof state.catalog === 'object' ? state.catalog : null
+        const catalogDate =
+          catalogMeta && typeof catalogMeta.generatedAt === 'string'
+            ? catalogMeta.generatedAt.slice(0, 10)
+            : null
+        const catalogNote =
+          catalogMeta !== null
+            ? t('page.catalogNote', {
+                version: catalogMeta.piAiVersion || '?',
+                date: catalogDate || '?',
+                models: catalogMeta.models ?? 0,
+              })
+            : null
+        const filterOptions = [
+          ['all', t('page.filter.all'), total],
+          ['chat', t('page.filter.chat'), allKinds.chat],
+          ['image', t('page.filter.image'), allKinds.image],
+          ['video', t('page.filter.video'), allKinds.video],
+          ['other', t('page.filter.other'), allKinds.other],
+        ]
 
         return h(
           'div',
@@ -752,7 +1071,8 @@ window.__ModuleLoader__.load({
                   ? t('page.loading')
                   : t('page.empty')
                 : t('page.summary', { visible: total - hiddenCount, total }) +
-                  (hiddenCount > 0 ? ' · ' + t('page.hiddenSummary', { count: hiddenCount }) : ''),
+                  (hiddenCount > 0 ? ' · ' + t('page.hiddenSummary', { count: hiddenCount }) : '') +
+                  (generationCount > 0 ? ' · ' + t('page.kindSummary', { count: generationCount }) : ''),
             ),
             h(
               'div',
@@ -776,6 +1096,24 @@ window.__ModuleLoader__.load({
                   onClick: () => catalog.refresh(),
                 },
                 t('page.refresh'),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'mvp_filters' },
+            h('span', { className: 'mvp_filterLabel' }, t('page.filterLabel')),
+            filterOptions.map(([value, label, count]) =>
+              h(
+                'button',
+                {
+                  key: value,
+                  type: 'button',
+                  className: 'mvp_filter',
+                  'aria-pressed': filter === value,
+                  onClick: () => setFilter(value),
+                },
+                label + ' ' + count,
               ),
             ),
           ),
@@ -804,9 +1142,14 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'mvp_error', role: 'alert' }, t('page.error', { message: state.error }))
             : null,
           rows.length > 0 ? rows : null,
-          rows.length === 0 && !loading && state.error === null
+          total > 0 && filter !== 'all' && rows.length === 0
+            ? h('div', { className: 'mvp_note' }, t('page.filterEmpty'))
+            : null,
+          rows.length === 0 && !loading && state.error === null && total === 0
             ? h('div', { className: 'mvp_error' }, t('page.empty'))
             : null,
+          probeNote !== null ? h('div', { className: 'mvp_note' }, probeNote) : null,
+          catalogNote !== null ? h('div', { className: 'mvp_note' }, catalogNote) : null,
         )
       }
     }
