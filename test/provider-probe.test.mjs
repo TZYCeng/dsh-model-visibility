@@ -311,10 +311,22 @@ test('noteSettingsChanged drops the cache only when routing facts changed', asyn
   await probe.read()
   assert.equal(fetchImpl.calls.length, 2, 'an unchanged profile keeps the cache')
 
+  // Model-level declarations feed the merge but do not need a new network sweep.
+  current = descriptors({ defaultInput: ['text', 'image'] })
+  probe.noteSettingsChanged()
+  const refreshed = await probe.read()
+  assert.equal(fetchImpl.calls.length, 2, 'a model-level change reuses the cached listing')
+  assert.deepEqual(refreshed.profiles.get('relay').defaultInput, ['text', 'image'])
+
+  current = descriptors({ headers: { 'x-relay-tenant': 'tenant-2' } })
+  probe.noteSettingsChanged()
+  await probe.read()
+  assert.equal(fetchImpl.calls.length, 4, 'a changed header invalidates the cache')
+
   current = descriptors({ baseURL: 'https://relay.example/v2' })
   probe.noteSettingsChanged()
   await probe.read()
-  assert.equal(fetchImpl.calls.length, 4, 'a changed base URL invalidates the cache')
+  assert.equal(fetchImpl.calls.length, 6, 'a changed base URL invalidates the cache')
 })
 
 test('the capability catalog carries probe diagnostics and relay kinds', async () => {
