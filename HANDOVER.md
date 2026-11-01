@@ -377,6 +377,28 @@ git push origin main
 - `files` 已包含 `lib`；`scripts` / `test` / `.tools` 不进包。
 - `docs/` 旧截图仍保留；如果重新截图，先确认目录可写（见坑 18）。
 
+### 10.1 插件市场（awesome-dsh-plugin）
+
+投稿只需在 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 里加 **一个** 文件
+`data/plugins/TZYCeng__dsh-model-visibility.yml`（格式见仓库 `contributing.md`，README 由数据生成，不要手改）。
+当前条目：
+
+```yaml
+url: https://github.com/TZYCeng/dsh-model-visibility
+name: TZYCeng/dsh-model-visibility
+category: ui            # 模型选择菜单的过滤 + 标注；model 分类留给「接入 provider」的插件
+description.en/zh       # 只写功能，逐句要能在源码里对上
+icon: https://raw.githubusercontent.com/TZYCeng/dsh-model-visibility/main/docs/icon-180.png   # 必须是位图，SVG 不收
+tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/download/dsh-model-visibility.tgz
+```
+
+- 首次投稿 PR：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11149（从 fork `TZYCeng/awesome-dsh-plugin` 的 `add/tzyceng-dsh-model-visibility` 分支发出）。
+- 发新版本后：`npm pack` 出的 tgz 以 **不带版本号** 的名字 `dsh-model-visibility.tgz` 传到该 tag 的 Release，`latest/download` 就始终指向最新包，条目文件不用再改。
+- `screenshots.json`（放在 `package.json` 旁边）列出 1–8 个仓库内相对路径；市场每晚探测，推自己的仓库即可换图，不用再提 PR。
+- `icon-180.png` 由 `icon.svg` 光栅化而来（`icon.svg` 不能被市场当图标）。
+- 仓库需要 `dsh-plugin` topic；`dsh.bundle` + `cordis.patch.yml` 是安装的前提，只有 `dsh.client` 会被 CI 拒。
+- 不要发布到 npm 也行：装法是 `dsh plugin add github:TZYCeng/dsh-model-visibility`。
+
 ---
 
 ## 11. 还可以做什么（按价值排序）
