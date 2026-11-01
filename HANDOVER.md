@@ -393,6 +393,7 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 ```
 
 - 首次投稿 PR：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11149（从 fork `TZYCeng/awesome-dsh-plugin` 的 `add/tzyceng-dsh-model-visibility` 分支发出）。
+- 第一次跑 CI 的两个结论：`PR check`（14 分钟，含 `awesome-lint` + `build-site.mjs`）通过；`Submission gate` 通过，原文「All 1 submitted entry passes: `dsh.bundle` declared, repo old enough, enough commits.」
 - 发新版本后：`npm pack` 出的 tgz 以 **不带版本号** 的名字 `dsh-model-visibility.tgz` 传到该 tag 的 Release，`latest/download` 就始终指向最新包，条目文件不用再改。
 - `screenshots.json`（放在 `package.json` 旁边）列出 1–8 个仓库内相对路径；市场每晚探测，推自己的仓库即可换图，不用再提 PR。
 - `icon-180.png` 由 `icon.svg` 光栅化而来（`icon.svg` 不能被市场当图标）。
