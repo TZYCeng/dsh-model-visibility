@@ -1,9 +1,9 @@
 {
   "name": "dsh-model-visibility",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
-  "description": "Choose which models appear in the chat composer's model list, with per-provider groups, per-model capability tags sourced from the adapter, the relay model list and a built-in catalog, and separate labels for image/video generation models.",
+  "description": "Choose which models appear in the chat composer's model list, with per-provider groups, per-model capability tags sourced from the adapter, the relay model list, a built-in catalog and vendor corrections, separate coloured labels for image/video generation models, and an opt-in image-input alignment for relay routes.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -16,7 +16,9 @@
     "lib",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "screenshots.json",
+    "docs"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
@@ -40,5 +42,21 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.5"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TZYCeng/dsh-model-visibility.git"
+  },
+  "homepage": "https://github.com/TZYCeng/dsh-model-visibility#readme",
+  "bugs": {
+    "url": "https://github.com/TZYCeng/dsh-model-visibility/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "model-visibility",
+    "model-selector"
+  ],
+  "author": "TZYCeng",
   "license": "MIT"
 }

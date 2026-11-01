@@ -1,21 +1,22 @@
 # HANDOVER — dsh-model-visibility
 
 > 给下一个接手的人 / AI。目标：**不用重新啃 DSH 源码就能继续加功能**。
-> 当前版本 **1.4.0**（真实能力探测 + 生成类模型标注）。
+> 当前版本 **1.5.0**（真实能力探测 + 生成类模型标注 + 官方校正 + 请求侧图像准入对齐）。
 
 ---
 
 ## 1. 这个插件是干什么的
 
-三件事，互相独立：
+四件事，互相独立：
 
 1. **模型显示开关**：设置 → 模型显示，按 Provider 分组列出全部模型，每个模型一个开关；关闭的模型从聊天输入框的模型菜单里消失。偏好持久化在 Host 设置文档 + `$DSH_HOME/dsh-model-visibility/hidden.json` 影子副本。
 2. **真实能力标注**：在同一个设置页，每个模型下面标注：
    - 是否支持推理、思考强度档位；
    - 上下文窗口；
    - 输入 / 输出模态；
-   - 模型类型：对话 / 生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译。
-3. **区分声明与补全**：每个字段带 `sources`；实线标签 = 适配器或中转站声明，虚线标签 = 内置目录或模型名推断。生成类模型只显示类型 / 分辨率等真正相关的标签。
+   - 模型类型：对话 / 生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译（类型标签各用一种颜色）。
+3. **区分声明与补全**：每个字段带 `sources`；实线标签 = 适配器、中转站或厂商文档声明，虚线标签 = 内置目录或模型名推断。生成类模型只显示类型 / 分辨率等真正相关的标签。
+4. **请求侧图像准入对齐**：DSH 的 pi-ai 适配器按 Provider 的 `defaultInput`（通常是 text）构造模型，导致「页面显示多模态、发图却被拒绝」。Host 在内存里包装 pi-ai 适配器的 `modelOf`，对插件判定为可输入图像的模型补上 `image`；设置页开关 `applyInput` 可关闭，不写配置、卸载即恢复。`glm-5.3` 这类被官方校正为纯文本的模型不会放行。
 
 它**不接管**输入框的模型座位，因此官方的「模型 / 推理等级」菜单、`dsh-codex-effort-slider`、`dsh-model-effort-defaults` 都能和它共存。
 
@@ -45,19 +46,23 @@ profile 里的接线（不要改名）：
 ## 3. 文件地图
 
 ```
-index.js                     Host 半：hidden 持久化 + 影子副本 + /api/dsh-model-visibility/models 路由
+index.js                     Host 半：hidden 持久化 + 影子副本 + /api/dsh-model-visibility/models 路由 + 图像闸门安装
 lib/model-info.js            Host 能力合并（纯函数 + 缓存），单元测试直接测它
 lib/provider-probe.js        Host 中转站探测：读配置、解凭据、GET /models 与 /api/pricing
 lib/capability-catalog.js    目录匹配 + 模型类型 / 家族模态启发式
+lib/capability-corrections.js  厂商文档校正表（GLM-5.3 纯文本等），带来源链接
+lib/image-input-gate.js      pi-ai 适配器 modelOf 包装（请求侧图像准入，可逆）
 lib/model-catalog.js         由 scripts/build-catalog.mjs 生成的 models.dev 快照（勿手改）
 scripts/build-catalog.mjs    重新生成目录
-client.js                    浏览器半：设置页 + 筛选 + 能力标签 + 目录过滤
+client.js                    浏览器半：设置页 + 筛选 + 能力标签（按类型着色）+ 目录过滤
 cordis.patch.yml             Host 行声明
 locale/zh.json, en.json      插件列表标题/描述
 docs/*.png                   设置页截图（v1.3；v1.4 截图因沙箱 ACL 暂未落盘）
 test/model-info.test.mjs     能力合并 / 缓存旧测试
-test/capability.test.mjs     目录匹配、启发式、证据优先级
+test/capability.test.mjs     目录匹配、启发式、证据优先级、官方校正
 test/provider-probe.test.mjs 配置读取、listing / pricing 解析、凭据、缓存、诊断
+test/image-input.test.mjs    图像准入判定、适配器闸门与可逆性
+test/host.test.mjs           index.js 接线：能力路由 + 官方校正 + 闸门开关变化
 package.json                 bundle 清单 / exports / files / npm test
 ```
 
@@ -70,10 +75,11 @@ package.json                 bundle 清单 / exports / files / npm test
 | `CSS` | 全部样式；颜色只用 `--dsw-alias-*` 主题变量 |
 | `keyOf` / `hiddenSetOf` / `providerLabel` / `countModels` | 小工具 |
 | `formatContext` / `effortNames` / `defaultEffortName` / `modalityLabel` / `sourceLabel` / `sourceOf` / `isInferredSource` / `kindOf` / `bucketOf` / `isGenerationKind` / `resolutionOf` / `modalityNames` | 能力标签工具 |
-| `generationTags` / `capabilityTags` | 生图 / 生视频等只标类型；对话模型标推理 / 上下文 / 模态，并带来源 |
+| `generationTags` / `capabilityTags` | 生图 / 生视频等只标类型并着色；对话模型标推理 / 上下文 / 模态，并带来源；`correction` 渲染 `官方校正` |
+| `tagClassOf` | 标签样式：实线 / 虚线、`kind-*` 类型色、muted |
 | `createCatalog` | 拉能力目录：先 Host 路由，失败退回官方 `session.modelCatalog()`；保存 `groups/failures/providers/catalog` |
 | `patchDirectoryStore` / `installComposerFilter` | 就地改写模型目录 store，实现「隐藏」 |
-| `countKinds` / `probeOf` / `tagClassOf` / `makeSection` | 设置页组件（React） |
+| `countKinds` / `probeOf` / `makeSection` | 设置页组件（React）；`makeSection` 里有 `applyInput` 开关 |
 | `apply` | 注册字典、样式、设置 section、模型目录过滤 |
 
 ### index.js 内部
@@ -81,11 +87,13 @@ package.json                 bundle 清单 / exports / files / npm test
 - `storeFile()` / `readStored()` / `writeStored()`：`hidden.json` 影子副本。
 - `RESTORED`：模块加载时读影子副本，作为 `hidden` 的 schema 默认值。
 - `Config.probe`：是否探测中转站（默认 true；可用 `MODEL_VISIBILITY_PROBE=0` 关闭）。
+- `Config.applyInput`：是否在请求侧给多模态中转站模型补图像能力（默认 true，volatile）。
 - `apply(ctx, config)`：
   - `settings.configure({ auto: false })` 关闭自动生成的配置页；
-  - 监听 `loader/volatile-update` / `settings/document-updated` → `persist()`；
-  - `ctx.inject(['llm', 'connection'], ...)` → 可选 `scope.get('settings')` / `scope.get('credentials')`，构造 `createProviderProbe` 与 `createModelInfoService`，注册能力路由；
-  - `llm/adapters-updated` / 凭据事件 → 清能力 + 探测缓存；
+  - 监听 `loader/volatile-update` / `settings/document-updated` → `persist()`（`hidden` 与 `applyInput` 任一变化都触发）；
+  - `ctx.inject(['llm', 'connection'], ...)` → 可选 `scope.get('settings')` / `scope.get('credentials')`，构造 `createProviderProbe` 与 `createModelInfoService`（`context` 选项提供同步的 profiles + 最近一次探测快照），注册能力路由；
+  - `installImageInputGate(scope.llm, ...)` 包装已注册 pi-ai 适配器的 `modelOf`；`scope.effect` 在卸载时恢复；
+  - `llm/adapters-updated` / 凭据事件 → 清能力 + 探测缓存并 `imageInput.refresh()`；
   - `settings/document-updated` → 清能力缓存，只有 Provider 路由指纹变化时才清探测缓存。
 
 ---
@@ -114,16 +122,26 @@ package.json                 bundle 清单 / exports / files / npm test
          ▼                                          ▼
   lib/model-info.js::mergeCapabilities  ◀── profiles + discovered + diagnostics
          │
-         │  config > adapter > provider > catalog > inferred > unknown
+         │  config > adapter > official(correction) > provider > catalog > inferred > unknown
          ▼
   { groups, failures, providers, catalog, generatedAt }
 
+请求侧（发图时）：
+  api-session 准入 → llm.resolveModelInfo → pi-ai adapter.modelOf（被 image-input-gate 包装）
+                                              │
+                                   service.imageInputAllowed(provider, model)
+                                              │ 同一套 mergeCapabilities
+                                              ▼
+                                 可输入图像 → 模型对象补 image；否则原样返回
+
 浏览器：
-  能力标签（实线 / 虚线）        开关（hidden 列表）
-        │                              │
-        └──────────┬───────────────────┘
-                   ▼
-   modelDirectories store 过滤 → 输入框模型菜单
+  能力标签（实线 / 虚线 / 类型色）   开关（hidden 列表）      图像对齐开关（applyInput）
+        │                              │                        │
+        └──────────┬───────────────────┘                        │
+                   ▼                                            │
+   modelDirectories store 过滤 → 输入框模型菜单                 │
+                                                                ▼
+                                                    Host 闸门实时读取
 ```
 
 ### 能力记录的形状（`lib/model-info.js` 的输出）
@@ -141,12 +159,13 @@ type ModelRecord = {
   reasoning?: { efforts: { id, name, description? }[]; defaultEffort?: string }
   reasoningSupported?: boolean     // 没有档位但目录/中转站知道支持或明确不支持
   sources: {
-    kind: 'config' | 'adapter' | 'provider' | 'catalog' | 'inferred' | 'unknown'
+    kind: 'config' | 'adapter' | 'provider' | 'catalog' | 'official' | 'inferred' | 'unknown'
     modalities: 同上
     context: 同上
     reasoning: 同上
   }
   catalog?: { id: string; provider?: string; generatedAt?: string }
+  correction?: { id: string; code: string; note: string; source?: string } // 厂商文档校正在生效
   infoError?: string               // resolveModelInfo 失败时存在；其它来源仍会补
 }
 
@@ -162,10 +181,12 @@ type Catalog = {
     pricing: 'ok' | 'disabled' | 'failed' | 'skipped'
     message?: string
   }[]
-  catalog: { generatedAt: string | null; piAiVersion: string | null; models: number }
+  catalog: { generatedAt: string | null; piAiVersion: string | null; models: number; features?: string[] }
   generatedAt: number
 }
 ```
+
+`catalog.features` 是升级保护：新浏览器半看到缺少 `applyInput` 就显示「Host 半仍是旧版本」。加 Host 能力时把标记加到这里。
 
 ### 路由合同
 
@@ -180,7 +201,7 @@ type Catalog = {
 ## 5. 关键决策 & 为什么
 
 1. **为什么不直接把 Provider 的 `input: []` 改成真实值？**
-   改用户配置会污染升级路径，而且中转站模型会变；本插件只读。页面显示真实能力，但请求路由仍由用户配置决定。若用户想要请求层也支持图像，应自行把 `input` 改成 `["text","image"]`（或让中转站声明）。
+   改用户配置会污染升级路径，而且中转站模型会变、同步插件会重写该块；本插件不写 Provider 配置。请求侧改用**内存包装** pi-ai 适配器的 `modelOf`（见决策 10），配置仍是用户自己的声明。
 2. **为什么 Host 端要新开路由，而不是直接用 `session.modelCatalog`？**
    官方投影只保留 `{ id, name, description?, reasoning }`，丢掉了 context、inputModalities，也没有类型。
 3. **为什么要有内置目录快照？**
@@ -197,6 +218,10 @@ type Catalog = {
    开关必须始终可用。失败记录 `infoError`，页面照常显示，目录仍可补全能力。
 9. **关于「合并 dsh-mobile-sync」。**
    已核对 `D:\\code\\dsh-android-Conversation sync`（package name `dsh-mobile-sync`）：它是手机同步插件，不包含读取思考强度的代码，不要为了「合并」把它搬进来。
+10. **为什么补图像能力要包 `modelOf`，而不是改 `llm.resolveModelInfo`？**
+    只改 `resolveModelInfo` 只能骗过 api-session 的准入；pi-ai 的 `streamWithSnapshot` 里还有 `if (containsImage && !model.input.includes("image")) throw UNSUPPORTED_CONTENT`。`modelOf` 是 `resolveModel`、`stream` 与 `imageRequestTarget` 共同的模型构造点，包它一次即可同时通过准入和序列化。DeepSeek Messages 适配器没有 `modelOf`，所以只命中 pi-ai。
+11. **为什么需要 `lib/capability-corrections.js`？**
+    目录快照会把厂商的纯文本旗舰标成多模态（`glm-5.3` 与多模态的 `glm-5.3-flash` 只差一个后缀）。这种错误比「未知」更危险：既会误导用户，又会让请求侧闸门放行不该放的图像。校正表只收厂商文档能证明的条目，来源显示为 `official`；它替换目录 / 推断 / 中转站列表，但不压过用户显式写入的 `input` 与内置适配器声明（中转站列表经常直接抄目录，所以也要能被校正）。
 
 ---
 
@@ -248,6 +273,20 @@ npm test
 3. 在 `test/provider-probe.test.mjs` 加一个真实响应样例（去掉密钥）。
 4. 不要新增网络请求到第三方域名；只允许配置的 `baseURL` 同源。
 
+### 6.7 加一条官方校正
+
+1. 只在厂商文档能证明目录行错误时才加，不要按模型名猜。
+2. 在 `lib/capability-corrections.js` 的 `CORRECTIONS` 里按**规范化后的 id** 加 `{ input, code, note, source }`；`code` 同时加到 `client.js` 的 `DICT.zh/en`（`correction.<code>`）。
+3. 单测：`lookupCorrection` 命中精确 id、不命中 `-flash` 等变体；`mergeCapabilities` 的 `sources.modalities === 'official'` 且显式 config 仍优先。
+4. 校正覆盖 `catalog` / `inferred` / `unknown` / `provider`（中转站列表常抄目录）；不要让它压过 `config` 与内置适配器声明。
+
+### 6.8 调整请求侧图像准入
+
+1. 判定在 `lib/model-info.js::imageInputDecision`，**必须**继续复用 `mergeCapabilities`，否则页面标签与准入会各说各话。
+2. 进入/退出逻辑只在 `lib/image-input-gate.js`；它只识别 pi-ai 形状（`modelOf` + `profileOf` + `current`），不要包其它适配器。
+3. 新增/删除适配器走 `llm/adapters-updated` → `imageInput.refresh()`；卸载时必须能恢复原方法。
+4. 想默认关闭就把 `Config.applyInput` 的默认值改成 `false`，并同步字典说明。
+
 ---
 
 ## 7. 改动 / 调试流程（重要）
@@ -262,7 +301,7 @@ Host 半在 DSH 启动时加载，**改完必须让 Host 重新加载**：
 2. 开发方式（桌面版）：让 profile 重新组合。HMR 会在下一次 profile 重组时替换「磁盘上已改动的已链接包」。
    - 改一下 `%USERPROFILE%\\.dsh\\profiles\\desktop\\cordis.patch.yml`（例如给 `model-visibility` 行加 `probe: true`）触发，**验证完把临时内容删掉**；
    - 不要用「禁用/启用插件」来指望重载代码：HMR 可能复用旧模块生成。
-3. 验证新路由是否生效：设置页底部出现「中转站探测：…」和「内置目录：…」；Grok / Claude 显示真实上下文与多模态；生图行只显示 `生图`。
+3. 验证新路由是否生效：设置页底部出现「中转站探测：…」和「内置目录：…」；Grok / Claude 显示真实上下文与多模态；生图行只显示 `生图` 且为蓝色；`glm-5.3` 显示 `纯文本 / 官方校正`；顶部有「让输入框按能力标注放行图像」开关。
 4. 重载后如果页面顶部仍显示「模型能力信息暂不可用」，Host 还是旧的。
 
 ### 看日志
@@ -278,7 +317,7 @@ Host 的 `console` 输出在 DSH 桌面进程里；没有独立日志文件。�
 3. **不要替换 store 对象**：官方座位可能已经捕获了同一个 store；只能就地改 `getSnapshot` / `subscribe`。
 4. **`connection.fetch` 路由的 query 不参与匹配**：`?fresh=1` 安全；匹配只看 `pathname`。
 5. **`resolveModelInfo` 可能很慢**：串行会慢，`Promise.all` 并发；缓存不要去掉。
-6. **DSH 的模态只有 `text` / `image`**：不要硬编码别的值，未知值原样透传；视频 / 音频只用于展示。
+6. **DSH 的模态只有 `text` / `image`**：不要硬编码别的值，未知值原样透传；视频 / 音频只用于展示，请求侧只对齐 `image`。
 7. **`color-mix` 需要 fallback**：CSS 里先写 `background: transparent` 再写 `background: color-mix(...)`。
 8. **中英文案**：`DICT` 只注册了一次；漏加 key 时 `t(key)` 会返回 key 本身。
 9. **能力标签不改变可见性**：`hidden` 只由开关写入；筛选 / 标签不能顺手改 `hidden`。
@@ -288,9 +327,11 @@ Host 的 `console` 输出在 DSH 桌面进程里；没有独立日志文件。�
 13. **凭据只在 Host 解析**：不要把 `apiKeyEnv` 的值、请求头或 baseURL 全文塞进路由响应 / 日志 / 诊断。
 14. **探测请求不要跟随重定向**：否则 `Authorization` 可能被带到别的域。`getJson` 用 `redirect: 'error'`。
 15. **`defaultInput: [text]` 不是事实**：任何 `mergeCapabilities` 改动都要保住「profile 存在 + 模型未显式声明 input → 不把 adapter 的 text 当纯文本」这条规则。
-16. **目录 key 会碰撞**：`gpt-5.1` 与 `gpt-5-1`、`glm-5.3` 与 `glm-5p3` 在快照里可能是两条；`modelIdVariants` 只做保守归一化，不要加过于激进的折叠。
+16. **目录 key 会碰撞**：`gpt-5.1` 与 `gpt-5-1`、`glm-5.3` 与 `glm-5p3` 在快照里可能是两条；`modelIdVariants` 只做保守归一化，不要加过于激进的折叠。`glm-5.3` 与 `glm-5.3-flash` 是不同模态的两个型号，校正只锁精确 id。
 17. **中转站 `/api/pricing` 很常见是 403**：这是正常状态，诊断记为 `disabled`，不是错误。
 18. **`docs/` 目录在部分 Windows 环境被 Low integrity + NW 标记**：常规进程无法新建文件（截图落盘会 Access denied）。需要的话用管理员/低完整性进程处理，不要为了截图改 ACL。
+19. **`llm.adapters` 是内部字段**：`image-input-gate` 依赖它枚举已注册适配器，并用 `modelOf`/`profileOf`/`current` 三重特征识别 pi-ai；升级 DSH 后若字段或适配器形状变化，先跑 `test/image-input.test.mjs` 再改这里。不要改成只包 `llm.resolveModelInfo`（pi-ai 序列化还会拒绝）。
+20. **`modelOf` 包装必须可逆**：适配器重建后旧实例可能还在内存里，`refresh()` 只处理新注册；`dispose()` 只删除值仍等于自己 wrapper 的自有属性，不要覆盖别人的补丁。
 
 ---
 
@@ -307,12 +348,13 @@ npm test
 
 - [ ] 设置 → 模型显示：标题 / 描述 / 筛选 / 图例正常，模型按 Provider 分组。
 - [ ] 摘要显示 `已显示 x / y 个模型 · 已关闭 n 个 · m 个生图/生视频模型`。
-- [ ] `TianJi` 组里 `glm-5.3`、`grok-4.7`、`claude-fable-5`、`gemini-3.8-flash` 显示 `多模态`，上下文是 `1M / 500K` 而不是统一的 `262.1K`。
+- [ ] `TianJi` 组里 `glm-5.3` 显示 `纯文本` + `官方校正`（不再是多模态）；`grok-4.7`、`claude-fable-5`、`gemini-3.8-flash` 显示 `多模态`，上下文是 `1M / 500K` 而不是统一的 `262.1K`。
 - [ ] `minimax-m3.1-flash` 这类目录里没有的模型显示 `上下文 未知 / 模态未知`，而不是错误的 `纯文本`。
-- [ ] 生图行只显示 `生图` + 可选 `4K` / `可改图`，没有 `支持推理`、`思考强度`、`上下文`。
-- [ ] 生视频行只显示 `生视频`。
+- [ ] 生图行只显示 `生图` + 可选 `4K` / `可改图`，没有 `支持推理`、`思考强度`、`上下文`；类型标签是蓝色。
+- [ ] 生视频行只显示 `生视频`，标签是绿色；嵌入橙色、音频紫色、重排红色、审核玫红、翻译灰色；生成类行左侧有同色细条。
 - [ ] 嵌入 / 翻译 / 审核行只显示类型。
-- [ ] 虚线标签悬停能看到「来源：内置模型目录 / 模型名推断」。
+- [ ] 虚线标签悬停能看到「来源：内置模型目录 / 模型名推断」；`官方校正` 悬停能看到厂商说明和文档链接。
+- [ ] 顶部「让输入框按能力标注放行图像」开关可以切换并持久化；关闭后发图恢复为「模型不支持图像输入」。
 - [ ] 分组标题旁显示 `中转站 n 个模型 · m 个带能力字段`；悬停能看到 status / pricing。
 - [ ] 筛选 `生图` 只留生图行；此时分组按钮显示「显示/隐藏筛选结果」。
 - [ ] 点一个开关：计数立即变化，设置文档 `cordis.patch.yml` 的 `hidden` 更新，刷新后仍保留。
@@ -331,7 +373,7 @@ git commit -m "feat: real capability sources, relay probe, generation model tags
 git push origin main
 ```
 
-- 版本号在 `package.json`；当前 `1.4.0`。
+- 版本号在 `package.json`；当前 `1.5.0`。
 - `files` 已包含 `lib`；`scripts` / `test` / `.tools` 不进包。
 - `docs/` 旧截图仍保留；如果重新截图，先确认目录可写（见坑 18）。
 

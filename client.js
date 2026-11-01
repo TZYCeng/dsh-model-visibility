@@ -41,13 +41,20 @@ window.__ModuleLoader__.load({
         'page.refresh': '刷新',
         'page.showAll': '全部显示',
         'page.legend':
-          '标签说明：推理 = 可调推理等级；上下文 = 输入窗口；多模态 = 可输入图像。实线标签来自适配器或中转站，虚线标签来自内置目录或模型名推断。生图 / 生视频 / 嵌入等模型只标类型，不显示思考强度与文本标签。',
+          '标签说明：推理 = 可调推理等级；上下文 = 输入窗口；多模态 = 可输入图像。实线标签来自适配器、中转站或厂商文档，虚线标签来自内置目录或模型名推断。生图 / 生视频 / 嵌入等模型只标类型，不显示思考强度与文本标签。',
         'page.metaFallback':
           '模型能力信息暂不可用：上下文与模态显示为未知，推理档位仍来自官方目录。',
+        'page.hostStale':
+          'Host 半仍是旧版本：颜色与开关已更新，但「放行图像」和官方校正要等 DSH 重启（或 profile 重组）后才会生效。',
         'page.providerFailures': '部分提供方暂时读不到模型：{names}',
         'page.probeSummary': '中转站探测：{ok} 个已读取模型列表，{caps} 个公布了能力字段',
         'page.probeSummaryNone': '中转站探测：暂无可读取的路由配置',
         'page.catalogNote': '内置目录：pi-ai {version} 快照（{date}），共 {models} 个模型',
+        'page.applyInput': '让输入框按能力标注放行图像',
+        'page.applyInputHint':
+          '开启后，被标注为「多模态」的中转站对话模型会在发送请求时自动补上图像输入能力；关闭则完全按 Provider 配置里的 input 声明。只影响中转站（pi-ai）路由，不改任何配置文件；若某个上游实际拒绝图像，关闭此开关即可。',
+        'page.kindLegend':
+          '颜色区分模型类型：生图 蓝 · 生视频 绿 · 嵌入 橙 · 音频 紫 · 重排 红 · 审核 玫红 · 翻译 灰。「官方校正」表示内置目录与厂商文档不一致时以文档为准。',
         'page.filterLabel': '筛选',
         'page.filter.all': '全部',
         'page.filter.chat': '对话',
@@ -83,6 +90,8 @@ window.__ModuleLoader__.load({
         'tag.kindTitle': '模型类型：{kind}；类型来源：{source}',
         'tag.kindImageTitle': '图像生成模型（输出图像）；类型来源：{source}',
         'tag.kindVideoTitle': '视频生成模型（输出视频）；类型来源：{source}',
+        'tag.correction': '官方校正',
+        'tag.correctionTitle': '{note}\n来源：{source}',
         'tag.resolution': '分辨率',
         'tag.resolutionTitle': '模型名标注了 {value} 输出档位',
         'tag.imageInput': '可改图',
@@ -101,7 +110,10 @@ window.__ModuleLoader__.load({
         'source.provider': '中转站模型列表',
         'source.catalog': '内置模型目录',
         'source.inferred': '模型名推断',
+        'source.official': '厂商官方文档',
         'source.unknown': '未知',
+        'correction.glm-5.3-text-only':
+          '官方文档：GLM-5.3 仅支持文本模态；原生多模态的是 GLM-5.3-Flash / FlashX。',
         'modality.text': '文本',
         'modality.image': '图像',
         'modality.audio': '音频',
@@ -125,13 +137,20 @@ window.__ModuleLoader__.load({
         'page.refresh': 'Refresh',
         'page.showAll': 'Show all',
         'page.legend':
-          'Tags: Reasoning = adjustable levels; Context = input window; Multimodal = accepts images. Solid tags come from the adapter or the relay; dashed tags come from the built-in catalog or the model name. Image, video, embedding and other generation models show only their kind, never effort or text tags.',
+          'Tags: Reasoning = adjustable levels; Context = input window; Multimodal = accepts images. Solid tags come from the adapter, the relay or vendor documentation; dashed tags come from the built-in catalog or the model name. Image, video, embedding and other generation models show only their kind, never effort or text tags.',
         'page.metaFallback':
           'Model capability details are unavailable right now: context and modalities show as unknown, while effort levels still come from the shipped catalog.',
+        'page.hostStale':
+          'The Host half is still the previous version: the colours and switch are live, but image admission and vendor corrections take effect after DSH restarts (or the profile recomposes).',
         'page.providerFailures': 'Some providers could not be read: {names}',
         'page.probeSummary': 'Relay probe: {ok} model lists read, {caps} published capability fields',
         'page.probeSummaryNone': 'Relay probe: no readable route configuration',
         'page.catalogNote': 'Built-in catalog: pi-ai {version} snapshot ({date}), {models} models',
+        'page.applyInput': 'Let the composer admit images shown as supported',
+        'page.applyInputHint':
+          'When on, relay chat models labelled Multimodal advertise image input to the request path; when off, only the Provider input declaration counts. Relay (pi-ai) routes only — no configuration file is modified. Turn it off if a particular upstream still rejects images.',
+        'page.kindLegend':
+          'Colours separate model kinds: image blue · video green · embedding orange · audio purple · rerank red · moderation rose · translation grey. “Official correction” means the vendor documentation overrides a wrong catalog row.',
         'page.filterLabel': 'Filter',
         'page.filter.all': 'All',
         'page.filter.chat': 'Chat',
@@ -167,6 +186,8 @@ window.__ModuleLoader__.load({
         'tag.kindTitle': 'Model kind: {kind}; kind source: {source}',
         'tag.kindImageTitle': 'Image generation model (outputs images); kind source: {source}',
         'tag.kindVideoTitle': 'Video generation model (outputs video); kind source: {source}',
+        'tag.correction': 'Official correction',
+        'tag.correctionTitle': '{note}\nSource: {source}',
         'tag.resolution': 'Resolution',
         'tag.resolutionTitle': 'The model name advertises a {value} output tier',
         'tag.imageInput': 'Image edit',
@@ -185,7 +206,10 @@ window.__ModuleLoader__.load({
         'source.provider': 'relay model list',
         'source.catalog': 'built-in model catalog',
         'source.inferred': 'model name inference',
+        'source.official': 'vendor documentation',
         'source.unknown': 'unknown',
+        'correction.glm-5.3-text-only':
+          'Official docs: GLM-5.3 accepts text only; GLM-5.3-Flash / FlashX is the native multimodal variant.',
         'modality.text': 'text',
         'modality.image': 'image',
         'modality.audio': 'audio',
@@ -213,6 +237,13 @@ window.__ModuleLoader__.load({
 .mvp_groupCount{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}
 .mvp_row{border-bottom:.5px solid var(--dsw-alias-border-l1);justify-content:space-between;align-items:center;gap:16px;padding:10px 0;display:flex}
 .mvp_row--gen{background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
+.mvp_row--kind-image{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-business-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 4%, transparent)}
+.mvp_row--kind-video{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-success-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 4%, transparent)}
+.mvp_row--kind-embedding{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-warn-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 4%, transparent)}
+.mvp_row--kind-rerank{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-primary) 60%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 3%, transparent)}
+.mvp_row--kind-audio{box-shadow:inset 2px 0 0 color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 70%, transparent);background:transparent;background:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 4%, transparent)}
+.mvp_row--kind-classifier{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-secondary) 60%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 3%, transparent)}
+.mvp_row--kind-translation{box-shadow:inset 2px 0 0 var(--dsw-alias-border-l2)}
 .mvp_rowText{flex-direction:column;gap:2px;min-width:0;display:flex}
 .mvp_rowTitle{color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
 .mvp_rowMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px;overflow:hidden}
@@ -227,10 +258,26 @@ window.__ModuleLoader__.load({
 .mvp_tag{box-sizing:border-box;max-width:100%;height:18px;color:var(--dsw-alias-label-secondary);white-space:nowrap;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:4px;align-items:center;padding:0 6px;font-size:11px;line-height:16px;display:inline-flex;overflow:hidden;text-overflow:ellipsis}
 .mvp_tag--accent{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent)}
 .mvp_tag--vision{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent)}
-.mvp_tag--kind{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);font-weight:500}
+.mvp_tag--kind{font-weight:500}
+.mvp_tag--kind-image{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent)}
+.mvp_tag--kind-video{color:var(--dsw-alias-state-success-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 55%, transparent)}
+.mvp_tag--kind-embedding{color:var(--dsw-alias-state-warn-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 55%, transparent)}
+.mvp_tag--kind-rerank{color:var(--dsw-alias-state-error-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent)}
+.mvp_tag--kind-audio{color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary));background:transparent;background:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 12%, transparent);border-color:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 50%, transparent)}
+.mvp_tag--kind-classifier{color:var(--dsw-alias-state-error-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 55%, transparent)}
+.mvp_tag--kind-translation{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2)}
+.mvp_tag--kind-unknown{color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-border-l2)}
 .mvp_tag--inferred{border-style:dashed}
 .mvp_tag--muted{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l1)}
 .mvp_groupCap{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:400;line-height:16px}
+.mvp_kindCount--image{color:var(--dsw-alias-state-business-primary)}
+.mvp_kindCount--video{color:var(--dsw-alias-state-success-primary)}
+.mvp_kindCount--other{color:var(--dsw-alias-state-warn-primary)}
+.mvp_applyRow{flex:none;align-items:flex-start;gap:10px;margin:8px 0 2px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:8px 10px;display:flex;background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
+.mvp_applyText{flex-direction:column;gap:2px;min-width:0;display:flex}
+.mvp_applyTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px}
+.mvp_applyHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.mvp_applyRow .mvp_switch{margin-top:1px}
 .mvp_groupProbe{color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l2);border-radius:4px;max-width:100%;white-space:nowrap;text-overflow:ellipsis;padding:0 5px;font-size:10px;line-height:15px;overflow:hidden}
 .mvp_filters{align-items:center;gap:6px;padding:8px 0 2px;display:flex;flex-wrap:wrap}
 .mvp_filterLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
@@ -359,7 +406,7 @@ window.__ModuleLoader__.load({
       const tags = [
         {
           key: 'kind',
-          tone: 'kind',
+          tone: 'kind-' + kind,
           label: kindLabel,
           title: t(titleKey, { kind: kindLabel, source: sourceLabel(kindSource, t) }),
           inferred: isInferredSource(kindSource),
@@ -485,6 +532,29 @@ window.__ModuleLoader__.load({
             source: sourceLabel(modalitySource, t),
           }),
           inferred: isInferredSource(modalitySource),
+        })
+      }
+
+      // A vendor-documented correction is the one non-dashed value that is not
+      // an adapter declaration; keep it visible so "why is this text-only?"
+      // has an answer next to the tag.
+      const correction = model.correction
+      if (correction !== null && typeof correction === 'object' && typeof correction.code === 'string') {
+        const noteKey = 'correction.' + correction.code
+        const localized = t(noteKey)
+        const note = localized === noteKey
+          ? typeof correction.note === 'string' && correction.note !== ''
+            ? correction.note
+            : correction.code
+          : localized
+        tags.push({
+          key: 'correction',
+          tone: 'muted',
+          label: t('tag.correction'),
+          title: t('tag.correctionTitle', {
+            note,
+            source: typeof correction.source === 'string' && correction.source !== '' ? correction.source : '—',
+          }),
         })
       }
       return tags
@@ -840,9 +910,11 @@ window.__ModuleLoader__.load({
             ? ' mvp_tag--vision'
             : tag.tone === 'kind'
               ? ' mvp_tag--kind'
-              : tag.tone === 'muted'
-                ? ' mvp_tag--muted'
-                : ''
+              : typeof tag.tone === 'string' && tag.tone.startsWith('kind-')
+                ? ' mvp_tag--kind mvp_tag--' + tag.tone
+                : tag.tone === 'muted'
+                  ? ' mvp_tag--muted'
+                  : ''
       return 'mvp_tag' + tone + (tag.inferred === true ? ' mvp_tag--inferred' : '')
     }
 
@@ -879,11 +951,11 @@ window.__ModuleLoader__.load({
         }
         const disabled = busy || !writable
 
-        const commit = (next) => {
+        const writeField = (field, value) => {
           if (disabled) return
           setBusy(true)
           setError(null)
-          Promise.resolve(form.set(FIELD, Array.from(next))).then(
+          Promise.resolve(form.set(field, value)).then(
             (accepted) => {
               if (accepted === false) setError(t('page.saveFailed'))
             },
@@ -894,6 +966,10 @@ window.__ModuleLoader__.load({
             setBusy(false)
           })
         }
+
+        const commit = (next) => writeField(FIELD, Array.from(next))
+        const applyInput = !(snapshot.value && snapshot.value.applyInput === false)
+        const commitApply = (next) => writeField('applyInput', next)
 
         const toggleModel = (group, model) => {
           const next = new Set(hidden)
@@ -924,10 +1000,26 @@ window.__ModuleLoader__.load({
           const allShown = models.every((model) => !hidden.has(keyOf(group.id, model.id)))
           const kinds = countKinds(allGroupModels)
           const kindParts = []
-          if (kinds.chat > 0) kindParts.push(t('page.filter.chat') + ' ' + kinds.chat)
-          if (kinds.image > 0) kindParts.push(t('page.filter.image') + ' ' + kinds.image)
-          if (kinds.video > 0) kindParts.push(t('page.filter.video') + ' ' + kinds.video)
-          if (kinds.other > 0) kindParts.push(t('page.filter.other') + ' ' + kinds.other)
+          if (kinds.chat > 0) kindParts.push(['chat', t('page.filter.chat') + ' ' + kinds.chat])
+          if (kinds.image > 0) kindParts.push(['image', t('page.filter.image') + ' ' + kinds.image])
+          if (kinds.video > 0) kindParts.push(['video', t('page.filter.video') + ' ' + kinds.video])
+          if (kinds.other > 0) kindParts.push(['other', t('page.filter.other') + ' ' + kinds.other])
+          const kindNodes = []
+          for (const [index, [kindKey, label]] of kindParts.entries()) {
+            if (index > 0) kindNodes.push(' · ')
+            kindNodes.push(
+              h(
+                'span',
+                {
+                  key: kindKey,
+                  className:
+                    'mvp_kindCount' +
+                    (kindKey === 'chat' ? '' : ' mvp_kindCount--' + kindKey),
+                },
+                label,
+              ),
+            )
+          }
           const probe = probeOf(state, group, t)
           rows.push(
             h(
@@ -942,7 +1034,7 @@ window.__ModuleLoader__.load({
                   h('span', null, providerLabel(group, t)),
                   h('span', { className: 'mvp_groupCount' }, shown + '/' + allGroupModels.length),
                   kindParts.length > 0
-                    ? h('span', { className: 'mvp_groupCap' }, kindParts.join(' · '))
+                    ? h('span', { className: 'mvp_groupCap' }, kindNodes)
                     : null,
                   probe !== null
                     ? h('span', { className: 'mvp_groupProbe', title: probe.title || undefined }, probe.label)
@@ -968,12 +1060,21 @@ window.__ModuleLoader__.load({
               models.map((model) => {
                 const shownModel = !hidden.has(keyOf(group.id, model.id))
                 const tags = capabilityTags(model, t)
-                const generation = isGenerationKind(kindOf(model))
+                const kind = kindOf(model)
+                const generation = isGenerationKind(kind)
+                const kindTint =
+                  kind !== 'chat' &&
+                  ['image', 'video', 'embedding', 'rerank', 'audio', 'classifier', 'translation'].includes(kind)
+                    ? ' mvp_row--kind-' + kind
+                    : ''
                 return h(
                   'div',
                   {
                     key: model.id,
-                    className: 'mvp_row' + (generation ? ' mvp_row--gen' : ''),
+                    className:
+                      'mvp_row' +
+                      (generation ? ' mvp_row--gen' : '') +
+                      kindTint,
                   },
                   h(
                     'div',
@@ -1031,6 +1132,11 @@ window.__ModuleLoader__.load({
               : t('page.probeSummaryNone')
             : null
         const catalogMeta = state.catalog && typeof state.catalog === 'object' ? state.catalog : null
+        const hostFeatures =
+          catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
+        // A page refresh can deliver this bundle while the Host half is still
+        // the previous version; the switch would look live but do nothing.
+        const hostStale = state.source === 'host' && !hostFeatures.includes('applyInput')
         const catalogDate =
           catalogMeta && typeof catalogMeta.generatedAt === 'string'
             ? catalogMeta.generatedAt.slice(0, 10)
@@ -1117,10 +1223,35 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
+          h(
+            'div',
+            { className: 'mvp_applyRow' },
+            h(
+              'button',
+              {
+                type: 'button',
+                role: 'switch',
+                className: 'mvp_switch',
+                'aria-checked': applyInput,
+                'aria-label': t('page.applyInput'),
+                disabled: disabled,
+                onClick: () => commitApply(!applyInput),
+              },
+              h('span', { className: 'mvp_thumb' }),
+            ),
+            h(
+              'div',
+              { className: 'mvp_applyText' },
+              h('div', { className: 'mvp_applyTitle' }, t('page.applyInput')),
+              h('div', { className: 'mvp_applyHint' }, t('page.applyInputHint')),
+            ),
+          ),
           h('div', { className: 'mvp_legend' }, t('page.legend')),
+          h('div', { className: 'mvp_legend' }, t('page.kindLegend')),
           state.detailsError !== null && state.source === 'catalog'
             ? h('div', { className: 'mvp_fallback' }, t('page.metaFallback'))
             : null,
+          hostStale ? h('div', { className: 'mvp_fallback' }, t('page.hostStale')) : null,
           state.failures.length > 0
             ? h(
                 'div',

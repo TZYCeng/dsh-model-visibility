@@ -27,7 +27,8 @@ import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import { createModelInfoService } from './lib/model-info.js'
-import { createProviderProbe } from './lib/provider-probe.js'
+import { createProviderProbe, readProviderProfiles } from './lib/provider-probe.js'
+import { installImageInputGate } from './lib/image-input-gate.js'
 
 /** Settings namespace this entry owns; also the loader row id. */
 const ENTRY = 'model-visibility'
@@ -81,6 +82,14 @@ export const Config = z.object({
   hidden: z.array(z.string()).default(RESTORED).volatile(),
   /** Probe relay endpoints for capability metadata (set MODEL_VISIBILITY_PROBE=0 to disable). */
   probe: z.boolean().default(true),
+  /**
+   * Admit image input on relay models the page displays as multimodal. DSH
+   * builds the adapter model from the provider's `defaultInput` (usually
+   * text) when the route leaves `input` empty, so a relay model that really
+   * accepts images is rejected by both the session check and the serializer.
+   * Volatile so flipping the switch reaches the running Host without a reload.
+   */
+  applyInput: z.boolean().default(true).volatile(),
 })
 
 /**
@@ -102,6 +111,15 @@ export function apply(ctx, config) {
       ? value.get()
       : value
     return asKeyList(current)
+  }
+
+  /** Read one config field, tolerating both a volatile reference and a value. */
+  const liveConfig = (field, fallback) => {
+    const value = config?.[field]
+    const current = value !== null && typeof value === 'object' && typeof value.get === 'function'
+      ? value.get()
+      : value
+    return current === undefined ? fallback : current
   }
 
   let written
@@ -128,7 +146,12 @@ export function apply(ctx, config) {
      * change when the loader reports it differently.
      */
     const onConfigChanged = (paths) => {
-      if (Array.isArray(paths) && !paths.some((item) => Array.isArray(item) && item[0] === FIELD)) return
+      if (
+        Array.isArray(paths) &&
+        !paths.some((item) => Array.isArray(item) && (item[0] === FIELD || item[0] === 'applyInput'))
+      ) {
+        return
+      }
       persist()
     }
     if (typeof ctx.on === 'function') {
@@ -189,9 +212,48 @@ export function apply(ctx, config) {
         ? createProviderProbe({ settings, credentials, logger })
         : null
 
+    // Even with the relay probe disabled, the request-side gate still needs the
+    // provider declarations. Reading them is local and synchronous; cache the
+    // map per settings generation because the gate asks once per model.
+    let fallbackProfiles = null
+    const profilesForGate = () => {
+      if (fallbackProfiles !== null) return fallbackProfiles
+      if (typeof settings?.describe !== 'function') return new Map()
+      try {
+        fallbackProfiles = readProviderProfiles(settings.describe())
+      } catch (_error) {
+        fallbackProfiles = new Map()
+      }
+      return fallbackProfiles
+    }
+    const clearFallbackProfiles = () => {
+      fallbackProfiles = null
+    }
+
     const service = createModelInfoService(scope.llm, {
       enrichment: probe === null ? undefined : ({ fresh }) => probe.read({ fresh }),
+      // Synchronous evidence for the request-side image gate: provider profiles
+      // from the settings document plus the last completed relay probe.
+      context: () => ({
+        profiles: probe === null ? profilesForGate() : probe.profiles(),
+        discovered: probe?.peek()?.discovered,
+      }),
     })
+
+    // Make the relay adapter admit images for models the page displays as
+    // multimodal. The patch is read-only: an explicit provider declaration
+    // still wins, and the settings switch can turn the behaviour off.
+    const imageInput = installImageInputGate(scope.llm, {
+      allow: (provider, model) =>
+        liveConfig('applyInput', true) !== false && service.imageInputAllowed(provider, model),
+      warn: (error) => {
+        if (typeof logger.warn === 'function') {
+          logger.warn('model-visibility: image input gate failed')
+          logger.warn(error)
+        }
+      },
+    })
+    scope.effect(() => () => imageInput.dispose(), 'model-visibility: image input gate')
 
     /** Answer with JSON; the route is diagnostics-friendly on purpose. */
     const json = (value, status = 200) =>
@@ -248,10 +310,13 @@ export function apply(ctx, config) {
       const invalidateAll = () => {
         service.invalidate()
         probe?.invalidate()
+        clearFallbackProfiles()
+        imageInput.refresh()
       }
       const noteSettings = () => {
         service.invalidate()
         probe?.noteSettingsChanged()
+        clearFallbackProfiles()
       }
       if (typeof scope.on === 'function') {
         offs.push(scope.on('llm/adapters-updated', invalidateAll))

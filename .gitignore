@@ -6,3 +6,5 @@ package-lock.json
 Thumbs.db
 .tools/
 docs/.write-test
+.publish/
+.tmp-diff.txt

@@ -15,6 +15,7 @@ import {
   modelIdVariants,
   normalizeModelId,
 } from '../lib/capability-catalog.js'
+import { lookupCorrection } from '../lib/capability-corrections.js'
 import { indexDiscovered, mergeCapabilities } from '../lib/model-info.js'
 
 test('normalizeModelId strips aggregator prefixes and request suffixes', () => {
@@ -236,6 +237,60 @@ test('mergeCapabilities uses an explicitly multimodal provider default', () => {
   )
   assert.deepEqual(record.inputModalities, ['text', 'image'])
   assert.equal(record.sources.modalities, 'config')
+})
+
+test('lookupCorrection targets the exact catalog row, not its variants', () => {
+  const glm = lookupCorrection('z-ai/glm-5.3')
+  assert.equal(glm.code, 'glm-5.3-text-only')
+  assert.deepEqual(glm.input, ['text'])
+  assert.equal(glm.source, 'https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3')
+  assert.equal(lookupCorrection('glm-5.3-flash'), undefined)
+  assert.equal(lookupCorrection('glm-5p3'), undefined)
+  assert.equal(lookupCorrection('grok-4.7'), undefined)
+})
+
+test('mergeCapabilities lets a vendor correction beat a wrong catalog row', () => {
+  const record = mergeCapabilities(
+    { id: 'glm-5.3', name: 'glm-5.3' },
+    { profile: relayProfile(['glm-5.3']) },
+  )
+  assert.deepEqual(record.inputModalities, ['text'])
+  assert.equal(record.sources.modalities, 'official')
+  assert.equal(record.correction.code, 'glm-5.3-text-only')
+  // The rest of the catalog row stays useful.
+  assert.equal(record.contextWindow, 1048576)
+  assert.equal(record.sources.context, 'catalog')
+})
+
+test('mergeCapabilities lets a vendor correction beat a relay listing too', () => {
+  const record = mergeCapabilities(
+    { id: 'glm-5.3', name: 'glm-5.3' },
+    {
+      profile: relayProfile(['glm-5.3']),
+      discovered: { id: 'glm-5.3', inputModalities: ['text', 'image'], contextWindow: 2048 },
+    },
+  )
+  assert.deepEqual(record.inputModalities, ['text'])
+  assert.equal(record.sources.modalities, 'official')
+  assert.equal(record.correction.code, 'glm-5.3-text-only')
+  // Other relay facts still come from the relay.
+  assert.equal(record.contextWindow, 2048)
+  assert.equal(record.sources.context, 'provider')
+})
+
+test('mergeCapabilities keeps an explicit provider declaration over a correction', () => {
+  const profile = {
+    id: 'relay',
+    defaultInput: ['text'],
+    models: new Map([['glm-5.3', { id: 'glm-5.3', input: ['text', 'image'] }]]),
+  }
+  const record = mergeCapabilities(
+    { id: 'glm-5.3', name: 'glm-5.3' },
+    { profile },
+  )
+  assert.deepEqual(record.inputModalities, ['text', 'image'])
+  assert.equal(record.sources.modalities, 'config')
+  assert.equal(record.correction, undefined)
 })
 
 test('indexDiscovered matches case and variant spellings', () => {
