@@ -56,6 +56,16 @@ window.__ModuleLoader__.load({
         'page.kindLegend':
           '颜色区分模型类型：生图 蓝 · 生视频 绿 · 嵌入 橙 · 音频 紫 · 重排 红 · 审核 玫红 · 翻译 灰。「官方校正」表示内置目录与厂商文档不一致时以文档为准。',
         'page.filterLabel': '筛选',
+        'page.searchPlaceholder': '搜索模型名称或 ID',
+        'page.capabilityLabel': '能力',
+        'page.capability.multimodal': '多模态',
+        'page.capability.reasoning': '支持推理',
+        'page.contextLabel': '上下文至少',
+        'page.context.any': '不限',
+        'page.context.128k': '128K+',
+        'page.context.256k': '256K+',
+        'page.context.512k': '512K+',
+        'page.context.1m': '1M+',
         'page.filter.all': '全部',
         'page.filter.chat': '对话',
         'page.filter.image': '生图',
@@ -152,6 +162,16 @@ window.__ModuleLoader__.load({
         'page.kindLegend':
           'Colours separate model kinds: image blue · video green · embedding orange · audio purple · rerank red · moderation rose · translation grey. “Official correction” means the vendor documentation overrides a wrong catalog row.',
         'page.filterLabel': 'Filter',
+        'page.searchPlaceholder': 'Search model name or ID',
+        'page.capabilityLabel': 'Capabilities',
+        'page.capability.multimodal': 'Multimodal',
+        'page.capability.reasoning': 'Reasoning',
+        'page.contextLabel': 'Context at least',
+        'page.context.any': 'Any',
+        'page.context.128k': '128K+',
+        'page.context.256k': '256K+',
+        'page.context.512k': '512K+',
+        'page.context.1m': '1M+',
         'page.filter.all': 'All',
         'page.filter.chat': 'Chat',
         'page.filter.image': 'Image',
@@ -281,6 +301,11 @@ window.__ModuleLoader__.load({
 .mvp_groupProbe{color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l2);border-radius:4px;max-width:100%;white-space:nowrap;text-overflow:ellipsis;padding:0 5px;font-size:10px;line-height:15px;overflow:hidden}
 .mvp_filters{align-items:center;gap:6px;padding:8px 0 2px;display:flex;flex-wrap:wrap}
 .mvp_filterLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.mvp_search{align-items:center;gap:6px;display:flex;min-width:220px;flex:1 1 220px}
+.mvp_searchInput{box-sizing:border-box;width:100%;height:28px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px;line-height:18px}
+.mvp_searchInput:focus-visible,.mvp_contextSelect:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.mvp_context{align-items:center;gap:6px;display:flex}
+.mvp_contextSelect{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 6px;font-family:inherit;font-size:11px;line-height:18px}
 .mvp_filter{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 9px;font-family:inherit;font-size:11px;line-height:18px}
 .mvp_filter:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
 .mvp_filter[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
@@ -942,11 +967,29 @@ window.__ModuleLoader__.load({
         const allKinds = countKinds(groups.flatMap((group) => group.models || []))
         const generationCount = allKinds.image + allKinds.video
         const [filter, setFilter] = React.useState('all')
+        const [query, setQuery] = React.useState('')
+        const [multimodalOnly, setMultimodalOnly] = React.useState(false)
+        const [reasoningOnly, setReasoningOnly] = React.useState(false)
+        const [minContext, setMinContext] = React.useState(0)
+        const normalizedQuery = query.trim().toLowerCase()
         const filteredGroups = []
         for (const group of groups) {
-          const models = (group.models || []).filter(
-            (model) => filter === 'all' || bucketOf(kindOf(model)) === filter,
-          )
+          const models = (group.models || []).filter((model) => {
+            if (filter !== 'all' && bucketOf(kindOf(model)) !== filter) return false
+            if (normalizedQuery !== '') {
+              const name = String(model.name || '').toLowerCase()
+              const id = String(model.id || '').toLowerCase()
+              if (!name.includes(normalizedQuery) && !id.includes(normalizedQuery)) return false
+            }
+            if (multimodalOnly && !(Array.isArray(model.inputModalities) && model.inputModalities.includes('image'))) {
+              return false
+            }
+            if (reasoningOnly && model.reasoningSupported !== true) return false
+            if (minContext > 0 && !(Number.isFinite(model.contextWindow) && model.contextWindow >= minContext)) {
+              return false
+            }
+            return true
+          })
           if (models.length > 0) filteredGroups.push({ ...group, models })
         }
         const disabled = busy || !writable
@@ -1156,6 +1199,8 @@ window.__ModuleLoader__.load({
           ['video', t('page.filter.video'), allKinds.video],
           ['other', t('page.filter.other'), allKinds.other],
         ]
+        const hasActiveFilters =
+          filter !== 'all' || normalizedQuery !== '' || multimodalOnly || reasoningOnly || minContext > 0
 
         return h(
           'div',
@@ -1208,6 +1253,17 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'mvp_filters' },
+            h('label', { className: 'mvp_search' },
+              h('span', { className: 'mvp_filterLabel' }, t('page.searchPlaceholder')),
+              h('input', {
+                className: 'mvp_searchInput',
+                type: 'search',
+                value: query,
+                placeholder: t('page.searchPlaceholder'),
+                'aria-label': t('page.searchPlaceholder'),
+                onInput: (event) => setQuery(event.target.value),
+              }),
+            ),
             h('span', { className: 'mvp_filterLabel' }, t('page.filterLabel')),
             filterOptions.map(([value, label, count]) =>
               h(
@@ -1220,6 +1276,46 @@ window.__ModuleLoader__.load({
                   onClick: () => setFilter(value),
                 },
                 label + ' ' + count,
+              ),
+            ),
+            h('span', { className: 'mvp_filterLabel' }, t('page.capabilityLabel')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'mvp_filter',
+                'aria-pressed': multimodalOnly,
+                onClick: () => setMultimodalOnly(!multimodalOnly),
+              },
+              t('page.capability.multimodal'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'mvp_filter',
+                'aria-pressed': reasoningOnly,
+                onClick: () => setReasoningOnly(!reasoningOnly),
+              },
+              t('page.capability.reasoning'),
+            ),
+            h('label', { className: 'mvp_context' },
+              h('span', { className: 'mvp_filterLabel' }, t('page.contextLabel')),
+              h(
+                'select',
+                {
+                  className: 'mvp_contextSelect',
+                  value: String(minContext),
+                  'aria-label': t('page.contextLabel'),
+                  onChange: (event) => setMinContext(Number(event.target.value)),
+                },
+                [
+                  [0, 'page.context.any'],
+                  [128000, 'page.context.128k'],
+                  [256000, 'page.context.256k'],
+                  [512000, 'page.context.512k'],
+                  [1000000, 'page.context.1m'],
+                ].map(([value, label]) => h('option', { key: value, value: String(value) }, t(label))),
               ),
             ),
           ),
@@ -1273,7 +1369,7 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'mvp_error', role: 'alert' }, t('page.error', { message: state.error }))
             : null,
           rows.length > 0 ? rows : null,
-          total > 0 && filter !== 'all' && rows.length === 0
+          total > 0 && hasActiveFilters && rows.length === 0
             ? h('div', { className: 'mvp_note' }, t('page.filterEmpty'))
             : null,
           rows.length === 0 && !loading && state.error === null && total === 0

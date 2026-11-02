@@ -24,6 +24,8 @@ test('normalizeModelId strips aggregator prefixes and request suffixes', () => {
   assert.equal(normalizeModelId('anthropic.claude-fable-5'), 'claude-fable-5')
   assert.equal(normalizeModelId('global.xai.grok-4.7'), 'grok-4.7')
   assert.equal(normalizeModelId('deepseek-v4-pro:free'), 'deepseek-v4-pro')
+  assert.equal(normalizeModelId('gpt-4:free:batch'), 'gpt-4')
+  assert.equal(normalizeModelId('gpt-4-free:thinking'), 'gpt-4')
   assert.equal(normalizeModelId('  GPT-6-SOL  '), 'gpt-6-sol')
 })
 
