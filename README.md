@@ -1,6 +1,6 @@
 # dsh-model-visibility
 
-> **In English:** a DeepSeek Harness bundle plugin that adds a *Settings → Model visibility* page. Every model of every provider can be switched off, so it disappears from the composer's model menu; every remaining model is labelled with what it can actually do — reasoning support and the reasoning-effort levels the adapter publishes, context window, input modalities, and whether it is a chat, image, video, embedding, rerank, audio, classifier or translation model. Those facts are merged from six sources in priority order (settings document, adapter, the relay's own `GET /models`, a built-in pi-ai / models.dev catalog, model-name inference, a vendor-correction table) and the page names the source on hover, with solid borders for declared values and dashed for inferred ones. A switch, on by default, makes relay routes whose models declare text-only input accept images in memory, without editing any configuration file. The rest of this README is in Chinese.
+> **In English:** a DeepSeek Harness bundle plugin that adds a *Settings → Model visibility* page. Every model of every provider can be switched off, so it disappears from the composer's model menu; every remaining model is labelled with what it can actually do — reasoning support and the reasoning-effort levels the adapter publishes, context window, input modalities, and whether it is a chat, image, video, embedding, rerank, audio, classifier or translation model. The list can be searched by name or ID and filtered by kind, by capability (multimodal, reasoning) and by minimum context window. Those facts are merged from six sources in priority order (settings document, adapter, the relay's own `GET /models`, a built-in pi-ai / models.dev catalog, model-name inference, a vendor-correction table) and the page names the source on hover, with solid borders for declared values and dashed for inferred ones. A switch, on by default, makes relay routes whose models declare text-only input accept images in memory, without editing any configuration file. The rest of this README is in Chinese.
 
 在 DeepSeek Harness 的设置里管理「哪些模型出现在聊天输入框的模型菜单中」，按 Provider 分组一键显示/隐藏，并在**每个模型**下面标注它的真实能力：是否支持推理、思考强度档位、上下文窗口、输入/输出模态，以及它是对话模型还是生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译模型。生图、生视频等类型用不同颜色标注；厂商文档能证明目录写错的行会显示 `官方校正`。插件还能把「显示为多模态」变成「输入框真的能发图」：对中转站路由做内存态能力对齐，不修改任何配置文件。
 
@@ -38,7 +38,7 @@ yujianwudi:
 - **让输入框按能力标注放行图像**（默认开启）：中转站的 `input` 通常是空的，适配器按 `defaultInput: [text]` 构造模型，于是“页面显示多模态、发图却被拒绝”。开启后 Host 会在内存里给这类 pi-ai 中转站模型补上图像能力，让发送前的准入检查和请求序列化都能通过；只补插件判定为可输入图像的对话模型，不改任何配置文件，关闭开关即恢复原状。
 - **来源可见**：实线标签来自适配器、中转站或厂商文档；虚线标签来自内置模型目录或模型名推断。悬停任一标签可看到「来源：适配器配置 / 中转站模型列表 / 内置模型目录 / 模型名推断 / 厂商官方文档」。
 - **生成类模型只标类型**：生图 / 生视频 / 嵌入等模型不再显示推理档位、上下文或「纯文本」，只显示 `生图`、`分辨率 4K`、`可改图` 这类真正相关的信息。
-- **筛选**：顶部有 `全部 / 对话 / 生图 / 生视频 / 其它` 快捷筛选，每个按钮带数量。
+- **筛选**：顶部有 `全部 / 对话 / 生图 / 生视频 / 其它` 快捷筛选，每个按钮带数量；旁边还能按名称 / ID 搜索，按能力（`多模态`、`支持推理`）开关，以及按「上下文至少 128K / 256K / 512K / 1M」过滤。多个条件同时生效，筛选状态下「全组隐藏 / 全组显示」只作用于当前结果。
 - **分组汇总**：每组标题显示 `已显示/总数`、`对话 n · 生图 n · 生视频 n · 其它 n`，以及中转站探测结果（读到了多少模型、多少公布能力字段，未公布会明确写出来）。
 - **分组一键开关**：每组标题右侧是「全组隐藏 / 全组显示」；筛选状态下按钮只作用于当前筛选结果。
 - **对话菜单只显示开启的模型**：隐藏模型连同变空的分组一起消失；当前会话正在使用的模型即使被关闭也会保留，因为收起态按钮靠这份目录显示模型名。

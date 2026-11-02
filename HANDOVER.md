@@ -1,7 +1,7 @@
 # HANDOVER — dsh-model-visibility
 
 > 给下一个接手的人 / AI。目标：**不用重新啃 DSH 源码就能继续加功能**。
-> 当前版本 **1.5.0**（真实能力探测 + 生成类模型标注 + 官方校正 + 请求侧图像准入对齐）。
+> 当前版本 **1.6.0**（真实能力探测 + 生成类模型标注 + 官方校正 + 请求侧图像准入对齐 + 名称搜索 / 能力筛选）。
 
 ---
 
@@ -373,7 +373,8 @@ git commit -m "feat: real capability sources, relay probe, generation model tags
 git push origin main
 ```
 
-- 版本号在 `package.json`；当前 `1.5.0`。
+- 版本号在 `package.json`；当前 `1.6.0`。
+- 发版三步：改版本号与 README/HANDOVER → `npm test` → commit + tag `v1.6.0` + push → `npm pack --pack-destination .publish` → 建 Release 并上传 **不带版本号** 的 `dsh-model-visibility.tgz`（市场条目的 `releases/latest/download/...` 因此永远指向最新包），再补一份带版本号的产物。
 - `files` 已包含 `lib`；`scripts` / `test` / `.tools` 不进包。
 - `docs/` 旧截图仍保留；如果重新截图，先确认目录可写（见坑 18）。
 
@@ -404,7 +405,7 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 
 ## 11. 还可以做什么（按价值排序）
 
-1. **搜索 / 按能力筛选**（多模态、支持推理、上下文 ≥ N）。
+1. ~~**搜索 / 按能力筛选**（多模态、支持推理、上下文 ≥ N）~~ —— 1.6.0 已做：名称 / ID 搜索、`多模态` / `支持推理` 开关、上下文下限下拉（128K / 256K / 512K / 1M），见 `client.js` 的 `filteredGroups`。剩下的可做：筛选条件计数、搜索高亮、把筛选写进 URL。
 2. **显示价格 / 输出上限**（`defaultMaxTokens` 已有；价格可从 `/api/pricing` 的 ratio 字段来，注意各家中转站口径不同）。
 3. **把「当前会话模型」固定在每组顶部**。
 4. **一键导出当前可见模型 / 能力表**（JSON / CSV，排查「为什么菜单里没有 X」）。
