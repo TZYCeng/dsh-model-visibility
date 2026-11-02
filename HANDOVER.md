@@ -393,8 +393,8 @@ icon: https://raw.githubusercontent.com/TZYCeng/dsh-model-visibility/main/docs/i
 tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/download/dsh-model-visibility.tgz
 ```
 
-- 首次投稿 PR：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11149（从 fork `TZYCeng/awesome-dsh-plugin` 的 `add/tzyceng-dsh-model-visibility` 分支发出）。
-- CI 结论（head `13420d6`）：`PR check` 通过（约 11 分钟：`npm ci`、`awesome-lint`、四个 `node --test`、`build-site.mjs`）；`Submission gate` 通过，原文「All 1 submitted entry passes: `dsh.bundle` declared, repo old enough, enough commits.」。PR 状态 `mergeable: clean`，等维护者评审合并。
+- 首次投稿 PR：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11149 —— **已合并**（fkysly，2026-11-02，commit `d8fc9be`，「2 checks passed」）。CI 结论（head `13420d6`）：`PR check` 通过（约 11 分钟：`npm ci`、`awesome-lint`、四个 `node --test`、`build-site.mjs`）；`Submission gate` 通过，原文「All 1 submitted entry passes: `dsh.bundle` declared, repo old enough, enough commits.」。
+- 1.6.0 发布后同步：条目 `description` 补上「名称 / ID 搜索、按能力（多模态、支持推理）与上下文下限筛选」。合并时用的是 1.6.0 之前的文案，因此另开了补文案的 PR：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11353（分支 `update/tzyceng-dsh-model-visibility-1.6.0`，从 fork main 同步到 upstream `152f265` 后只改这一个文件）。
 - 发新版本后：`npm pack` 出的 tgz 以 **不带版本号** 的名字 `dsh-model-visibility.tgz` 传到该 tag 的 Release，`latest/download` 就始终指向最新包，条目文件不用再改。
 - `screenshots.json`（放在 `package.json` 旁边）列出 1–8 个仓库内相对路径；市场每晚探测，推自己的仓库即可换图，不用再提 PR。
 - `icon-180.png` 由 `icon.svg` 光栅化而来（`icon.svg` 不能被市场当图标）。
