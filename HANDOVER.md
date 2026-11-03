@@ -439,7 +439,7 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - `icon-180.png` 由 `icon.svg` 光栅化而来（`icon.svg` 不能被市场当图标）。
 - 仓库需要 `dsh-plugin` topic；`dsh.bundle` + `cordis.patch.yml` 是安装的前提，只有 `dsh.client` 会被 CI 拒。
 - 1.9.0 起条目说明应覆盖：手动覆盖能力（含写回 Provider 配置）、整组折叠、重新获取能力、名称 / ID 搜索与能力 / 上下文筛选、官方校正、图像放行。改条目后同样要等 `PR check`（约 18 min）+ `Submission gate`。
-- 1.9.0 的条目更新 PR：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11745（分支 `update/tzyceng-dsh-model-visibility-1.9.0`，从 fork main 同步到 upstream `ec0da42` 后只改这一个文件）。
+- 1.9.0 的条目更新 PR：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11745（分支 `update/tzyceng-dsh-model-visibility-1.9.0`，从 fork main 同步到 upstream `ec0da42` 后只改这一个文件）。CI 已全绿（head `95ad000`）：`PR check` 通过（2026-11-03T15:32:24Z 起约 12 分钟，run 41664925071），`Submission gate` 通过，标题「No new entries; 1 modified」。等维护者合并。
 - 截图：`docs/settings-page.png`（设置页全貌）与 `docs/capability-tags.png`（模型行 + 编辑入口），`screenshots.json` 同步；旧的 `model-visibility-*.png` 已删除。
 
 ### 10.2 npm
@@ -448,6 +448,9 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - `package.json`：`name` 用作用域名、去掉 `"private": true`、加 `"publishConfig": { "access": "public" }`（作用域包默认私有，必须显式 public）。
 - 发布：`npm whoami` 确认是 `tzyc` → `npm publish`。发布前 `npm test` 全绿，`npm pack --dry-run` 确认文件清单（`test/`、`scripts/`、`.publish/`、`.tools/` 不进包）。
 - 安装：`install_bundle target = @tzyc/dsh-model-visibility`。
+- 1.9.0 已发布：2026-11-03T15:47:15Z，`shasum 3d2fcaf3d7fbfe607c3e1e88de991092b1569224`，`latest` = `1.9.0`，21 个文件 / 288.2 kB。npm 的 staged publish 会在版本列表里留下一个 `0.0.0-stage` 占位版本（网站标「Temporary package placeholder for staged publishing」），`latest` 仍指向 `1.9.0`，不用处理。
+- 本机 `npm publish` 会被要求 OTP（`EOTP`），而 npm 会把一次性网页地址在输出里打码（`https://www.npmjs.com/auth/cli/***`）。两条可行路径：① 在仓库里自己跑 `npm publish`，浏览器完成认证；② 用带 2FA bypass 的 granular token，写进一份临时 userconfig（`npm publish --userconfig .publish/npmrc`，该文件在 gitignore 内），不要覆盖用户自己的 `~/.npmrc`。
+- 发布后核对：`npm view @tzyc/dsh-model-visibility version` 与 `npm pack @tzyc/dsh-model-visibility@1.9.0` 后看 `package/cordis.patch.yml` 里的 `name` 是否为作用域名。CDN 传播可能 1–3 分钟，期间 registry 仍回 404，属正常。
 
 ---
 
