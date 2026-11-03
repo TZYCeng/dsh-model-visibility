@@ -439,6 +439,8 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - `icon-180.png` 由 `icon.svg` 光栅化而来（`icon.svg` 不能被市场当图标）。
 - 仓库需要 `dsh-plugin` topic；`dsh.bundle` + `cordis.patch.yml` 是安装的前提，只有 `dsh.client` 会被 CI 拒。
 - 1.9.0 起条目说明应覆盖：手动覆盖能力（含写回 Provider 配置）、整组折叠、重新获取能力、名称 / ID 搜索与能力 / 上下文筛选、官方校正、图像放行。改条目后同样要等 `PR check`（约 18 min）+ `Submission gate`。
+- 1.9.0 的条目更新 PR：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11745（分支 `update/tzyceng-dsh-model-visibility-1.9.0`，从 fork main 同步到 upstream `ec0da42` 后只改这一个文件）。
+- 截图：`docs/settings-page.png`（设置页全貌）与 `docs/capability-tags.png`（模型行 + 编辑入口），`screenshots.json` 同步；旧的 `model-visibility-*.png` 已删除。
 
 ### 10.2 npm
 
