@@ -1,18 +1,35 @@
-# dsh-model-visibility
+<div align="center">
 
-> **In English:** a DeepSeek Harness bundle plugin that adds a *Settings → Model visibility* page. Every model of every provider can be switched off, so it disappears from the composer's model menu; every remaining model is labelled with what it can actually do — reasoning support and the reasoning-effort levels the adapter publishes, context window, input modalities, and whether it is a chat, image, video, embedding, rerank, audio, classifier or translation model. The list can be searched by name or ID and filtered by kind, by capability (multimodal, reasoning) and by minimum context window. Those facts are merged from six sources in priority order (settings document, adapter, the relay's own `GET /models`, a built-in pi-ai / models.dev catalog, model-name inference, a vendor-correction table) and the page names the source on hover, with solid borders for declared values and dashed for inferred ones. A switch, on by default, makes relay routes whose models declare text-only input accept images in memory, without editing any configuration file. The rest of this README is in Chinese.
+# 模型显示 · dsh-model-visibility
 
-在 DeepSeek Harness 的设置里管理「哪些模型出现在聊天输入框的模型菜单中」，按 Provider 分组一键显示/隐藏，并在**每个模型**下面标注它的真实能力：是否支持推理、思考强度档位、上下文窗口、输入/输出模态，以及它是对话模型还是生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译模型。生图、生视频等类型用不同颜色标注；厂商文档能证明目录写错的行会显示 `官方校正`。插件还能把「显示为多模态」变成「输入框真的能发图」：对中转站路由做内存态能力对齐，不修改任何配置文件。
+**在 DeepSeek Harness 里，把「模型菜单」变成一张看得懂、改得动、发得出图的清单。**
 
-一个 DSH bundle 插件：Host 端负责持久化偏好、读取 Provider 配置、探测中转站模型列表，并把能力目录投影给浏览器；浏览器端过滤模型目录并渲染设置页。它**不接管**输入框的模型座位，因此官方的「模型 / 推理等级」两级菜单、推理等级调整，以及像 `dsh-codex-effort-slider` 那样改造这一行的插件都保持可用。
+每个模型一个开关 · 每个模型标注真实能力 · 想改就改，想发图就发图
 
-![设置 → 模型显示：按 Provider 分组的模型开关列表](docs/model-visibility-settings.png)
+[![license](https://img.shields.io/badge/license-MIT-3da639?style=flat-square)](LICENSE)
+[![dsh bundle](https://img.shields.io/badge/DeepSeek%20Harness-bundle-4d6bfe?style=flat-square)](package.json)
+[![tests](https://img.shields.io/badge/tests-72%20passing-3da639?style=flat-square)](test)
+[![version](https://img.shields.io/badge/version-1.9.0-4d6bfe?style=flat-square)](https://github.com/TZYCeng/dsh-model-visibility/releases)
+[![marketplace](https://img.shields.io/badge/awesome--dsh--plugin-listed-8a2be2?style=flat-square)](https://awesome-dsh-plugin.com/p/TZYCeng/dsh-model-visibility/)
 
-![每个模型下的能力标签：推理、思考强度、上下文窗口、模态与模型类型](docs/model-visibility-capability-tags.png)
+</div>
+
+> **In English:** a DeepSeek Harness bundle that adds a *Settings → Model visibility* page. Every model of every provider gets a switch (off models vanish from the composer's model menu), and every remaining model is labelled with what it can actually do — reasoning support and the reasoning-effort levels the adapter publishes, context window, input modalities, and whether it is a chat, image, video, embedding, rerank, audio, classifier or translation model. The list can be searched by name or ID, filtered by kind, by capability (multimodal, reasoning) and by minimum context window, and provider groups can be collapsed. Labels merge six sources in priority order (manual override, settings document, adapter, the relay's own `GET /models`, a built-in pi-ai / models.dev catalog, model-name inference, vendor corrections); the page names the source on hover, with solid borders for declared values and dashed for inferred ones. Any model can be edited by hand — kind, context window, modalities, effort levels — and those edits can be written back into the model provider's own settings. A switch, on by default, makes relay routes whose models declare text-only input accept images in memory, without editing any configuration file. The rest of this README is in Chinese.
+
+<p align="center">
+  <img src="docs/settings-page.png" width="49%" alt="设置 → 模型显示：分组开关、筛选工具栏、能力图例与图像放行开关">
+  <img src="docs/capability-tags.png" width="49%" alt="模型行：类型色条、推理档位、上下文窗口、模态标签与「编辑能力」入口">
+</p>
+
+<p align="center"><sub>左：设置 → 模型显示（分组、统计、筛选、图例、图像放行开关）　右：模型行（类型、能力标签、编辑入口）</sub></p>
+
+**目录** · [为什么](#为什么需要它) · [功能](#功能) · [安装](#安装) · [界面](#界面速览) · [能力来源](#能力标注从哪里来) · [手动覆盖](#手动覆盖能力) · [官方校正](#官方校正) · [图像放行](#让输入框真的能发图) · [探测](#中转站探测) · [路由](#路由) · [结构](#结构) · [测试](#测试) · [限制](#已知限制)
+
+---
 
 ## 为什么需要它
 
-DSH 官方的 `session.modelCatalog` 只把模型 id / 名称 / 推理档位投影给浏览器，**没有**上下文窗口、输入模态和输出类型。自定义中转站通常这样配置：
+DSH 官方的 `session.modelCatalog` 只把模型 id / 名称 / 推理档位投影给浏览器，**没有**上下文窗口、输入模态和输出类型。而自定义中转站通常这样配置：
 
 ```yaml
 yujianwudi:
@@ -24,83 +41,157 @@ yujianwudi:
       input: []          # 不是“纯文本”，只是“没声明”
 ```
 
-于是 registry 会把 `defaultInput: [text]` 当成模型能力，Grok / Claude / GPT / Gemini 全部显示成「纯文本」。本插件不再把这种默认值当成事实：它读取真实的中转站模型列表、用内置模型目录补全，并把「适配器声明」和「补全值」在 UI 上区分开。
+于是 registry 把 `defaultInput: [text]` 当成事实，Grok / Claude / GPT / Gemini 全部显示成「纯文本」，发图被拒；菜单里还塞满了用不到的嵌入、生图、生视频模型。
+
+这个插件做三件事：
+
+1. **收起来** —— 不用的模型关掉，连同空掉的分组一起从对话菜单消失；
+2. **说清楚** —— 给每个模型标注它真正的模态、上下文、推理档位与类型，并写明每个标签的来源；
+3. **改得动** —— 自动识别不到时手动指定，必要时写回模型提供商配置；判定能发图的模型，输入框真的能发图。
 
 ## 功能
 
-- **设置 → 模型显示**：按 Provider 分组列出全部模型，每个模型一个开关；关闭的模型立即从对话菜单中消失。
-- **能力标签（按可信度分层）**：
-  - `支持推理` / `不支持推理` / `推理未知`，以及适配器公布的全部思考强度档位（默认档位在悬停提示里）；
-  - `上下文 1M` / `上下文 200K`（悬停显示精确 token 数与来源）；
-  - `多模态` / `纯文本` / `模态未知`（输入模态）；
-  - `生图`、`生视频`、`嵌入`、`重排`、`音频`、`审核`、`翻译`：生成类 / 非对话模型单独标记，并各用一种颜色（生图蓝、生视频绿、嵌入橙、音频紫、重排红、审核玫红、翻译灰）。
-- **官方校正**：内置目录是快照，个别行会错（例如 `glm-5.3` 被标成多模态，而厂商文档写明它只收文本）。这类行用厂商文档校正，页面显示 `官方校正` 标签，来源是 `厂商官方文档`，不会被误当成适配器声明。
-- **让输入框按能力标注放行图像**（默认开启）：中转站的 `input` 通常是空的，适配器按 `defaultInput: [text]` 构造模型，于是“页面显示多模态、发图却被拒绝”。开启后 Host 会在内存里给这类 pi-ai 中转站模型补上图像能力，让发送前的准入检查和请求序列化都能通过；只补插件判定为可输入图像的对话模型，不改任何配置文件，关闭开关即恢复原状。
-- **来源可见**：实线标签来自适配器、中转站或厂商文档；虚线标签来自内置模型目录或模型名推断。悬停任一标签可看到「来源：适配器配置 / 中转站模型列表 / 内置模型目录 / 模型名推断 / 厂商官方文档」。
-- **生成类模型只标类型**：生图 / 生视频 / 嵌入等模型不再显示推理档位、上下文或「纯文本」，只显示 `生图`、`分辨率 4K`、`可改图` 这类真正相关的信息。
-- **筛选**：顶部有 `全部 / 对话 / 生图 / 生视频 / 其它` 快捷筛选，每个按钮带数量；旁边还能按名称 / ID 搜索，按能力（`多模态`、`支持推理`）开关，以及按「上下文至少 128K / 256K / 512K / 1M」过滤。多个条件同时生效，筛选状态下「全组隐藏 / 全组显示」只作用于当前结果。
-- **分组汇总**：每组标题显示 `已显示/总数`、`对话 n · 生图 n · 生视频 n · 其它 n`，以及中转站探测结果（读到了多少模型、多少公布能力字段，未公布会明确写出来）。
-- **分组一键开关**：每组标题右侧是「全组隐藏 / 全组显示」；筛选状态下按钮只作用于当前筛选结果。
-- **对话菜单只显示开启的模型**：隐藏模型连同变空的分组一起消失；当前会话正在使用的模型即使被关闭也会保留，因为收起态按钮靠这份目录显示模型名。
-- **偏好落在 Host 设置文档**：写入 profile 的 `cordis.patch.yml`（`- id: model-visibility → hidden: [...]`），刷新、重启、切换会话都保留，不依赖浏览器本地存储。
-- **设置不会因为插件重装/配置层重建而丢失**：Host 端额外把同一份列表镜像到 `$DSH_HOME/dsh-model-visibility/hidden.json`，并用它给 `hidden` 的 schema 默认值播种。详见「持久化」。
+| 能力 | 说明 |
+| --- | --- |
+| **逐模型开关** | 关闭的模型立即从模型菜单消失；当前会话正在用的模型即使被关也保留（收起态按钮靠它显示模型名） |
+| **分组批量操作** | 每组标题右侧「全组隐藏 / 全组显示」，工具栏「全部显示」一次清空隐藏；筛选状态下只作用于当前筛选结果 |
+| **分组折叠** | 点分组标题左侧箭头折叠该组，只留标题与统计；工具栏「折叠全部分组 / 展开全部分组」一次切换；状态存在浏览器 `localStorage`，不改任何模型开关 |
+| **能力标签** | `支持推理` / 不支持 / 未知 + 适配器公布的全部思考强度档位；`上下文 1M`；`多模态` / `纯文本` / 未知；类型色条与类型标签区分 `对话 / 生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译` |
+| **来源分层** | 实线 = 已声明（手动 / 设置文档 / 适配器 / 中转站），虚线 = 补全或推断（内置目录 / 模型名），悬停显示具体来源 |
+| **筛选** | 名称 / ID 搜索；类型快捷筛选 `全部 / 对话 / 生图 / 生视频 / 其它`（带数量）；能力筛选 `多模态`、`支持推理`；最小上下文 `128K / 256K / 512K / 1M`；多个条件同时生效 |
+| **手动覆盖能力** | 每行的「编辑能力」可指定类型、上下文、输入模态、思考强度（含默认档 / 不支持推理），来源标为 `手动`；清空保存即恢复自动识别 |
+| **写回提供商** | 编辑器里勾「同时写入模型提供商设置」，把 `input` / `contextWindow` / `reasoningEfforts` 写进 `llm-pi-ai` 的该模型条目，让输入框、适配器与其他设置界面读到同一份事实 |
+| **官方校正** | 厂商文档能证明的错误行（如 `glm-5.3` 被目录标成多模态）显示 `官方校正` + 文档链接，并压过目录与中转站列表 |
+| **图像放行** | 默认开启：判定可输入图像的中转站对话模型，在请求侧补上 `image`，不用改任何配置文件；关闭即回到适配器声明 |
+| **重新获取能力** | 工具栏「重新获取能力」作废旧缓存与进行中的扫描，重新询问适配器与所有中转站（比「刷新」更硬，只绕过 TTL 的「刷新」仍会合并进行中的读取） |
+| **ID 归一化** | `openai/gpt-4o`、`~deepseek-v3`、`glm-5.3:free`、`:free:batch` 这类前缀 / 叠加后缀先归一化再匹配目录，避免「同一个模型查不到」 |
+| **持久化** | 隐藏列表写进 profile 的 `cordis.patch.yml`，并镜像到 `$DSH_HOME/dsh-model-visibility/hidden.json`，插件重装 / profile 自愈后自动恢复；手动覆盖单独一份 `overrides.json` |
 
 ## 安装
 
-```powershell
-# 目录方式（开发）：profile 里 link 这个目录
-# 用 plugin_manager 安装：
-#   install_bundle   target = D:\\code\\dsh-model-visibility
-```
-
-本地链接安装需要目录里有依赖：
+在市场页面一键安装，或任选一种方式：
 
 ```powershell
+# 1) 插件市场（推荐）
+#    https://awesome-dsh-plugin.com/p/TZYCeng/dsh-model-visibility/
+
+# 2) npm（plugin_manager）
+#    install_bundle  target = @tzyc/dsh-model-visibility
+
+# 3) GitHub Release tar 包
+#    install_bundle  target = https://github.com/TZYCeng/dsh-model-visibility/releases/latest/download/dsh-model-visibility.tgz
+
+# 4) 本地目录（开发）
+#    profile 里 link 这个目录，并先安装依赖：
 npm install
 ```
 
-安装后刷新页面（或重启 DSH）即可看到「设置 → 模型显示」。
+安装后刷新页面（或重启 DSH），即可在「设置 → 模型显示」看到页面。
+
+> npm 上的 `dsh-model-visibility` 属于另一个同名项目，本插件发布在作用域 `@tzyc/dsh-model-visibility` 下。
+
+## 界面速览
+
+- **顶部统计**：`已显示 86 / 301 个模型 · 已关闭 215 个`，后面跟着 `全部显示`、`折叠全部分组`、`刷新`、`重新获取能力`。
+- **筛选栏**：搜索框（名称或 ID）、类型按钮（带数量）、能力开关、最小上下文下拉。
+- **图像放行开关**：`让输入框按能力标注放行图像`，说明写在旁边，实时生效。
+- **图例**：解释标签含义（推理 / 上下文 / 多模态）、类型配色，以及「手动」标签的优先级。
+- **分组**：标题显示 `已显示/总数`、`对话 n · 生图 n · 生视频 n · 其它 n`、以及该中转站读到了多少模型 / 多少能力字段；右侧是整组开关。
+- **模型行**：左侧色条表示类型，行内是能力标签，「编辑能力」打开覆盖表单，最右是开关。
 
 ## 能力标注从哪里来
 
-答案按下面的优先级合并。每一层只填前一层不知道的字段，最终记录里带 `sources`，页面据此决定实线 / 虚线。
+按下面的优先级合并，每一层只填前一层不知道的字段；最终记录带 `sources`，页面据此决定实线 / 虚线。
 
-| 优先级 | 来源 | 什么时候可信 | 页面标记 |
+| 优先级 | 来源 | 什么时候可信 | 标记 |
 | --- | --- | --- | --- |
+| 0 | `manual` | 用户在设置页为该模型手动声明的类型 / 上下文 / 模态 / 思考强度（可同时写进 Provider 配置） | 实线 |
 | 1 | `config` | 设置文档里该模型显式写了 `input`、`contextWindow`、`maxTokens`，或 Provider 的 `defaultInput` 显式包含非文本模态 | 实线 |
 | 2 | `adapter` | 适配器不是从中转站配置（内置目录），或该模型不在 Provider 的 `models` 列表里 | 实线 |
-| 3 | `provider` | 中转站自己的 `GET {baseURL}/models` 返回了 `architecture.input_modalities` / `input_modalities` / `capabilities` / `type` / `supported_endpoint_types` 等字段 | 实线 |
-| 4 | `catalog` | 内置 pi-ai / models.dev 快照里有同名模型（会规范化 `openai/`、`~`、`:free`、`-4k` 等前缀后缀） | 虚线 |
-| 5 | `inferred` | 模型名明确带家族特征（`claude` / `gpt-4o+` / `gemini` / `grok-4+` / `vl` / `vision` / `image` / `video` / `embed` …） | 虚线 |
-| 校正 | `official` | 厂商文档明确指出该行写错（见 `lib/capability-corrections.js`） | 实线 |
-| — | `unknown` | 以上都没有：显示「未知」，**不会**把中转站的 `defaultInput: [text]` 当成纯文本 | 灰色 |
+| 3 | `provider` | 中转站的 `GET {baseURL}/models` 返回了 `architecture.input_modalities` / `input_modalities` / `capabilities` / `type` / `supported_endpoint_types` | 实线 |
+| 4 | `catalog` | 内置 pi-ai / models.dev 快照里有同名模型 | 虚线 |
+| 5 | `inferred` | 模型名带明确家族特征（`claude` / `gpt-4o+` / `gemini` / `grok-4+` / `vl` / `vision` / `image` / `video` / `embed` …） | 虚线 |
+| 校正 | `official` | 厂商文档明确指出该行写错（`lib/capability-corrections.js`） | 实线 |
+| — | `unknown` | 以上都没有：显示未知，**不会**把 `defaultInput: [text]` 当成纯文本 | 灰色 |
 
-`official` 是校正层，不参与上面的常规优先级：合并完成后，如果厂商文档指出该行错误，且当前值来自 `provider` / `catalog` / `inferred` / `unknown`，就替换成 `official`；来自 `config`（用户显式写入的 `input`）或内置适配器声明的值保持不变。中转站列表经常直接抄目录，所以也允许被校正。
+`official` 不参与常规优先级：合并且完成后，如果厂商文档指出该行错误，且当前值来自 `provider` / `catalog` / `inferred` / `unknown`，就替换成 `official`；来自 `config`（用户显式写的 `input`）或内置适配器声明的值保持不变。中转站列表经常直接抄目录，所以也允许被校正。
 
-### 官方校正
+`manual` 高于所有来源：手动声明什么，页面与请求侧就按什么执行。
 
-`lib/capability-corrections.js` 是一张很小的、只收厂商文档能证明的修正表。首条是 `glm-5.3`：目录把它标成 `text+image`，但智谱文档写明 GLM-5.3 只处理文本，原生多模态的是 GLM-5.3-Flash / FlashX。被校正的行显示 `官方校正` 标签，悬停可以看到说明和文档链接；Provider **配置里**显式写了 `input` 的仍然优先，中转站列表则可以被打回。
+## 手动覆盖能力
 
-### 输入图像对齐
+适合「中转站刚上的新模型」：`GET /models` 只有 id，内置目录还没有这一行，设置文档里也没有 `reasoningEfforts`，页面只能显示未知。此时点模型行右侧的「编辑能力」：
 
-**问题**：`llm-pi-ai` 的模型对象由 `entry.input ?? base.input ?? defaultInput` 构造。中转站的模型通常写 `input: []`（表示“未声明”），于是落到 Provider 的 `defaultInput: [text]`；会话发送前的准入检查和 pi-ai 自己的序列化都会据此拒绝图像，即使中转站和页面都认为它支持图片。
+- **类型**：对话 / 生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译；
+- **上下文窗口**：填 token 数，留空表示自动；
+- **输入模态**：文本 / 图像 / 音频 / 视频 / 文件，可多选；
+- **思考强度**：`off / minimal / low / medium / high / xhigh / max` 多选，可指定默认档；也可勾「不支持推理」。
 
-**做法**：Host 端只在 pi-ai 适配器实例上包装 `modelOf(snapshot, provider, model)`。当能力合并（与页面同一套证据）判定该模型可输入图像时，给返回的模型对象补上 `image`；其它适配器（DeepSeek Messages 等）不动。设置页顶部的「让输入框按能力标注放行图像」开关对应 Host 配置 `applyInput`（默认开启，volatile）。关闭后请求侧完全按适配器读到的 `input` 声明。包装是内存态、可逆的，不写设置文档、不改路由配置；插件卸载时恢复。`glm-5.3` 这类被官方校正为纯文本的模型不会被放行。
+保存后页面立即按手动值显示，来源标签为 `手动`，请求侧的图像准入用同一份声明。表单全部留空保存等价于删除覆盖，恢复自动识别。
 
-### 中转站探测
+覆盖存在 `$DSH_HOME/dsh-model-visibility/overrides.json`（不写 profile 补丁，插件重装不会丢），也可以手改，Host 按文件 mtime 自动重读：
+
+```jsonc
+{
+  "version": 1,
+  "overrides": [{
+    "provider": "chatgpt",
+    "model": "gpt-6.1-terra",
+    "input": ["text", "image"],
+    "contextWindow": 400000,
+    "efforts": [
+      { "id": "low", "name": "Low" },
+      { "id": "high", "name": "High" }
+    ],
+    "defaultEffort": "high"
+  }]
+}
+```
+
+### 同时写入模型提供商设置
+
+勾选后，Host 把能一一对应的字段写进 `llm-pi-ai` 的 Provider 配置里这个模型的条目：
+
+| 覆盖字段 | Provider 配置 |
+| --- | --- |
+| `input` | 模型的 `input` 数组 |
+| `contextWindow` | 模型的 `contextWindow` |
+| 思考强度 | 模型的 `reasoningEfforts`（`off` 写成 `null`，其余档位以自身 id 作为发送值）；勾「不支持推理」写成 `reasoningEfforts: false` |
+
+写入走设置服务的 `mutate` 路径操作，只改现有 `models` 数组里的那一项，不替换整份列表。成功写入的字段会从 `overrides.json` 移除（同一事实只存一份）；写不进去时不报错中断，编辑器提示原因（没有显式模型列表、模型不在列表里、设置文档只读…），本地覆盖仍然生效。
+
+「恢复自动」只删除本插件的覆盖，**不会**清掉已写入 Provider 配置的值；要撤销写入，请到「设置 → 模型提供商」清空对应字段。
+
+## 官方校正
+
+`lib/capability-corrections.js` 是一张很小的、只收厂商文档能证明的修正表。首条是 `glm-5.3`：目录把它标成 `text+image`，但智谱文档写明 GLM-5.3 只处理文本，原生多模态的是 GLM-5.3-Flash / FlashX。校正只锁精确 id，`glm-5.3-flash` 仍然是多模态。
+
+被校正的行为显示 `官方校正` 标签，悬停有说明与文档链接；它同时作用于页面和图像闸门，所以 `glm-5.3` 不会被放行图片。
+
+## 让输入框真的能发图
+
+**问题**：`llm-pi-ai` 的模型对象由 `entry.input ?? base.input ?? defaultInput` 构造。中转站模型通常写 `input: []`（“未声明”），于是落到 Provider 的 `defaultInput: [text]`；发送前的准入检查和 pi-ai 自己的序列化都会据此拒绝图像，即使中转站和页面都认为它支持图片。
+
+**做法**：Host 端只在 pi-ai 适配器实例上包装 `modelOf(snapshot, provider, model)`。当能力合并（与页面同一套证据）判定该模型可输入图像时，给返回的模型对象补上 `image`；其它适配器（DeepSeek Messages 等）不动。这一个点同时覆盖 `resolveModelInfo`（发送准入）和 `stream`（请求序列化），不会只修一半。
+
+- 对应 Host 配置 `applyInput`（默认开启，volatile），设置页顶部开关即时生效；
+- 显式写了 `input` 的 Provider 仍优先；只有插件判定可输入图像的中转站对话模型才会补 `image`；
+- 包装是内存态、可逆的：不写设置文档、不改路由配置，插件卸载时恢复。
+
+## 中转站探测
 
 Host 端通过 `settings.describe()` 读取配置了 `baseURL` 与 `apiKeyEnv` 的 Provider，然后：
 
 1. 用 `ctx.credentials.resolve(apiKeyEnv)` 在**每次探测时**解析密钥（不缓存、不写入、不返回给浏览器）；
 2. `GET {baseURL}/models`（base 不带 `/v1` 时再补一次 `/v1/models`），带 `Authorization: Bearer` 或 Anthropic 的 `x-api-key`；
-3. 同源尝试 `GET {origin}/api/pricing`（New API 的公开价格接口），读取 `supported_endpoint_types` 来判断生图 / 生视频 / 嵌入；
+3. 同源尝试 `GET {origin}/api/pricing`（New API 的公开价格接口），用 `supported_endpoint_types` 判断生图 / 生视频 / 嵌入；
 4. 只保留能力事实（模态、上下文、最大输出、推理、类型），不保留响应正文；失败只记录诊断。
 
-安全约束：不跟随重定向（避免把 `Authorization` 带到别的域）、4 MB 响应上限、每请求 3.5 s 超时、Provider 并发探测、结果缓存 10 分钟。关闭探测：设置行里 `probe: false`，或环境变量 `MODEL_VISIBILITY_PROBE=0`。
+安全约束：不跟随重定向（避免把 `Authorization` 带到别的域）、4 MB 响应上限、每请求 3.5 s 超时、Provider 并发探测、结果缓存 10 分钟。关闭探测：设置行写 `probe: false`，或环境变量 `MODEL_VISIBILITY_PROBE=0`。
 
-### 内置模型目录
+## 内置目录
 
-`lib/model-catalog.js` 是从当前安装的 `@earendil-works/pi-ai`（models.dev 数据，2026-10-07 快照）蒸馏出的紧凑表：**652 个模型**，包含 `type`（chat / image / classifier）、`input` / `output` 模态、`reasoning`、`contextWindow`、`maxTokens`。重新生成：
+`lib/model-catalog.js` 是从当前安装的 `@earendil-works/pi-ai`（models.dev 数据，2026-10-07 快照）蒸馏出的紧凑表：**652 个模型**，含 `type`（chat / image / classifier）、`input` / `output` 模态、`reasoning`、`contextWindow`、`maxTokens`。重新生成：
 
 ```powershell
 # 先从桌面安装包里提取 pi-ai 数据（只需做一次）
@@ -111,15 +202,17 @@ node .tools/asar.mjs extract "<DeepSeek Harness>/resources/app.asar" `
 node scripts/build-catalog.mjs --data .tools/extract/pi-ai
 ```
 
-也可以把 `--data` 指向任何 pi-ai 包根目录或它的 `dist/providers/data`。内置目录只补缺，**不会覆盖**适配器或中转站明确声明的事实。
+内置目录只补缺，**不会覆盖**适配器或中转站明确声明的事实。
 
-### 路由
+## 路由
 
 ```
-GET /api/dsh-model-visibility/models[?fresh=1]
+GET  /api/dsh-model-visibility/models[?fresh=1][&reload=1]
+GET  /api/dsh-model-visibility/overrides
+POST /api/dsh-model-visibility/overrides
 ```
 
-Host 端遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInfo()`，再叠加设置文档里的 Provider 配置与中转站探测结果，返回：
+Host 遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInfo()`，叠加设置文档与中转站探测结果，返回：
 
 ```jsonc
 {
@@ -134,10 +227,9 @@ Host 端遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInf
         "kind": "chat",
         "inputModalities": ["text", "image"],
         "contextWindow": 500000,
-        "reasoning": { "efforts": [...], "defaultEffort": "medium" },
+        "reasoning": { "efforts": [], "defaultEffort": "medium" },
         "reasoningSupported": true,
-        "sources": { "kind": "catalog", "modalities": "catalog", "context": "catalog", "reasoning": "config" },
-        "catalog": { "id": "grok-4.7", "provider": "xai", "generatedAt": "..." }
+        "sources": { "kind": "catalog", "modalities": "catalog", "context": "catalog", "reasoning": "config" }
       }]
     }],
     "failures": [],
@@ -147,57 +239,73 @@ Host 端遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInf
 }
 ```
 
-`?fresh=1` 绕过两层缓存（能力快照 15 s、中转站探测 10 min），用于页面「刷新」按钮与 `llm/adapters-updated`。浏览器端优先走这条路由；如果 Host 半还没加载（例如刚升级插件但页面还是旧 Host），会自动退回官方 `session.modelCatalog()`，页面顶部显示「模型能力信息暂不可用」。
+- `?fresh=1`：绕过两层缓存（能力快照 15 s、中转站探测 10 min），用于「刷新」与 `llm/adapters-updated`；仍会合并进行中的扫描。
+- `?reload=1`：用于「重新获取能力」，先让能力缓存、探测缓存、图像准入缓存与 in-flight 扫描全部作废，再重新读取；不改任何显示开关。浏览器端优先走该路由，Host 半太旧时会退回 `session.modelCatalog()` 并在页面顶部提示。
+- `GET /overrides` 返回 `{ ok, value: { overrides } }`；`POST /overrides` 接受一条覆盖，`{ "remove": true, "provider", "model" }` 删除一条；可带 `"applyToProvider": false` 只写本地（默认 `true`）。响应里的 `value.provider` 说明是否写进 Provider 配置（`{ written, fields, ns?, reason?, message? }`）。
 
 ## 结构
 
 | 文件 | 作用 |
 | --- | --- |
-| `package.json` | bundle 清单、`dsh.client` 声明、`./locale/*.json` 与 `./icon` 导出；含 `npm test` |
+| `package.json` | bundle 清单、`dsh.client` 声明、locale 与 icon 导出 |
 | `cordis.patch.yml` | 插入 Host 行 `model-visibility` |
-| `index.js` | Host 端：`hidden` 持久化 + 影子副本 + 能力路由 + 探测缓存失效 |
-| `lib/model-info.js` | 能力合并：证据优先级、`describeCatalog`、15 s 缓存 |
+| `index.js` | Host：`hidden` 持久化 + 影子副本 + 能力路由 + 覆盖路由 + 缓存失效 |
+| `lib/model-info.js` | 能力合并：证据优先级、`describeCatalog`、15 s 缓存、图像准入判定 |
+| `lib/model-overrides.js` | 手动覆盖的读写与校验（`overrides.json`，按 mtime 重读） |
+| `lib/provider-write.js` | 把可对应字段写回 `llm-pi-ai` Provider 配置（`settings.mutate` 路径操作） |
 | `lib/provider-probe.js` | 读取 Provider 配置、解析凭据、探测中转站、10 min 缓存与诊断 |
 | `lib/capability-catalog.js` | 内置目录匹配、模型类型与家族模态启发式 |
 | `lib/capability-corrections.js` | 厂商文档校正表（如 GLM-5.3 纯文本），带来源链接 |
-| `lib/image-input-gate.js` | 在 pi-ai 适配器上补图像输入能力（请求侧对齐，可逆） |
+| `lib/image-input-gate.js` | 在 pi-ai 适配器上补图像输入能力（可逆） |
 | `lib/model-catalog.js` | 由脚本生成的 models.dev 快照（勿手改） |
-| `scripts/build-catalog.mjs` | 从 pi-ai 数据重新生成 `lib/model-catalog.js` |
-| `client.js` | 浏览器端：设置页、筛选、能力标签（按类型着色）、就地包装模型目录 store |
+| `scripts/build-catalog.mjs` | 从 pi-ai 数据重新生成内置目录 |
+| `client.js` | 浏览器端：设置页、筛选、折叠、覆盖编辑器、能力标签、就地包装模型目录 store |
 | `locale/*.json` | 插件列表里的标题与描述 |
-| `test/*.test.mjs` | 能力合并、目录匹配、探测解析与缓存、图像输入闸门的单元测试 |
-| `icon.svg` | 插件列表图标 |
+| `test/*.test.mjs` | 72 个单元 / 集成测试 |
+| `icon.svg` · `docs/` | 插件图标与截图 |
 
 ## 实现要点
 
-### 过滤模型
+<details>
+<summary><b>过滤模型（点开）</b></summary>
 
 - 不注册 `conversation.input.model` 座位：官方选择器仍是唯一占位者。过滤发生在会话目录的 store 上——`getSnapshot()` / `subscribe()` 被**就地**替换成过滤版本，因为官方座位可能在本插件加载前就捕获了同一个 store 对象，替换对象本身够不到它。
 - 目录来自共享的 `modelDirectories.directoryFor(sessionId)`；插件同时包装该方法，让之后新建的目录也走同一套 store 补丁。
 - 隐藏项用 `provider/model` 字符串作为不透明 key，Set 化后同时用于设置页与过滤。
-- 设置页的读写走 `ctx.configForms.get('model-visibility')`，与 Host 设置文档保持同一 revision；写入失败会在页面上提示。
+- 设置页读写走 `ctx.configForms.get('model-visibility')`，与 Host 设置文档保持同一 revision；写入失败会在页面上提示。
 
-### 能力合并
+</details>
 
-- `describeResolvedModel` 只负责把 `resolveModelInfo()` 的结果变成纯对象；真正的合并发生在 `mergeCapabilities`（纯函数，单测直接覆盖）。
-- `profile.models` 里为空数组的 `input` 被视为「未声明」，而不是「仅文本」。只有显式写了非空 `input`，或 `defaultInput` 明确包含非文本模态时，才把模态记为 `config`。
-- 上下文窗口同理：中转站的 `defaultContextWindow: 262144` 是 DSH 默认值，不当事实使用；目录里有 500K / 1M 就用目录值。
-- 模型类型优先取中转站返回的 `type` / `supported_endpoint_types`，其次取内置目录的 `type`，最后用模型名关键词判断；`生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译` 会走 `generationTags`，不显示推理档位与文本标签，并各自带颜色。
-- 所有字段都是可选的；不知道就显示未知，不猜。
-- 厂商校正只在 `catalog` / `inferred` / `unknown` 上生效；显式 `config`、适配器或中转站声明优先。被校正的模型带 `correction` 记录，页面渲染 `官方校正` 标签。
+<details>
+<summary><b>能力合并（点开）</b></summary>
 
-### 请求侧图像准入
+- `describeResolvedModel` 只把 `resolveModelInfo()` 的结果变成纯对象；真正的合并发生在 `mergeCapabilities`（纯函数，单测直接覆盖）。
+- `profile.models` 里为空数组的 `input` 视为「未声明」，不是「仅文本」；只有显式非空 `input`，或 `defaultInput` 明确包含非文本模态时，才记为 `config`。
+- 上下文同理：中转站的 `defaultContextWindow: 262144` 是 DSH 默认值，不当事实使用。
+- 模型类型优先取中转站的 `type` / `supported_endpoint_types`，其次内置目录 `type`，最后用模型名关键词；生成类模型走 `generationTags`，不显示推理档位与文本标签。
+- 所有字段可选：不知道就显示未知，不猜。
+- 厂商校正只在 `catalog` / `inferred` / `unknown` 上生效；被校正的模型带 `correction` 记录，页面渲染 `官方校正`。
 
-- `createModelInfoService` 的 `imageInputAllowed(provider, model)` 与页面共用 `mergeCapabilities`，所以标签和准入不会各说各话；判定结果短暂缓存（30 s），`invalidate()` 时清空。
-- `installImageInputGate` 只识别同时具备 `modelOf` / `profileOf` / `current` 的 pi-ai 适配器（DeepSeek Messages 等不受影响），包装其 `modelOf` 并保留原对象；适配器重建时由 `llm/adapters-updated` 调用 `refresh()`。
-- 只有在 Provider 有设置档（即中转站路由）时才参与对齐；内置适配器继续用自己的声明。
+</details>
 
-### 缓存与失效
+<details>
+<summary><b>请求侧图像准入（点开）</b></summary>
 
-- 能力快照 TTL 15 s，`?fresh=1` 绕过；并发的页面读共享同一个 in-flight Promise。
-- 中转站探测 TTL 10 min；`?fresh=1` 也会强制重探。
+- `createModelInfoService` 的 `imageInputAllowed(provider, model)` 与页面共用 `mergeCapabilities`，所以标签和准入不会各说各话；判定结果缓存 30 s，`invalidate()` 时清空。
+- `installImageInputGate` 只识别同时具备 `modelOf` / `profileOf` / `current` 的 pi-ai 适配器，包装其 `modelOf` 并保留原对象；适配器重建时由 `llm/adapters-updated` 调用 `refresh()`。
+- 只有 Provider 有设置档（即中转站路由）时才参与对齐；内置适配器继续用自己的声明。
+
+</details>
+
+<details>
+<summary><b>缓存与失效（点开）</b></summary>
+
+- 能力快照 TTL 15 s，`?fresh=1` 绕过；并发页面读共享同一个 in-flight Promise。
+- 中转站探测 TTL 10 min，`?fresh=1` 也强制重探。
 - `llm/adapters-updated`、`credentials/record-updated`、`credentials/reference-updated`：能力缓存与探测缓存一起失效。
-- `settings/document-updated`：能力缓存失效，但探测缓存只在 Provider 路由指纹（id / baseURL / apiKeyEnv / 模型 id 集合）真的变化时才失效。因此「隐藏一个模型」不会触发网络探测。
+- `settings/document-updated`：能力缓存失效，但探测缓存只在 Provider 路由指纹（id / baseURL / apiKeyEnv / 模型 id 集合）真的变化时才失效——隐藏一个模型不会触发网络探测。
+
+</details>
 
 ## 持久化
 
@@ -207,17 +315,14 @@ Host 端遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInf
 - 插件重装 / 升级会重置该行的 `config`；
 - 设置写入时若新值等于继承值（例如隐藏列表为空），DSH 会直接删掉这一行。
 
-任何一种发生，`hidden` 都会退回默认值 `[]`，表现出来就是「插件重新加载后所有模型又都显示了」。
+任何一种发生，`hidden` 都会退回默认值 `[]`。所以 Host 端做两件事：
 
-所以 Host 端做了两件事：
+1. **镜像**：每次 `hidden` 变化（`loader/volatile-update` / `settings/document-updated`）都原子写入 `$DSH_HOME/dsh-model-visibility/hidden.json`；插件加载和卸载时各同步一次。
+2. **恢复**：`hidden` 的 schema 默认值在模块加载时从该文件读取，所以 patch 层被清空后，插件重新加载得到的是上次的列表而不是空列表。
 
-1. **镜像**：每次 `hidden` 变化（`loader/volatile-update` / `settings/document-updated`）都原子写入
-   `$DSH_HOME/dsh-model-visibility/hidden.json`；插件加载和卸载时各同步一次。
-2. **恢复**：`hidden` 的 schema 默认值在模块加载时从该文件读取，所以 patch 层被清空后，
-   插件重新加载得到的是上次的列表而不是空列表。
+文件缺失或损坏按空列表处理；要重置删掉即可。文件是全局的（不按 profile 区分）。
 
-存储文件缺失或损坏时按空列表处理，行为与之前一致；需要重置时删掉该文件即可。
-文件是全局的（不按 profile 区分），多个 profile 共用同一份隐藏列表。
+手动覆盖是另一份独立文件 `$DSH_HOME/dsh-model-visibility/overrides.json`（`{ version: 1, overrides: [...] }`），同样不经过 profile 补丁。
 
 ## 测试
 
@@ -225,33 +330,36 @@ Host 端遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInf
 npm test
 ```
 
-覆盖：证据优先级、默认文本不被当成事实、中转站探测解析（OpenRouter / pi-ai / New API 三种 dialects）、凭据缺失与 401、`/v1/models` 回退、缓存 TTL / `fresh` / 设置变化只失效必要缓存、模型类型与家族模态、目录别名匹配、推理档位清洗、官方校正、请求侧图像准入与适配器闸门的可逆性，以及 Host 接线（能力路由 + 校正 + `applyInput` 开关）。
+覆盖：证据优先级、默认文本不被当成事实、三种中转站 dialect 的解析、凭据缺失与 401、`/v1/models` 回退、缓存 TTL / `fresh` / `reload`、模型类型与家族模态、目录别名匹配、推理档位清洗、官方校正、手动覆盖的校验与持久化（含损坏文件与外部改动）、Provider 回写（档位映射、按模型下标写入、各种拒绝原因、写后字段剥离）、请求侧图像准入与适配器闸门的可逆性，以及 Host 接线（能力路由 + 校正 + `applyInput` 开关 + 硬重载提升 `reload` 能力位 + 覆盖读写路由 + 回写后网关立即按新配置放行）。
 
-GUI 冒烟测试（改完代码后）：
+GUI 冒烟（改完代码后）：
 
-1. 改 `client.js` → 页面 `Ctrl+R`，打开 设置 → 模型显示，确认标签、筛选、虚线来源、生图 / 生视频行的颜色与左侧色条。
-2. 改 `index.js` / `lib` → 需要 Host 重载：重启 DSH，或让 profile 重新组合（桌面版 HMR 会在下一次 profile 重组时替换已改动的已链接包）。
-3. 重载后确认页面底部出现「中转站探测：…」和「内置目录：…」两行，且 Grok / Claude / GPT / Gemini 显示真实上下文与多模态；`glm-5.3` 显示 `纯文本` + `官方校正`。
-4. 打开对话输入框的模型菜单，确认被关闭的模型没有出现、当前模型仍显示。
-5. 给一个页面标注为 `多模态` 的中转站模型发一张图：应直接发送成功；关闭「让输入框按能力标注放行图像」后应恢复为「模型不支持图像输入」。
+1. 改 `client.js` → `Ctrl+R`，确认标签、筛选、虚线来源、类型颜色与左侧色条。
+2. 折叠分组，刷新后仍在；工具栏一次切换全部分组，不影响开关。
+3. 改 `index.js` / `lib` → 重启 DSH（或等 profile 重组）。
+4. 重载后确认页面底部有「中转站探测：…」与「内置目录：…」，Grok / Claude / GPT / Gemini 显示真实上下文与多模态；`glm-5.3` 显示 `纯文本` + `官方校正`。
+5. 「重新获取能力」可用，点一次后列表重新加载。
+6. 打开输入框模型菜单：被关的模型不出现，当前模型仍显示。
+7. 给标注 `多模态` 的中转站模型发图：直接成功；关掉开关后恢复「模型不支持图像输入」。
+8. 点「编辑能力」保存后标签变 `手动`，刷新仍在；清空保存恢复自动。
+9. 勾「同时写入模型提供商设置」，确认提示已写入，Provider 设置里能看到 `input` / `contextWindow` / `reasoningEfforts`。
 
 ## 已知限制
 
-- **内置目录是快照**：`lib/model-catalog.js` 生成于 2026-10-07，之后新增的模型要靠中转站探测或模型名推断；用 `scripts/build-catalog.mjs` 可以随时重新生成。
-- **官方校正是手工维护的小表**：只收厂商文档能证明的错误行，不会自动发现所有快照错误；遇到新的错误行在 `lib/capability-corrections.js` 增加条目即可。
-- **中转站不一定公布能力**：多数中转站的 `/v1/models` 只有 id；New API 的 `/api/pricing` 经常被关闭（403）。这时只能靠内置目录和模型名家族规则。
-- **模型名推断是保守的**：只对明确的家族生效；不在目录里、名字也没有特征的自定义模型会显示「模态未知 / 上下文未知」，而不是猜一个。
+- **内置目录是快照**：生成于 2026-10-07，之后新增的模型要靠探测或模型名推断；用 `scripts/build-catalog.mjs` 可随时重生成。
+- **官方校正是手工维护的小表**：只收厂商文档能证明的错误行。
+- **中转站不一定公布能力**：多数 `/v1/models` 只有 id；New API 的 `/api/pricing` 经常被关闭（403）。
+- **模型名推断保守**：不在目录、名字也没特征的自定义模型显示未知，不猜。
 - **DSH 的模态契约只有 text / image**：视频 / 音频输入无法进入官方请求准入；请求侧对齐也只处理 `image`。
-- **请求侧对齐只覆盖 pi-ai 中转站**：内置适配器（DeepSeek Messages 等）与其它协议仍按自己的声明工作；对齐不写配置，插件卸载即恢复。
-- **适配器声明优先**：如果 Provider 明确写了 `input: [text]`（例如 opencode-go 的模型），页面会尊重这个声明，即使内置目录认为它支持图像。想改就以 Provider 配置为准。
-- 上下文按十进制缩写（262144 → `262.1K`），精确值在悬停提示里。
-- 目录是实时注册表快照；如果某个动态免费模型源刚好在刷新，页面模型总数可能和输入框里较旧的目录缓存略有出入，点「刷新」即可对齐。
-- 探测需要 Host 的 `credentials` 服务；没有它时只跳过探测，页面仍显示适配器 + 内置目录。
-- 中转站诊断信息会显示在分组标题旁，但不会显示 baseURL 全文、请求头或任何密钥。
+- **请求侧对齐只覆盖 pi-ai 中转站**：内置适配器与其它协议按自己的声明工作。
+- **适配器声明优先**：Provider 明确写了 `input: [text]` 时页面尊重该声明，想改就以 Provider 配置为准。
+- **「重新获取能力」造不出适配器没公布的档位**：pi-ai 适配器会缓存自己的模型快照；配置没写 `reasoningEfforts` 且内置目录没有档位时仍为空，可直接用「编辑能力」写回，或改配置后重启。
+- 上下文按十进制缩写（262144 → `262.1K`），精确值在悬停里。
+- 目录是实时注册表快照，动态免费模型源刷新时总数可能与输入框旧缓存略有出入，点「刷新」对齐。
 
 ## 隐私
 
-- 探测只向设置文档里该 Provider 的 `baseURL` 同源地址发请求；不跟随重定向。
+- 探测只向设置文档里该 Provider 的 `baseURL` 同源地址发请求，不跟随重定向。
 - 密钥只在 Host 内存里用于构造一次请求头，不写日志、不进路由响应、不进诊断。
 - 页面只拿到能力事实和来源标签。
 

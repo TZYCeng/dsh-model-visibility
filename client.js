@@ -39,6 +39,16 @@ window.__ModuleLoader__.load({
         'page.error': '模型列表加载失败：{message}',
         'page.saveFailed': '保存失败，请重试。',
         'page.refresh': '刷新',
+        'page.refreshing': '刷新中…',
+        'page.reload': '重新获取能力',
+        'page.reloading': '正在获取…',
+        'page.reloadTitle':
+          '清空本插件的能力缓存和正在进行的读取，重新询问适配器与所有中转站；不会改动任何模型开关。适配器没有公布的思考强度仍不会凭空出现。',
+        'page.reloadUnavailable': 'Host 半不支持强制重新获取；重启 DSH 后可用。',
+        'page.collapseGroups': '折叠全部分组',
+        'page.expandGroups': '展开全部分组',
+        'page.collapseGroupsTitle': '只保留分组标题，方便跳到其他分组',
+        'page.expandGroupsTitle': '展开所有被折叠的分组',
         'page.showAll': '全部显示',
         'page.legend':
           '标签说明：推理 = 可调推理等级；上下文 = 输入窗口；多模态 = 可输入图像。实线标签来自适配器、中转站或厂商文档，虚线标签来自内置目录或模型名推断。生图 / 生视频 / 嵌入等模型只标类型，不显示思考强度与文本标签。',
@@ -75,6 +85,8 @@ window.__ModuleLoader__.load({
         'group.hideAll': '全组隐藏',
         'group.showFiltered': '显示筛选结果',
         'group.hideFiltered': '隐藏筛选结果',
+        'group.collapseNamed': '折叠 {name} 分组',
+        'group.expandNamed': '展开 {name} 分组',
         'group.capabilities': '{chat} 对话 · {image} 生图 · {video} 生视频 · {other} 其它',
         'group.probeOk': '中转站 {models} 个模型 · {caps} 个带能力字段',
         'group.probeNoCaps': '中转站 {models} 个模型 · 未公布能力字段',
@@ -121,7 +133,57 @@ window.__ModuleLoader__.load({
         'source.catalog': '内置模型目录',
         'source.inferred': '模型名推断',
         'source.official': '厂商官方文档',
+        'source.manual': '手动设置',
         'source.unknown': '未知',
+        'effort.off': '关闭',
+        'effort.minimal': '极低',
+        'effort.low': '低',
+        'effort.medium': '中',
+        'effort.high': '高',
+        'effort.max': '最高',
+        'effort.xhigh': '极高',
+        'tag.manual': '手动',
+        'tag.manualTitle': '这项能力由你手动指定，优先于适配器、中转站与内置目录。',
+        'row.edit': '编辑能力',
+        'row.editTitle': '手动指定这个模型的类型、上下文、输入模态与思考强度',
+        'override.title': '手动能力设置',
+        'override.hint': '这里填写的项会覆盖自动探测结果；留空或选「自动」的项继续按原规则判断。',
+        'override.kind': '模型类型',
+        'override.kindAuto': '自动判断',
+        'override.context': '上下文窗口',
+        'override.contextPlaceholder': '留空 = 自动',
+        'override.contextInvalid': '上下文窗口必须是大于 0 的整数。',
+        'override.input': '输入模态',
+        'override.efforts': '思考强度档位',
+        'override.defaultEffort': '默认档位',
+        'override.defaultEffortAuto': '不指定',
+        'override.effortHint':
+          '勾选「不支持推理」会隐藏思考强度；勾选档位后，这些档位会直接显示为该模型的可用强度。',
+        'override.save': '保存',
+        'override.saving': '保存中…',
+        'override.reset': '恢复自动',
+        'override.cancel': '取消',
+        'override.failed': '保存失败：{message}',
+        'override.unavailable': 'Host 半仍不支持手动能力设置；重启 DSH 后可用。',
+        'override.provider': '同时写入模型提供商设置',
+        'override.providerHint':
+          '勾选后，输入模态、上下文窗口与思考强度会写进「设置 → 模型提供商」里这个模型的配置，其他界面也能看到；只在本页可表达的项（模型类型、默认档位、仅 off 的档位）仍留在本插件。',
+        'override.providerWritten': '已同时写入提供商设置：{fields}',
+        'override.providerSkipped': '已保存在本插件；提供商设置未写入（{reason}）。',
+        'override.resetTitle': '只删除本插件的覆盖；已写入提供商设置的值不会被清除。',
+        'override.field.input': '输入模态',
+        'override.field.contextWindow': '上下文窗口',
+        'override.field.reasoningEfforts': '思考强度',
+        'override.reason.nothing': '没有可写入的字段',
+        'override.reason.unsupported': '当前 Host 不支持写入提供商设置',
+        'override.reason.provider-missing': '提供商设置里找不到该提供商',
+        'override.reason.models-missing': '该提供商没有显式模型列表',
+        'override.reason.model-missing': '该提供商的模型列表里没有这个模型',
+        'override.reason.describe-failed': '读取提供商设置失败',
+        'override.reason.settings-failed': '设置服务拒绝了写入',
+        'override.reason.skipped': '未请求写入',
+        'page.manualNote':
+          '「手动」标签表示这项能力来自你在这个模型上的手动设置，优先于适配器、中转站与内置目录。',
         'correction.glm-5.3-text-only':
           '官方文档：GLM-5.3 仅支持文本模态；原生多模态的是 GLM-5.3-Flash / FlashX。',
         'modality.text': '文本',
@@ -145,6 +207,16 @@ window.__ModuleLoader__.load({
         'page.error': 'Could not load the model list: {message}',
         'page.saveFailed': 'Could not save this change. Try again.',
         'page.refresh': 'Refresh',
+        'page.refreshing': 'Refreshing…',
+        'page.reload': 'Re-fetch capabilities',
+        'page.reloading': 'Re-fetching…',
+        'page.reloadTitle':
+          'Drops this plugin’s capability caches and any in-flight read, then asks the adapter and every relay again. Model switches are untouched; effort levels the adapter does not publish still cannot appear.',
+        'page.reloadUnavailable': 'The Host half does not support a hard re-fetch; restart DSH to enable it.',
+        'page.collapseGroups': 'Collapse all groups',
+        'page.expandGroups': 'Expand all groups',
+        'page.collapseGroupsTitle': 'Keep only group headers so other groups are easy to reach',
+        'page.expandGroupsTitle': 'Expand every collapsed group',
         'page.showAll': 'Show all',
         'page.legend':
           'Tags: Reasoning = adjustable levels; Context = input window; Multimodal = accepts images. Solid tags come from the adapter, the relay or vendor documentation; dashed tags come from the built-in catalog or the model name. Image, video, embedding and other generation models show only their kind, never effort or text tags.',
@@ -181,6 +253,8 @@ window.__ModuleLoader__.load({
         'group.hideAll': 'Hide all',
         'group.showFiltered': 'Show filtered',
         'group.hideFiltered': 'Hide filtered',
+        'group.collapseNamed': 'Collapse the {name} group',
+        'group.expandNamed': 'Expand the {name} group',
         'group.capabilities': '{chat} chat · {image} image · {video} video · {other} other',
         'group.probeOk': 'relay: {models} models · {caps} with capability fields',
         'group.probeNoCaps': 'relay: {models} models · no capability fields',
@@ -227,7 +301,62 @@ window.__ModuleLoader__.load({
         'source.catalog': 'built-in model catalog',
         'source.inferred': 'model name inference',
         'source.official': 'vendor documentation',
+        'source.manual': 'manual override',
         'source.unknown': 'unknown',
+        'effort.off': 'Off',
+        'effort.minimal': 'Minimal',
+        'effort.low': 'Low',
+        'effort.medium': 'Medium',
+        'effort.high': 'High',
+        'effort.max': 'Max',
+        'effort.xhigh': 'XHigh',
+        'tag.manual': 'Manual',
+        'tag.manualTitle':
+          'You set this capability by hand; it outranks the adapter, the relay and the built-in catalog.',
+        'row.edit': 'Edit',
+        'row.editTitle':
+          'Set this model’s kind, context window, input modalities and effort levels by hand',
+        'override.title': 'Manual capabilities',
+        'override.hint':
+          'Anything filled in here overrides automatic detection; blank fields and “Automatic” keep the normal rules.',
+        'override.kind': 'Model kind',
+        'override.kindAuto': 'Automatic',
+        'override.context': 'Context window',
+        'override.contextPlaceholder': 'Blank = automatic',
+        'override.contextInvalid': 'The context window must be a whole number greater than 0.',
+        'override.input': 'Input modalities',
+        'override.efforts': 'Effort levels',
+        'override.defaultEffort': 'Default level',
+        'override.defaultEffortAuto': 'Unspecified',
+        'override.effortHint':
+          '“No reasoning” hides effort levels; checked levels are shown as this model’s available effort levels.',
+        'override.save': 'Save',
+        'override.saving': 'Saving…',
+        'override.reset': 'Use automatic',
+        'override.cancel': 'Cancel',
+        'override.failed': 'Could not save: {message}',
+        'override.unavailable':
+          'The Host half does not support manual capabilities yet; restart DSH to enable it.',
+        'override.provider': 'Also write to the model provider settings',
+        'override.providerHint':
+          'When checked, input modalities, context window and effort levels are written into this model’s entry under Settings → Model providers, so other views see them too. Fields that only exist here (kind, default level, an off-only ladder) stay in this plugin.',
+        'override.providerWritten': 'Also written to the provider settings: {fields}',
+        'override.providerSkipped': 'Saved in this plugin; the provider settings were not written ({reason}).',
+        'override.resetTitle':
+          'Removes this plugin’s override only; values already written to the provider settings are kept.',
+        'override.field.input': 'input modalities',
+        'override.field.contextWindow': 'context window',
+        'override.field.reasoningEfforts': 'effort levels',
+        'override.reason.nothing': 'nothing to write',
+        'override.reason.unsupported': 'this Host cannot write provider settings',
+        'override.reason.provider-missing': 'the provider is missing from the settings document',
+        'override.reason.models-missing': 'the provider has no explicit model list',
+        'override.reason.model-missing': 'the model is missing from the provider model list',
+        'override.reason.describe-failed': 'the settings document could not be read',
+        'override.reason.settings-failed': 'the settings service rejected the write',
+        'override.reason.skipped': 'not requested',
+        'page.manualNote':
+          'A “Manual” tag means you set that capability on this model; it outranks the adapter, the relay and the built-in catalog.',
         'correction.glm-5.3-text-only':
           'Official docs: GLM-5.3 accepts text only; GLM-5.3-Flash / FlashX is the native multimodal variant.',
         'modality.text': 'text',
@@ -246,14 +375,19 @@ window.__ModuleLoader__.load({
 .mvp_desc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px}
 .mvp_toolbar{border-bottom:.5px solid var(--dsw-alias-border-l2);flex:none;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;display:flex}
 .mvp_summary{color:var(--dsw-alias-label-secondary);flex:1;min-width:0;font-size:12px;line-height:18px}
-.mvp_actions{flex:none;align-items:center;gap:8px;display:flex}
+.mvp_actions{flex:none;align-items:center;justify-content:flex-end;gap:8px;display:flex;flex-wrap:wrap}
 .mvp_button{box-sizing:border-box;height:28px;color:var(--dsw-alias-label-primary);cursor:pointer;background:0 0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 10px;font-family:inherit;font-size:12px;line-height:18px}
+.mvp_button--accent{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent)}
 .mvp_button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
 .mvp_button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 .mvp_button:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
 .mvp_group{flex:none;flex-direction:column;display:flex}
 .mvp_groupHead{justify-content:space-between;align-items:center;gap:12px;padding:14px 0 6px;display:flex}
 .mvp_groupTitle{color:var(--dsw-alias-label-primary);align-items:baseline;row-gap:2px;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex;flex-wrap:wrap}
+.mvp_groupName{min-width:0}
+.mvp_collapse{box-sizing:border-box;flex:none;align-self:center;width:18px;height:18px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:0;font-family:inherit;font-size:11px;line-height:18px;display:inline-flex}
+.mvp_collapse:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
+.mvp_collapse:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 .mvp_groupCount{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}
 .mvp_row{border-bottom:.5px solid var(--dsw-alias-border-l1);justify-content:space-between;align-items:center;gap:16px;padding:10px 0;display:flex}
 .mvp_row--gen{background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
@@ -313,6 +447,31 @@ window.__ModuleLoader__.load({
 .mvp_note{color:var(--dsw-alias-label-tertiary);flex:none;padding:6px 0 0;font-size:10px;line-height:15px}
 .mvp_legend{color:var(--dsw-alias-label-tertiary);flex:none;padding:8px 0 2px;font-size:11px;line-height:16px}
 .mvp_fallback{color:var(--dsw-alias-label-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);border-radius:var(--dsw-radius-sm,6px);padding:6px 8px;font-size:11px;line-height:16px;margin-top:8px}
+.mvp_rowActions{flex:none;align-items:center;gap:8px;display:flex}
+.mvp_editButton{height:24px;padding:0 8px;font-size:11px;line-height:18px}
+.mvp_editButton[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent)}
+.mvp_editor{box-sizing:border-box;border:.5px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);border-radius:var(--dsw-radius-sm,6px);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent);margin:2px 0 12px;padding:10px 12px;flex-direction:column;gap:10px;display:flex}
+.mvp_editorHead{flex-direction:column;gap:2px;display:flex}
+.mvp_editorTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px}
+.mvp_editorSub{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.mvp_editorGrid{flex-wrap:wrap;align-items:flex-end;gap:10px 16px;display:flex}
+.mvp_field{flex-direction:column;gap:4px;min-width:140px;display:flex}
+.mvp_field--wide{flex:1 1 100%}
+.mvp_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
+.mvp_select,.mvp_number{box-sizing:border-box;height:26px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px;line-height:18px}
+.mvp_number{width:180px}
+.mvp_select:focus-visible,.mvp_number:focus-visible,.mvp_chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.mvp_chips{flex-wrap:wrap;align-items:center;gap:6px;display:flex}
+.mvp_chip{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 10px;font-family:inherit;font-size:11px;line-height:18px}
+.mvp_chip:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
+.mvp_chip[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
+.mvp_chip:disabled{opacity:.45;cursor:default}
+.mvp_editorFooter{justify-content:space-between;align-items:center;gap:12px;display:flex;flex-wrap:wrap}
+.mvp_editorNote{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:15px;flex:1 1 220px;min-width:0}
+.mvp_check{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.mvp_check input{accent-color:var(--dsw-alias-brand-primary, #4c8dff);margin:0}
+.mvp_editorActions{flex:none;align-items:center;gap:6px;display:flex;flex-wrap:wrap}
+.mvp_editorError{color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:16px}
 `
 
     /* ---------------------------------------------------------------- data */
@@ -330,6 +489,29 @@ window.__ModuleLoader__.load({
 
     function providerLabel(group, t) {
       return group.id === 'deepseek-account' ? t('provider.account') : group.name
+    }
+
+    const COLLAPSE_KEY = 'dsh-model-visibility:collapsed-groups:v1'
+
+    /** Group ids whose model lists the page keeps collapsed. */
+    function readCollapsedGroups() {
+      try {
+        const raw = window.localStorage.getItem(COLLAPSE_KEY)
+        if (raw === null) return new Set()
+        const parsed = JSON.parse(raw)
+        return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [])
+      } catch (_error) {
+        return new Set()
+      }
+    }
+
+    function persistCollapsedGroups(collapsed) {
+      try {
+        window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify(Array.from(collapsed)))
+      } catch (_error) {
+        // Storage can be unavailable (private mode, quota); collapsing still
+        // works for this page session.
+      }
     }
 
     function countModels(groups) {
@@ -422,6 +604,43 @@ window.__ModuleLoader__.load({
       return (Array.isArray(modalities) ? modalities : []).map((id) => modalityLabel(id, t)).join(' / ')
     }
 
+    /** Input modalities the manual editor can declare, in display order. */
+    const OVERRIDE_MODALITIES = ['text', 'image', 'audio', 'video', 'file']
+
+    /** Effort levels the manual editor can declare, in display order. */
+    const OVERRIDE_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+    /** Localized name of one effort id. */
+    function effortLabel(id, t) {
+      const key = 'effort.' + id
+      const label = t(key)
+      return label === key ? id : label
+    }
+
+    /** Identity of a manual override entry; same shape as the row key. */
+    function overrideKeyOf(entry) {
+      return entry ? keyOf(entry.provider, entry.model) : null
+    }
+
+    /** Model fields whose provenance can be manual. */
+    function manualFieldsOf(model) {
+      const sources = model && model.sources ? model.sources : {}
+      return ['kind', 'reasoning', 'context', 'modalities'].filter(
+        (field) => sources[field] === 'manual',
+      )
+    }
+
+    function manualTag(model, t) {
+      return manualFieldsOf(model).length === 0
+        ? null
+        : {
+            key: 'manual',
+            tone: 'accent',
+            label: t('tag.manual'),
+            title: t('tag.manualTitle'),
+          }
+    }
+
     /** Tags for image / video / embedding / rerank / audio / moderation models. */
     function generationTags(model, t) {
       const kind = kindOf(model)
@@ -456,6 +675,8 @@ window.__ModuleLoader__.load({
           title: t('tag.imageInputTitle'),
         })
       }
+      const manual = manualTag(model, t)
+      if (manual !== null) tags.push(manual)
       return tags
     }
 
@@ -582,6 +803,8 @@ window.__ModuleLoader__.load({
           }),
         })
       }
+      const manual = manualTag(model, t)
+      if (manual !== null) tags.push(manual)
       return tags
     }
 
@@ -620,6 +843,9 @@ window.__ModuleLoader__.load({
         generatedAt: 0,
       }
       let inflight = null
+      // A hard reload starts a new run even while `inflight` is set; the token
+      // keeps the older run from publishing its now-stale result afterwards.
+      let generation = 0
 
       const publish = (next) => {
         state = next
@@ -638,8 +864,9 @@ window.__ModuleLoader__.load({
        * Read the enriched catalog from the Host half. It carries the same
        * groups as `session.modelCatalog` plus context windows and modalities.
        */
-      const fetchHostCatalog = async (fresh) => {
-        const response = await fetch(API + '/models' + (fresh ? '?fresh=1' : ''), {
+      const fetchHostCatalog = async (fresh, reload) => {
+        const query = reload ? '?fresh=1&reload=1' : fresh ? '?fresh=1' : ''
+        const response = await fetch(API + '/models' + query, {
           method: 'GET',
           headers: { accept: 'application/json' },
           credentials: 'same-origin',
@@ -668,14 +895,20 @@ window.__ModuleLoader__.load({
       }
 
       const load = (options) => {
-        if (inflight !== null) return inflight
+        const fresh = options !== null && typeof options === 'object' && options.fresh === true
+        const reload = options !== null && typeof options === 'object' && options.reload === true
+        // A soft load joins whatever is already running. A hard reload has to
+        // start its own run, otherwise it would receive the very stale result
+        // it is meant to replace.
+        if (inflight !== null && !reload) return inflight
         if (state.status !== 'ready') {
           publish({ ...state, status: 'loading', error: null })
         }
-        const fresh = options !== null && typeof options === 'object' && options.fresh === true
-        inflight = (async () => {
+        const token = ++generation
+        const run = (async () => {
           try {
-            const value = await fetchHostCatalog(fresh)
+            const value = await fetchHostCatalog(fresh, reload)
+            if (token !== generation) return
             publish({
               status: 'ready',
               groups: Array.isArray(value.groups) ? value.groups : [],
@@ -692,6 +925,7 @@ window.__ModuleLoader__.load({
             const detail = String(detailError && detailError.message ? detailError.message : detailError)
             try {
               const value = await fetchOfficialCatalog()
+              if (token !== generation) return
               publish({
                 status: 'ready',
                 groups: value.groups,
@@ -704,6 +938,7 @@ window.__ModuleLoader__.load({
                 generatedAt: value.generatedAt,
               })
             } catch (error) {
+              if (token !== generation) return
               publish({
                 ...state,
                 status: 'error',
@@ -711,10 +946,11 @@ window.__ModuleLoader__.load({
               })
             }
           } finally {
-            inflight = null
+            if (inflight === run) inflight = null
           }
         })()
-        return inflight
+        inflight = run
+        return run
       }
 
       return {
@@ -730,6 +966,129 @@ window.__ModuleLoader__.load({
         load,
         refresh() {
           return load({ fresh: true })
+        },
+        reload() {
+          return load({ fresh: true, reload: true })
+        },
+      }
+    }
+
+    /**
+     * Manual capability overrides, persisted by the Host half.
+     *
+     * The page only edits one model at a time; the store keeps the whole list so
+     * every row knows whether it already has an override. An older Host half
+     * answers 404 and the editor stays hidden behind the `overrides` feature
+     * flag.
+     */
+    function createOverrides() {
+      const listeners = new Set()
+      let state = { status: 'idle', entries: [], available: null, error: null }
+      let inflight = null
+
+      const publish = (next) => {
+        state = next
+        for (const listener of listeners) listener()
+      }
+
+      /** Error text for a failed envelope or HTTP response. */
+      const failureOf = async (response) => {
+        let detail = ''
+        try {
+          const body = await response.json()
+          if (body && body.error) {
+            detail = ' (' + String(body.error.code) + ': ' + String(body.error.message) + ')'
+          }
+        } catch (_error) {
+          // A proxy error page is not JSON; the status code is still useful.
+        }
+        return new Error('HTTP ' + response.status + detail)
+      }
+
+      const readEntries = async (response) => {
+        if (response.status === 404) {
+          publish({ status: 'ready', entries: [], available: false, error: null })
+          return null
+        }
+        if (!response.ok) throw await failureOf(response)
+        const body = await response.json()
+        const value = body && body.ok === true ? body.value : null
+        if (value === null || !Array.isArray(value.overrides)) {
+          throw new Error('malformed override list')
+        }
+        return value.overrides
+      }
+
+      const load = () => {
+        if (inflight !== null) return inflight
+        if (state.status !== 'ready') publish({ ...state, status: 'loading', error: null })
+        const run = (async () => {
+          try {
+            const response = await fetch(API + '/overrides', {
+              method: 'GET',
+              headers: { accept: 'application/json' },
+              credentials: 'same-origin',
+              cache: 'no-store',
+              redirect: 'error',
+            })
+            const entries = await readEntries(response)
+            if (entries !== null) {
+              publish({ status: 'ready', entries, available: true, error: null })
+            }
+          } catch (error) {
+            publish({
+              ...state,
+              status: 'error',
+              error: String(error && error.message ? error.message : error),
+            })
+          } finally {
+            if (inflight === run) inflight = null
+          }
+        })()
+        inflight = run
+        return run
+      }
+
+      /** POST one entry (or `{remove:true}`) and adopt the returned list. */
+      const write = async (payload) => {
+        const response = await fetch(API + '/overrides', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          redirect: 'error',
+          body: JSON.stringify(payload),
+        })
+        if (response.status === 404) {
+          publish({ status: 'ready', entries: [], available: false, error: null })
+          throw new Error('HTTP 404')
+        }
+        if (!response.ok) throw await failureOf(response)
+        const body = await response.json()
+        const value = body && body.ok === true ? body.value : null
+        if (value === null || !Array.isArray(value.overrides)) {
+          throw new Error('malformed override list')
+        }
+        publish({ status: 'ready', entries: value.overrides, available: true, error: null })
+        return value
+      }
+
+      return {
+        subscribe(fn) {
+          listeners.add(fn)
+          return () => {
+            listeners.delete(fn)
+          }
+        },
+        getSnapshot() {
+          return state
+        },
+        load,
+        save(entry) {
+          return write(entry)
+        },
+        remove(provider, model) {
+          return write({ remove: true, provider, model })
         },
       }
     }
@@ -943,17 +1302,322 @@ window.__ModuleLoader__.load({
       return 'mvp_tag' + tone + (tag.inferred === true ? ' mvp_tag--inferred' : '')
     }
 
-    function makeSection(form, catalog) {
+    /**
+     * Per-model capability editor.
+     *
+     * Every field is optional: a blank field means "keep using automatic
+     * detection", so a user can fix only the reasoning ladder or only the
+     * context window without lying about the rest. Saving a fully blank form is
+     * the same as "use automatic" and removes the entry on the Host side.
+     */
+    /** Human sentence for the Host's provider write-back result, or null. */
+    function providerWriteNote(result, t) {
+      if (result === null || typeof result !== 'object') return null
+      if (result.written === true) {
+        const fields = (Array.isArray(result.fields) ? result.fields : [])
+          .map((field) => t('override.field.' + field))
+          .join('、')
+        return t('override.providerWritten', { fields })
+      }
+      if (result.reason === 'nothing' || result.reason === 'skipped') return null
+      const label = t('override.reason.' + String(result.reason))
+      return t('override.providerSkipped', {
+        reason: label === 'override.reason.' + String(result.reason) ? String(result.reason) : label,
+      })
+    }
+
+    function ModelOverrideEditor({ entry, name, t, overrides, onClose, onSaved }) {
+      const [kind, setKind] = React.useState(entry.kind || '')
+      const [context, setContext] = React.useState(
+        entry.contextWindow === undefined ? '' : String(entry.contextWindow),
+      )
+      const [input, setInput] = React.useState(
+        () => new Set(Array.isArray(entry.input) ? entry.input : []),
+      )
+      const [efforts, setEfforts] = React.useState(
+        () => new Set((Array.isArray(entry.efforts) ? entry.efforts : []).map((item) => item.id)),
+      )
+      const [noReasoning, setNoReasoning] = React.useState(entry.reasoningSupported === false)
+      const [defaultEffort, setDefaultEffort] = React.useState(
+        typeof entry.defaultEffort === 'string' ? entry.defaultEffort : '',
+      )
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const [applyToProvider, setApplyToProvider] = React.useState(true)
+
+      const toggleIn = (setter, id) => {
+        setter((previous) => {
+          const next = new Set(previous)
+          if (next.has(id)) next.delete(id)
+          else next.add(id)
+          return next
+        })
+      }
+
+      const fail = (failure) => {
+        setBusy(false)
+        setError(
+          t('override.failed', {
+            message: String(failure && failure.message ? failure.message : failure),
+          }),
+        )
+      }
+
+      const save = () => {
+        const payload = { provider: entry.provider, model: entry.model }
+        if (kind !== '') payload.kind = kind
+        if (context.trim() !== '') {
+          const value = Number(context)
+          if (!Number.isFinite(value) || value <= 0) {
+            setError(t('override.contextInvalid'))
+            return
+          }
+          payload.contextWindow = Math.round(value)
+        }
+        if (input.size > 0) {
+          payload.input = OVERRIDE_MODALITIES.filter((id) => input.has(id))
+        }
+        if (noReasoning) {
+          payload.reasoningSupported = false
+        } else if (efforts.size > 0) {
+          payload.efforts = OVERRIDE_EFFORTS.filter((id) => efforts.has(id)).map((id) => ({ id }))
+          if (defaultEffort !== '' && efforts.has(defaultEffort)) {
+            payload.defaultEffort = defaultEffort
+          }
+        }
+        payload.applyToProvider = applyToProvider
+        setBusy(true)
+        setError(null)
+        Promise.resolve(overrides.save(payload)).then(
+          (result) => {
+            setBusy(false)
+            if (typeof onSaved === 'function') onSaved(result)
+          },
+          fail,
+        )
+      }
+
+      const resetToAuto = () => {
+        setBusy(true)
+        setError(null)
+        Promise.resolve(overrides.remove(entry.provider, entry.model)).then(
+          () => {
+            setBusy(false)
+            if (typeof onSaved === 'function') onSaved()
+          },
+          fail,
+        )
+      }
+
+      const kindOptions = [['', t('override.kindAuto')]].concat(
+        ['chat', 'image', 'video', 'embedding', 'rerank', 'audio', 'classifier', 'translation'].map(
+          (id) => [id, id === 'chat' ? t('page.filter.chat') : t('tag.kind.' + id)],
+        ),
+      )
+      const defaultOptions = [['', t('override.defaultEffortAuto')]].concat(
+        OVERRIDE_EFFORTS.filter((id) => efforts.has(id)).map((id) => [id, effortLabel(id, t)]),
+      )
+      const selectedDefault = efforts.has(defaultEffort) ? defaultEffort : ''
+
+      return h(
+        'div',
+        { className: 'mvp_editor' },
+        h(
+          'div',
+          { className: 'mvp_editorHead' },
+          h('div', { className: 'mvp_editorTitle' }, t('override.title') + ' · ' + name),
+          h('div', { className: 'mvp_editorSub' }, t('override.hint')),
+        ),
+        h(
+          'div',
+          { className: 'mvp_editorGrid' },
+          h(
+            'label',
+            { className: 'mvp_field' },
+            h('span', { className: 'mvp_fieldLabel' }, t('override.kind')),
+            h(
+              'select',
+              {
+                className: 'mvp_select',
+                value: kind,
+                'aria-label': t('override.kind'),
+                onChange: (event) => setKind(event.target.value),
+              },
+              kindOptions.map(([value, label]) => h('option', { key: value, value }, label)),
+            ),
+          ),
+          h(
+            'label',
+            { className: 'mvp_field' },
+            h('span', { className: 'mvp_fieldLabel' }, t('override.context')),
+            h('input', {
+              className: 'mvp_number',
+              type: 'number',
+              min: '1',
+              step: '1',
+              value: context,
+              placeholder: t('override.contextPlaceholder'),
+              'aria-label': t('override.context'),
+              onInput: (event) => setContext(event.target.value),
+            }),
+          ),
+          h(
+            'div',
+            { className: 'mvp_field mvp_field--wide' },
+            h('span', { className: 'mvp_fieldLabel' }, t('override.input')),
+            h(
+              'div',
+              { className: 'mvp_chips' },
+              OVERRIDE_MODALITIES.map((id) =>
+                h(
+                  'button',
+                  {
+                    key: id,
+                    type: 'button',
+                    className: 'mvp_chip',
+                    'aria-pressed': input.has(id),
+                    disabled: busy,
+                    onClick: () => toggleIn(setInput, id),
+                  },
+                  modalityLabel(id, t),
+                ),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'mvp_field mvp_field--wide' },
+            h('span', { className: 'mvp_fieldLabel' }, t('override.efforts')),
+            h(
+              'div',
+              { className: 'mvp_chips' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mvp_chip',
+                  'aria-pressed': noReasoning,
+                  disabled: busy,
+                  onClick: () => setNoReasoning((value) => !value),
+                },
+                t('tag.noReasoning'),
+              ),
+              OVERRIDE_EFFORTS.map((id) =>
+                h(
+                  'button',
+                  {
+                    key: id,
+                    type: 'button',
+                    className: 'mvp_chip',
+                    'aria-pressed': !noReasoning && efforts.has(id),
+                    disabled: busy || noReasoning,
+                    onClick: () => toggleIn(setEfforts, id),
+                  },
+                  effortLabel(id, t),
+                ),
+              ),
+            ),
+          ),
+          !noReasoning && efforts.size > 0
+            ? h(
+                'label',
+                { className: 'mvp_field' },
+                h('span', { className: 'mvp_fieldLabel' }, t('override.defaultEffort')),
+                h(
+                  'select',
+                  {
+                    className: 'mvp_select',
+                    value: selectedDefault,
+                    'aria-label': t('override.defaultEffort'),
+                    onChange: (event) => setDefaultEffort(event.target.value),
+                  },
+                  defaultOptions.map(([value, label]) => h('option', { key: value, value }, label)),
+                ),
+              )
+            : null,
+          h(
+            'div',
+            { className: 'mvp_field mvp_field--wide' },
+            h(
+              'label',
+              { className: 'mvp_check' },
+              h('input', {
+                type: 'checkbox',
+                checked: applyToProvider,
+                disabled: busy,
+                onChange: (event) => setApplyToProvider(event.target.checked),
+              }),
+              h('span', null, t('override.provider')),
+            ),
+            h('div', { className: 'mvp_editorNote' }, t('override.providerHint')),
+          ),
+        ),
+        error !== null ? h('div', { className: 'mvp_editorError', role: 'alert' }, error) : null,
+        h(
+          'div',
+          { className: 'mvp_editorFooter' },
+          h('div', { className: 'mvp_editorNote' }, t('override.effortHint')),
+          h(
+            'div',
+            { className: 'mvp_editorActions' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'mvp_button',
+                disabled: busy,
+                title: t('override.resetTitle'),
+                onClick: resetToAuto,
+              },
+              t('override.reset'),
+            ),
+            h(
+              'button',
+              { type: 'button', className: 'mvp_button', disabled: busy, onClick: onClose },
+              t('override.cancel'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'mvp_button mvp_button--accent',
+                disabled: busy,
+                onClick: save,
+              },
+              t(busy ? 'override.saving' : 'override.save'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    function makeSection(form, catalog, overrides) {
       return function ModelVisibilitySection({ t }) {
         const { hidden, snapshot } = useHidden(form)
         const state = useSource(catalog)
+        const overrideState = useSource(overrides)
         const [busy, setBusy] = React.useState(false)
         const [error, setError] = React.useState(null)
+        const [refreshing, setRefreshing] = React.useState(false)
+        const [reloading, setReloading] = React.useState(false)
+        const [collapsed, setCollapsed] = React.useState(readCollapsedGroups)
+        const [editing, setEditing] = React.useState(null)
+        const [providerNote, setProviderNote] = React.useState(null)
 
         React.useEffect(() => {
           catalog.load()
+          overrides.load()
           // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [])
+
+        const catalogMeta = state.catalog && typeof state.catalog === 'object' ? state.catalog : null
+        const hostFeatures =
+          catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
+        const canEdit = state.source === 'host' && hostFeatures.includes('overrides')
+        const overrideEntries = new Map()
+        for (const entry of overrideState.entries) {
+          overrideEntries.set(overrideKeyOf(entry), entry)
+        }
 
         const writable = snapshot.writable !== false
         const groups = state.groups
@@ -1032,6 +1696,45 @@ window.__ModuleLoader__.load({
           commit(next)
         }
 
+        const runCatalogAction = (action, setActive) => {
+          setActive(true)
+          Promise.resolve()
+            .then(action)
+            .catch(() => {})
+            .finally(() => setActive(false))
+        }
+
+        const refreshCatalog = () => {
+          if (refreshing || reloading) return
+          runCatalogAction(() => catalog.refresh(), setRefreshing)
+        }
+
+        // A hard reload may supersede a soft refresh that is still running;
+        // catalog.load() gives it a new run and discards the older result.
+        const reloadCatalog = () => {
+          if (busy || reloading) return
+          runCatalogAction(() => catalog.reload(), setReloading)
+        }
+
+        const toggleGroupCollapsed = (id) => {
+          setCollapsed((previous) => {
+            const next = new Set(previous)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            persistCollapsedGroups(next)
+            return next
+          })
+        }
+
+        const toggleAllCollapsed = () => {
+          setCollapsed((previous) => {
+            const collapsedNow = groups.some((group) => previous.has(group.id))
+            const next = collapsedNow ? new Set() : new Set(groups.map((group) => group.id))
+            persistCollapsedGroups(next)
+            return next
+          })
+        }
+
         const rows = []
         for (const group of filteredGroups) {
           const allGroupModels =
@@ -1063,6 +1766,11 @@ window.__ModuleLoader__.load({
               ),
             )
           }
+          const groupName = providerLabel(group, t)
+          const collapsedNow = collapsed.has(group.id)
+          const collapseLabel = t(collapsedNow ? 'group.expandNamed' : 'group.collapseNamed', {
+            name: groupName,
+          })
           const probe = probeOf(state, group, t)
           rows.push(
             h(
@@ -1074,7 +1782,19 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'mvp_groupTitle' },
-                  h('span', null, providerLabel(group, t)),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'mvp_collapse',
+                      'aria-expanded': !collapsedNow,
+                      'aria-label': collapseLabel,
+                      title: collapseLabel,
+                      onClick: () => toggleGroupCollapsed(group.id),
+                    },
+                    collapsedNow ? '▸' : '▾',
+                  ),
+                  h('span', { className: 'mvp_groupName' }, groupName),
                   h('span', { className: 'mvp_groupCount' }, shown + '/' + allGroupModels.length),
                   kindParts.length > 0
                     ? h('span', { className: 'mvp_groupCap' }, kindNodes)
@@ -1100,63 +1820,102 @@ window.__ModuleLoader__.load({
                       : t('group.showFiltered'),
                 ),
               ),
-              models.map((model) => {
-                const shownModel = !hidden.has(keyOf(group.id, model.id))
-                const tags = capabilityTags(model, t)
-                const kind = kindOf(model)
-                const generation = isGenerationKind(kind)
-                const kindTint =
-                  kind !== 'chat' &&
-                  ['image', 'video', 'embedding', 'rerank', 'audio', 'classifier', 'translation'].includes(kind)
-                    ? ' mvp_row--kind-' + kind
-                    : ''
-                return h(
-                  'div',
-                  {
-                    key: model.id,
-                    className:
-                      'mvp_row' +
-                      (generation ? ' mvp_row--gen' : '') +
-                      kindTint,
-                  },
-                  h(
+              collapsedNow
+                ? null
+                : models.map((model) => {
+                  const rowKey = keyOf(group.id, model.id)
+                  const shownModel = !hidden.has(rowKey)
+                  const tags = capabilityTags(model, t)
+                  const kind = kindOf(model)
+                  const generation = isGenerationKind(kind)
+                  const kindTint =
+                    kind !== 'chat' &&
+                    ['image', 'video', 'embedding', 'rerank', 'audio', 'classifier', 'translation'].includes(kind)
+                      ? ' mvp_row--kind-' + kind
+                      : ''
+                  const row = h(
                     'div',
-                    { className: 'mvp_rowText' },
-                    h('div', { className: 'mvp_rowTitle' }, model.name),
-                    model.id === model.name
-                      ? null
-                      : h('div', { className: 'mvp_rowMeta' }, model.id),
+                    {
+                      className:
+                        'mvp_row' +
+                        (generation ? ' mvp_row--gen' : '') +
+                        kindTint,
+                    },
                     h(
                       'div',
-                      { className: 'mvp_tags' },
-                      tags.map((tag) =>
-                        h(
-                          'span',
-                          {
-                            key: tag.key,
-                            className: tagClassOf(tag),
-                            title: tag.title || undefined,
-                          },
-                          tag.label,
+                      { className: 'mvp_rowText' },
+                      h('div', { className: 'mvp_rowTitle' }, model.name),
+                      model.id === model.name
+                        ? null
+                        : h('div', { className: 'mvp_rowMeta' }, model.id),
+                      h(
+                        'div',
+                        { className: 'mvp_tags' },
+                        tags.map((tag) =>
+                          h(
+                            'span',
+                            {
+                              key: tag.key,
+                              className: tagClassOf(tag),
+                              title: tag.title || undefined,
+                            },
+                            tag.label,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      role: 'switch',
-                      className: 'mvp_switch',
-                      'aria-checked': shownModel,
-                      'aria-label': model.name,
-                      disabled: disabled,
-                      onClick: () => toggleModel(group, model),
-                    },
-                    h('span', { className: 'mvp_thumb' }),
-                  ),
-                )
-              }),
+                    h(
+                      'div',
+                      { className: 'mvp_rowActions' },
+                      canEdit
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'mvp_button mvp_editButton',
+                              'aria-pressed': editing === rowKey,
+                              'aria-label': t('row.edit') + ': ' + model.name,
+                              title: t('row.editTitle'),
+                              disabled: busy,
+                              onClick: () => setEditing(editing === rowKey ? null : rowKey),
+                            },
+                            t('row.edit'),
+                          )
+                        : null,
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          role: 'switch',
+                          className: 'mvp_switch',
+                          'aria-checked': shownModel,
+                          'aria-label': model.name,
+                          disabled: disabled,
+                          onClick: () => toggleModel(group, model),
+                        },
+                        h('span', { className: 'mvp_thumb' }),
+                      ),
+                    ),
+                  )
+                  const editor =
+                    canEdit && editing === rowKey
+                      ? h(ModelOverrideEditor, {
+                          key: 'editor',
+                          entry:
+                            overrideEntries.get(rowKey) || { provider: group.id, model: model.id },
+                          name: model.name,
+                          t,
+                          overrides,
+                          onClose: () => setEditing(null),
+                          onSaved: (result) => {
+                            setEditing(null)
+                            setProviderNote(providerWriteNote(result && result.provider, t))
+                            refreshCatalog()
+                          },
+                        })
+                      : null
+                  return h(React.Fragment, { key: model.id }, row, editor)
+                }),
             ),
           )
         }
@@ -1174,12 +1933,12 @@ window.__ModuleLoader__.load({
               ? t('page.probeSummary', { ok: probeOk, caps: probeCaps })
               : t('page.probeSummaryNone')
             : null
-        const catalogMeta = state.catalog && typeof state.catalog === 'object' ? state.catalog : null
-        const hostFeatures =
-          catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
         // A page refresh can deliver this bundle while the Host half is still
         // the previous version; the switch would look live but do nothing.
         const hostStale = state.source === 'host' && !hostFeatures.includes('applyInput')
+        // A hard reload is only meaningful when the Host half understands it.
+        const canReload = state.source === 'host' && hostFeatures.includes('reload')
+        const anyCollapsed = groups.some((group) => collapsed.has(group.id))
         const catalogDate =
           catalogMeta && typeof catalogMeta.generatedAt === 'string'
             ? catalogMeta.generatedAt.slice(0, 10)
@@ -1243,10 +2002,32 @@ window.__ModuleLoader__.load({
                 {
                   type: 'button',
                   className: 'mvp_button',
-                  disabled: busy,
-                  onClick: () => catalog.refresh(),
+                  disabled: groups.length === 0,
+                  title: t(anyCollapsed ? 'page.expandGroupsTitle' : 'page.collapseGroupsTitle'),
+                  onClick: toggleAllCollapsed,
                 },
-                t('page.refresh'),
+                t(anyCollapsed ? 'page.expandGroups' : 'page.collapseGroups'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mvp_button',
+                  disabled: busy || refreshing || reloading,
+                  onClick: refreshCatalog,
+                },
+                t(refreshing ? 'page.refreshing' : 'page.refresh'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mvp_button mvp_button--accent',
+                  disabled: !canReload || busy || reloading,
+                  title: t(canReload ? 'page.reloadTitle' : 'page.reloadUnavailable'),
+                  onClick: reloadCatalog,
+                },
+                t(reloading ? 'page.reloading' : 'page.reload'),
               ),
             ),
           ),
@@ -1344,6 +2125,10 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'mvp_legend' }, t('page.legend')),
           h('div', { className: 'mvp_legend' }, t('page.kindLegend')),
+          h('div', { className: 'mvp_legend' }, t('page.manualNote')),
+          overrideState.available === false
+            ? h('div', { className: 'mvp_fallback' }, t('override.unavailable'))
+            : null,
           state.detailsError !== null && state.source === 'catalog'
             ? h('div', { className: 'mvp_fallback' }, t('page.metaFallback'))
             : null,
@@ -1376,6 +2161,7 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'mvp_error' }, t('page.empty'))
             : null,
           probeNote !== null ? h('div', { className: 'mvp_note' }, probeNote) : null,
+          providerNote !== null ? h('div', { className: 'mvp_note' }, providerNote) : null,
           catalogNote !== null ? h('div', { className: 'mvp_note' }, catalogNote) : null,
         )
       }
@@ -1400,12 +2186,14 @@ window.__ModuleLoader__.load({
 
       const form = ctx.configForms.get(ENTRY)
       const catalog = createCatalog(ctx)
+      const overrides = createOverrides()
 
       ctx.effect(() => {
         const disposers = []
         disposers.push(
           ctx.on('connection/reset', () => {
             catalog.refresh()
+            overrides.load()
           }),
         )
         if (ctx.remote !== undefined && typeof ctx.remote.$on === 'function') {
@@ -1442,7 +2230,7 @@ window.__ModuleLoader__.load({
         }
       }, 'model-visibility: catalog refresh')
 
-      const Section = makeSection(form, catalog)
+      const Section = makeSection(form, catalog, overrides)
       ctx.effect(
         () =>
           ctx.slots.inject('settings.section', () =>

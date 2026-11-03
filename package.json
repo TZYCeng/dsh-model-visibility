@@ -1,9 +1,11 @@
 {
-  "name": "dsh-model-visibility",
-  "version": "1.6.0",
-  "private": true,
+  "name": "@tzyc/dsh-model-visibility",
+  "version": "1.9.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "description": "Choose which models appear in the chat composer's model list, with per-provider groups, per-model capability tags sourced from the adapter, the relay model list, a built-in catalog and vendor corrections, separate coloured labels for image/video generation models, name search and capability filters, and an image-input alignment (on by default) for relay routes.",
+  "description": "Choose which models appear in the chat composer's model list, with per-provider groups, per-model capability tags sourced from the adapter, the relay model list, a built-in catalog, vendor corrections and manual overrides, separate coloured labels for image/video generation models, name search and capability filters, collapsible provider groups, a hard capability re-fetch, per-model overrides that can also be written back into the model provider's own settings, and an image-input alignment (on by default) for relay routes.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

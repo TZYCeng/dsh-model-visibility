@@ -27,7 +27,9 @@ import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import { createModelInfoService } from './lib/model-info.js'
+import { createOverrideStore } from './lib/model-overrides.js'
 import { createProviderProbe, readProviderProfiles } from './lib/provider-probe.js'
+import { stripWrittenFields, writeCapabilities } from './lib/provider-write.js'
 import { installImageInputGate } from './lib/image-input-gate.js'
 
 /** Settings namespace this entry owns; also the loader row id. */
@@ -103,6 +105,11 @@ export function apply(ctx, config) {
   })
 
   const logger = ctx.logger ?? console
+
+  // Manual capability overrides live in their own file: they are structured,
+  // change independently of the hidden list, and the request-side image gate
+  // needs a synchronous read. See `lib/model-overrides.js`.
+  const overrides = createOverrideStore({ logger })
 
   /** Current hidden keys, read through the stable volatile reference. */
   const liveList = () => {
@@ -232,11 +239,13 @@ export function apply(ctx, config) {
 
     const service = createModelInfoService(scope.llm, {
       enrichment: probe === null ? undefined : ({ fresh }) => probe.read({ fresh }),
+      overrides,
       // Synchronous evidence for the request-side image gate: provider profiles
       // from the settings document plus the last completed relay probe.
       context: () => ({
         profiles: probe === null ? profilesForGate() : probe.profiles(),
         discovered: probe?.peek()?.discovered,
+        overrides,
       }),
     })
 
@@ -273,13 +282,28 @@ export function apply(ctx, config) {
           requestBody: 'buffered',
           async fetch(request) {
             let fresh = false
+            let reload = false
             try {
-              fresh = new URL(request.url).searchParams.get('fresh') !== null
+              const params = new URL(request.url).searchParams
+              fresh = params.get('fresh') !== null
+              reload = params.get('reload') !== null
             } catch (_error) {
               // A malformed URL simply means "use the cached read".
             }
+            // A hard reload is the page's "re-fetch capabilities" action: drop
+            // every cache and any sweep already in flight, then read again. A
+            // plain `fresh` read bypasses TTLs but still joins an in-flight
+            // sweep, which can be exactly the stale read the user is trying to
+            // escape.
+            if (reload) {
+              service.invalidate()
+              probe?.invalidate()
+              clearFallbackProfiles()
+              overrides.invalidate()
+              imageInput.refresh()
+            }
             try {
-              return json({ ok: true, value: await service.read({ fresh }) })
+              return json({ ok: true, value: await service.read({ fresh: fresh || reload }) })
             } catch (error) {
               if (typeof logger.warn === 'function') {
                 logger.warn('model-visibility: capability probe failed')
@@ -299,6 +323,115 @@ export function apply(ctx, config) {
           },
         }),
       'model-visibility: capability route',
+    )
+
+    // Manual capability overrides: the page reads the current entries and
+    // writes one model at a time. Both calls are same-origin authenticated by
+    // the connection layer, like the capability route above.
+    scope.effect(
+      () =>
+        connection.fetch.register({
+          path: `${API}/overrides`,
+          methods: ['GET', 'POST'],
+          requestBody: 'buffered',
+          async fetch(request) {
+            const method = String(request.method || 'GET').toUpperCase()
+            if (method === 'GET') {
+              try {
+                return json({ ok: true, value: { overrides: overrides.list() } })
+              } catch (error) {
+                if (typeof logger.warn === 'function') {
+                  logger.warn('model-visibility: could not read model overrides')
+                  logger.warn(error)
+                }
+                return json(
+                  {
+                    ok: false,
+                    error: {
+                      code: 'overrides/failed',
+                      message: error instanceof Error ? error.message : String(error),
+                    },
+                  },
+                  500,
+                )
+              }
+            }
+            if (method !== 'POST') {
+              return json(
+                { ok: false, error: { code: 'overrides/method', message: 'GET or POST' } },
+                405,
+              )
+            }
+            let body
+            try {
+              body = await request.json()
+            } catch (_error) {
+              return json(
+                {
+                  ok: false,
+                  error: { code: 'overrides/body', message: 'expected a JSON override entry' },
+                },
+                400,
+              )
+            }
+            // What the provider schema can express is mirrored into the
+            // provider's own settings, so the composer and the adapter see the
+            // same facts as this page. A refusal is not an error: the local
+            // override still applies, and the response explains the reason.
+            let provider = { written: false, fields: [], reason: 'skipped' }
+            try {
+              if (body !== null && typeof body === 'object' && body.remove === true) {
+                overrides.remove(
+                  typeof body.provider === 'string' ? body.provider : '',
+                  typeof body.model === 'string' ? body.model : '',
+                )
+              } else {
+                const saved = overrides.upsert(body)
+                if (saved !== undefined && body.applyToProvider !== false) {
+                  provider = await writeCapabilities(settings, saved)
+                  if (provider.written) {
+                    const remaining = stripWrittenFields(saved, provider.fields)
+                    const local = Object.keys(remaining).filter(
+                      (key) => key !== 'provider' && key !== 'model',
+                    )
+                    if (local.length === 0) {
+                      overrides.remove(saved.provider, saved.model)
+                    } else {
+                      overrides.upsert(remaining)
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              if (typeof logger.warn === 'function') {
+                logger.warn('model-visibility: could not save a model override')
+                logger.warn(error)
+              }
+              return json(
+                {
+                  ok: false,
+                  error: {
+                    code: 'overrides/failed',
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                },
+                500,
+              )
+            }
+            // The new entry outranks every cached capability fact. A provider
+            // write also changed the settings document: refresh the profile
+            // cache so the page immediately shows the declared values instead
+            // of the stale ones (no network sweep is needed for that).
+            service.invalidate()
+            imageInput.refresh()
+            if (provider.written) {
+              clearFallbackProfiles()
+              probe?.noteSettingsChanged()
+            }
+            return json({ ok: true, value: { overrides: overrides.list(), provider } })
+          },
+        }),
+      'model-visibility: override route',
     )
 
     // A route/credential change invalidates both the capability cache and (when

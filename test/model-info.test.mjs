@@ -15,6 +15,7 @@ import {
   describeResolvedModel,
   detachModalities,
   detachReasoning,
+  imageInputDecision,
 } from '../lib/model-info.js'
 
 /** A resolved-model record with every optional field populated. */
@@ -246,4 +247,125 @@ test('invalidate during an in-flight sweep discards that sweep', async () => {
   // The late sweep must not have repopulated the cache, so this read probes again.
   await service.read()
   assert.equal(calls, 2)
+})
+
+test('an invalidated sweep does not clear the newer in-flight slot', async () => {
+  let releaseFirst
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve
+  })
+  let releaseSecond
+  const secondGate = new Promise((resolve) => {
+    releaseSecond = resolve
+  })
+  let calls = 0
+  const service = createModelInfoService(
+    {
+      listProviders: () => [{ id: 'acme', name: 'Acme' }],
+      listModels: async () => [{ id: 'acme-large', name: 'Acme Large' }],
+      resolveModelInfo: async () => {
+        calls += 1
+        await (calls === 1 ? firstGate : secondGate)
+        return FULL_INFO
+      },
+    },
+    { ttlMs: 60_000 },
+  )
+
+  const first = service.read()
+  service.invalidate()
+  const second = service.read()
+  releaseFirst()
+  await first
+
+  // The old sweep's finally must not free the slot owned by the new sweep.
+  const third = service.read()
+  assert.equal(calls, 2)
+  assert.equal(third, second)
+
+  releaseSecond()
+  await second
+  await third
+})
+
+test('a manual override outranks every automatic capability layer', async () => {
+  const llm = fakeLlm({
+    providers: [{ id: 'relay', name: 'Relay' }],
+    models: { relay: [{ id: 'gpt-6.1-terra', name: 'gpt-6.1-terra' }] },
+  })
+  const override = {
+    kind: 'chat',
+    input: ['text', 'image'],
+    contextWindow: 400000,
+    efforts: [
+      { id: 'low', name: 'Low' },
+      { id: 'high', name: 'High' },
+    ],
+    defaultEffort: 'high',
+  }
+  const record = await describeModel(
+    llm,
+    'relay',
+    { id: 'gpt-6.1-terra', name: 'gpt-6.1-terra' },
+    { override },
+  )
+  assert.equal(record.kind, 'chat')
+  assert.deepEqual(record.inputModalities, ['text', 'image'])
+  assert.equal(record.contextWindow, 400000)
+  assert.equal(record.reasoningSupported, true)
+  assert.deepEqual(
+    record.reasoning.efforts.map((effort) => effort.id),
+    ['low', 'high'],
+  )
+  assert.equal(record.reasoning.defaultEffort, 'high')
+  assert.equal(record.sources.kind, 'manual')
+  assert.equal(record.sources.modalities, 'manual')
+  assert.equal(record.sources.context, 'manual')
+  assert.equal(record.sources.reasoning, 'manual')
+})
+
+test('a manual kind also suppresses chat name inference', async () => {
+  const llm = fakeLlm({
+    providers: [{ id: 'relay', name: 'Relay' }],
+    models: { relay: [{ id: 'gpt-6.1-terra', name: 'gpt-6.1-terra' }] },
+  })
+  const record = await describeModel(
+    llm,
+    'relay',
+    { id: 'gpt-6.1-terra', name: 'gpt-6.1-terra' },
+    { override: { kind: 'image' } },
+  )
+  assert.equal(record.kind, 'image')
+  assert.equal(record.sources.kind, 'manual')
+  assert.deepEqual(record.inputModalities, undefined)
+})
+
+test('a manual "no reasoning" statement hides an adapter ladder', async () => {
+  const llm = fakeLlm({
+    providers: [{ id: 'acme', name: 'Acme' }],
+    models: { acme: [{ id: 'acme-large', name: 'Acme Large' }] },
+    info: { 'acme/acme-large': FULL_INFO },
+  })
+  const record = await describeModel(
+    llm,
+    'acme',
+    { id: 'acme-large', name: 'Acme Large' },
+    { override: { reasoningSupported: false } },
+  )
+  assert.equal(record.reasoning, undefined)
+  assert.equal(record.reasoningSupported, false)
+  assert.equal(record.sources.reasoning, 'manual')
+})
+
+test('the image-input gate honours manual image modalities', () => {
+  const profile = { models: new Map() }
+  const plain = imageInputDecision('relay', 'mystery-model', { profile })
+  assert.equal(plain.allowed, false)
+  const manual = imageInputDecision('relay', 'mystery-model', {
+    profile,
+    override: { input: ['text', 'image'] },
+  })
+  assert.equal(manual.allowed, true)
+  assert.equal(manual.reason, 'image')
+  assert.equal(manual.record.sources.modalities, 'manual')
 })

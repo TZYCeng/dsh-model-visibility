@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Model Visibility",
-    "description": "Choose which models appear in the chat composer's model list, toggle whole provider groups at once, and read each model's real capabilities (adapter declarations, relay model lists, built-in catalog, vendor corrections) with colour-coded image, video and embedding labels, plus an optional image-input alignment for relay routes."
+    "description": "Choose which models appear in the chat composer's model list, toggle or collapse whole provider groups, and read each model's real capabilities (adapter declarations, relay model lists, built-in catalog, vendor corrections) with colour-coded image, video and embedding labels, plus a hard re-fetch of every model's modalities and reasoning efforts, manual per-model overrides for kind, context window, input modalities and effort levels (optionally written back into the model provider's settings), and an optional image-input alignment for relay routes."
   }
 }

@@ -3,5 +3,5 @@
 # declares the browser half, which binds to this same row id.
 - insert:
     - id: model-visibility
-      name: dsh-model-visibility
+      name: '@tzyc/dsh-model-visibility'
       config: {}
