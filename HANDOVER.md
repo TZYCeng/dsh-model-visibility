@@ -366,6 +366,7 @@ Host 的 `console` 输出在 DSH 桌面进程里；没有独立日志文件。�
 22. **回写用模型下标，先 `describe()` 再 `mutate()`**：两次调用之间如果模型列表被增删，下标会漂移。`settings.mutate` 的 `set` 在 `index === length` 时会追加，所以不要用它来「兜底新增模型」；找不到 id 就返回 `model-missing`，不要猜。`providers` 没有 `models` 数组时也不要临时造一个：有 `models` 列表会替换整个 served catalog，等于把其它模型全藏了。
 23. **回写后必须刷新 profile 缓存**：Provider 的 `input` / `contextWindow` 改动不一定改变探测指纹，但 `probe.profiles()` 是同步图像闸门的数据源。写完调用 `clearFallbackProfiles()` + `probe?.noteSettingsChanged()`（`noteSettingsChanged` 会无条件刷新 `cached.profiles`），否则页面已经显示新值、输入框却仍按旧的 `input` 拒绝图片。
 24. **不要把 `off` 单独写进 `reasoningEfforts`**：Provider schema 要求至少有一个非 `off` 的档位（“offers no level beyond off”），只勾 `off` 时回写必须跳过思考强度、把档位留在本地覆盖里；否则整个 `mutate` 会被 schema 拒绝，连模态和上下文也一起写不进去（当前实现是按字段发 ops，但未来合并成一次多字段校验时要记得这个约束）。
+25. **`client.js` 的 `id` 必须逐字等于 `package.json` 的 `name`**：Host 按包名请求浏览器模块，Loader 找不到同 id 的注册就报「loaded without registering」。改名成作用域包（`dsh-model-visibility` → `@tzyc/dsh-model-visibility`）时，`client.js` 第 2 行、`cordis.patch.yml` 的 `name`、profile patch 里的插件行必须一起改；只改其中两处就会出现「服务端能加载、页面同步失败」。改完用 `node` 跑一遍假 Loader 模拟（见 `test/` 之外的临时脚本思路）或直接重启验证。
 
 ---
 
@@ -411,8 +412,8 @@ git commit -m "feat: real capability sources, relay probe, generation model tags
 git push origin main
 ```
 
-- 版本号在 `package.json`；当前 `1.9.0`。
-- 发版三步：改版本号与 README/HANDOVER → `npm test` → commit + tag `v1.9.0` + push → `npm pack --pack-destination .publish` → 建 Release 并上传 **不带版本号** 的 `dsh-model-visibility.tgz`（市场条目的 `releases/latest/download/...` 因此永远指向最新包），再补一份带版本号的产物。
+- 版本号在 `package.json`；当前 `1.9.1`。
+- 发版三步：改版本号与 README/HANDOVER → `npm test` → commit + tag `v1.9.1` + push → `npm pack --pack-destination .publish` → 建 Release 并上传 **不带版本号** 的 `dsh-model-visibility.tgz`（市场条目的 `releases/latest/download/...` 因此永远指向最新包），再补一份带版本号的产物。
 - `files` 已包含 `lib`；`scripts` / `test` / `.tools` 不进包。
 - `docs/` 只留 `settings-page.png`、`capability-tags.png`（1.9.0 起）与 `icon-180.png`；换截图时同步改 `screenshots.json` 与 README 的 `<img>`。如果重新截图，先确认目录可写（见坑 18）。
 - npm 发布见 10.2；名字是作用域 `@tzyc/dsh-model-visibility`，`cordis.patch.yml` 里的 `name` 必须与 `package.json` 的 `name` 完全一致，否则 bundle 安装时 loader 找不到包。
@@ -449,6 +450,7 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - 发布：`npm whoami` 确认是 `tzyc` → `npm publish`。发布前 `npm test` 全绿，`npm pack --dry-run` 确认文件清单（`test/`、`scripts/`、`.publish/`、`.tools/` 不进包）。
 - 安装：`install_bundle target = @tzyc/dsh-model-visibility`。
 - 1.9.0 已发布：2026-11-03T15:47:15Z，`shasum 3d2fcaf3d7fbfe607c3e1e88de991092b1569224`，`latest` = `1.9.0`，21 个文件 / 288.2 kB。npm 的 staged publish 会在版本列表里留下一个 `0.0.0-stage` 占位版本（网站标「Temporary package placeholder for staged publishing」），`latest` 仍指向 `1.9.0`，不用处理。
+- 1.9.1：修复包名改成作用域后 `client.js` 仍注册 `dsh-model-visibility` 导致的启动报错「loaded without registering "@tzyc/dsh-model-visibility"」；前端注册 id 现在与 `package.json` 的 `name` 一致（见坑 25）。只影响浏览器半，Host 半无需改动。
 - 本机 `npm publish` 会被要求 OTP（`EOTP`），而 npm 会把一次性网页地址在输出里打码（`https://www.npmjs.com/auth/cli/***`）。两条可行路径：① 在仓库里自己跑 `npm publish`，浏览器完成认证；② 用带 2FA bypass 的 granular token，写进一份临时 userconfig（`npm publish --userconfig .publish/npmrc`，该文件在 gitignore 内），不要覆盖用户自己的 `~/.npmrc`。
 - 发布后核对：`npm view @tzyc/dsh-model-visibility version` 与 `npm pack @tzyc/dsh-model-visibility@1.9.0` 后看 `package/cordis.patch.yml` 里的 `name` 是否为作用域名。CDN 传播可能 1–3 分钟，期间 registry 仍回 404，属正常。
 
