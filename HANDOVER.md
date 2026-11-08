@@ -483,6 +483,11 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - 1.9.0 已发布：2026-11-03T15:47:15Z，`shasum 3d2fcaf3d7fbfe607c3e1e88de991092b1569224`，`latest` = `1.9.0`，21 个文件 / 288.2 kB。npm 的 staged publish 会在版本列表里留下一个 `0.0.0-stage` 占位版本（网站标「Temporary package placeholder for staged publishing」），`latest` 仍指向 `1.9.0`，不用处理。
 - 1.9.1：修复包名改成作用域后 `client.js` 仍注册 `dsh-model-visibility` 导致的启动报错「loaded without registering "@tzyc/dsh-model-visibility"」；前端注册 id 现在与 `package.json` 的 `name` 一致（见坑 25）。只影响浏览器半，Host 半无需改动。
 - 1.10.0：学习快照联网校验（删静态模型目录）、token 用量账本 + 双 CSV 导出、client-src 模块化拆分（`npm run build` 产 bundle，Hygiene 测试守门）。发布记录见下。
+- 1.10.0 已发布（2026-11-08）：
+  - npm 2026-11-08T14:34Z，shasum `813d413bb59e927f6fc4d92a58fc727f89d52ec0`，39 个文件 / 695.4 kB，`latest` = 1.10.0；包含 `client-src/` 15 个模块与 4 个新 lib（usage-ledger / check-catalog / learned-catalog / export-csv）；包内 `client.js` 头两行是构建脚注即正确 builder。
+  - GitHub Release `v1.10.0`（tag = `6ca3990`）带 `dsh-model-visibility-1.10.0.tgz` 与不带版本号的 `dsh-model-visibility.tgz`，`releases/latest/download` 指向最新包成立。
+  - 发布过程中唯一额外 sweet：`package.json` 的 `files` 补进 `client-src`（否则 tarball 缺源码）。
+  - 临时 npmrc 已删除，token 未落入任何提交。
 - 1.9.1 已发布：npm 2026-11-04T04:52:17Z，`shasum 1f9a12b8051ee498ed4f1901f4af37e225538ab7`，`latest` = `1.9.1`，21 个文件 / 288.2 kB（包内 `package/client.js` 第 2 行确认是 `id: '@tzyc/dsh-model-visibility'`）；GitHub Release `v1.9.1`（id `433528919`）带 `dsh-model-visibility-1.9.1.tgz` 与不带版本号的 `dsh-model-visibility.tgz`，均 288246 B，`releases/latest/download/dsh-model-visibility.tgz` 回 206。**npm 上的 1.9.0 是坏的（注册 id 仍是旧名），1.9.1 才是第一个能 npm 安装的版本。**
 - **npm 2FA / token**：帐号开了 2FA，CLI 直发会 `EOTP` 且 npm 把一次性网页地址打码（`https://www.npmjs.com/auth/cli/****`），自动流程无法走通。两条路：① 我方用户在仓库里手跑 `npm publish`，浏览器完成认证后终端自动继续（若 npm 给出的链接已在输出里打码则弃用）；② 推荐 —— 给一段 **granular token（带 2FA-bypass 勾选的 expiry ≤ 7 天）**，把它写进临时 userconfig（`.publish/npmrc`，gitignore 内）：`npm publish --userconfig .publish/npmrc`，发布后立即删除临时文件；不要覆盖用户自己的 `~/.npmrc`。若 token 失效或用完，向项目组要新的一枚。
 - 发布后核对：`npm view @tzyc/dsh-model-visibility version` 与 `npm pack @tzyc/dsh-model-visibility@1.9.0` 后看 `package/cordis.patch.yml` 里的 `name` 是否为作用域名。CDN 传播可能 1–3 分钟，期间 registry 仍回 404，属正常。
