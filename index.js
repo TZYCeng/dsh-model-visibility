@@ -27,6 +27,7 @@ import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import { createModelInfoService } from './lib/model-info.js'
+import { createLearnedCatalog } from './lib/learned-catalog.js'
 import { createOverrideStore } from './lib/model-overrides.js'
 import { createProviderProbe, readProviderProfiles } from './lib/provider-probe.js'
 import { stripWrittenFields, writeCapabilities } from './lib/provider-write.js'
@@ -111,6 +112,16 @@ export function apply(ctx, config) {
   // needs a synchronous read. See `lib/model-overrides.js`.
   const overrides = createOverrideStore({ logger })
 
+  // The learned capability snapshot replaces the abandoned static catalog:
+  // the online verification run seeds it, and every same-named model served
+  // later resolves against the cached rows. See `lib/learned-catalog.js`.
+  // Tests may inject a store through the inject scope (`scope.get('learned')`).
+  let learned = null
+  const learnedFor = () => {
+    if (learned !== null) return learned
+    learned = createLearnedCatalog({ logger })
+    return learned
+  }
   /** Current hidden keys, read through the stable volatile reference. */
   const liveList = () => {
     const value = config?.[FIELD]
@@ -237,15 +248,20 @@ export function apply(ctx, config) {
       fallbackProfiles = null
     }
 
+    const learnedService =
+      (typeof scope.get === 'function' ? scope.get('learned') : undefined) ?? learnedFor()
+
     const service = createModelInfoService(scope.llm, {
       enrichment: probe === null ? undefined : ({ fresh }) => probe.read({ fresh }),
       overrides,
+      learned: learnedService,
       // Synchronous evidence for the request-side image gate: provider profiles
       // from the settings document plus the last completed relay probe.
       context: () => ({
         profiles: probe === null ? profilesForGate() : probe.profiles(),
         discovered: probe?.peek()?.discovered,
         overrides,
+        learned: learnedService,
       }),
     })
 
@@ -300,6 +316,7 @@ export function apply(ctx, config) {
               probe?.invalidate()
               clearFallbackProfiles()
               overrides.invalidate()
+              learnedService.invalidate()
               imageInput.refresh()
             }
             try {

@@ -39,8 +39,16 @@ function piAiAdapter(input = ['text']) {
 
 test('imageInputDecision follows the same evidence as the page', () => {
   const profile = relayProfile(['deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3', 'mystery-model'])
+  const learned = {
+    id: 'deepseek-v4.1-flash',
+    type: 'chat',
+    input: ['text', 'image'],
+    reasoning: true,
+    origins: ['checker'],
+    verifiedAt: 1,
+  }
   assert.equal(
-    imageInputDecision('relay', 'deepseek/deepseek-v4.1-flash', { profile }).allowed,
+    imageInputDecision('relay', 'deepseek/deepseek-v4.1-flash', { profile, learned }).allowed,
     true,
   )
   assert.equal(imageInputDecision('relay', 'z-ai/glm-5.3', { profile }).allowed, false)
@@ -64,7 +72,20 @@ test('createModelInfoService exposes the same image decision', () => {
   const profile = relayProfile(['deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3'])
   const service = createModelInfoService(
     { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => undefined },
-    { context: () => ({ profiles: new Map([['relay', profile]]), discovered: new Map() }) },
+    {
+      context: () => ({
+        profiles: new Map([['relay', profile]]),
+        discovered: new Map(),
+        learned: {
+          id: 'deepseek-v4.1-flash',
+          type: 'chat',
+          input: ['text', 'image'],
+          reasoning: true,
+          origins: ['checker'],
+          verifiedAt: 1,
+        },
+      }),
+    },
   )
   assert.equal(service.imageInputAllowed('relay', 'deepseek/deepseek-v4.1-flash'), true)
   assert.equal(service.imageInputAllowed('relay', 'z-ai/glm-5.3'), false)

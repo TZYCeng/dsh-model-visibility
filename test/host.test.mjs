@@ -13,7 +13,8 @@ import test from 'node:test'
 
 // index.js reads the shadow copy while the module is evaluated.
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'model-visibility-test-'))
-const { apply } = await import('../index.js')
+import { apply } from '../index.js'
+import { createLearnedCatalog } from '../lib/learned-catalog.js'
 
 function createHarness() {
   const providers = {
@@ -70,6 +71,14 @@ function createHarness() {
       for (const op of ops) applyOp(op.path, op.value)
     },
   }
+  const learned = createLearnedCatalog({ file: path.join(process.env.DSH_HOME, 'learned-host-test.json') })
+  learned.upsertEntries([
+    { id: 'deepseek-v4.1-flash', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['checker'], verifiedAt: 1 },
+    { id: 'deepseek-v4.1-pro', type: 'chat', input: ['text'], reasoning: true, origins: ['checker'], verifiedAt: 1 },
+    { id: 'glm-5.3', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['public'], verifiedAt: 1 },
+    { id: 'glm-5.3-flash', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['public'], verifiedAt: 1 },
+  ])
+
   const route = { current: null, overrides: null }
   const scope = {
     llm,
@@ -83,7 +92,7 @@ function createHarness() {
         },
       },
     },
-    get: (name) => (name === 'settings' ? settings : undefined),
+    get: (name) => (name === 'settings' ? settings : name === 'learned' ? learned : undefined),
     on: () => () => {},
     effect(fn) {
       fn()
@@ -168,7 +177,7 @@ test('a hard reload drops the cache and advertises the reload feature', async ()
 
   const reloaded = await read('http://local/api/dsh-model-visibility/models?fresh=1&reload=1')
   assert.equal(harness.resolveCalls(), afterFirst * 2)
-  assert.ok(reloaded.value.catalog.features.includes('reload'))
+  assert.ok(reloaded.value.learned.features.includes('reload'))
 })
 
 test('the override route persists manual capabilities and feeds the gate', async () => {

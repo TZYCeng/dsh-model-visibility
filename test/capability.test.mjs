@@ -1,5 +1,5 @@
 /**
- * Catalog matching, name heuristics and evidence precedence.
+ * Learned-snapshot matching, name heuristics and evidence precedence.
  *
  * These tests are pure: no DSH runtime, no network, no settings document.
  */
@@ -11,10 +11,9 @@ import {
   inferModelKind,
   isGenerationKind,
   isNonChatKind,
-  lookupCatalogModel,
-  modelIdVariants,
-  normalizeModelId,
 } from '../lib/capability-catalog.js'
+import { modelIdVariants, normalizeModelId } from '../lib/model-id.js'
+import { createLearnedCatalog } from '../lib/learned-catalog.js'
 import { lookupCorrection } from '../lib/capability-corrections.js'
 import { indexDiscovered, mergeCapabilities } from '../lib/model-info.js'
 
@@ -39,25 +38,34 @@ test('modelIdVariants falls back through resolution and compact forms', () => {
   assert.equal(variants[0], 'gpt-image-2.5-flare-4k')
 })
 
-test('lookupCatalogModel finds known models through every alias', () => {
-  const grok = lookupCatalogModel('x-ai/grok-4.7')
+test('the learned store resolves every alias spelling of one id', () => {
+  const store = createLearnedCatalog({ file: unreachable() })
+  store.upsertEntries([
+    {
+      id: 'grok-4.7',
+      type: 'chat',
+      input: ['text', 'image'],
+      reasoning: true,
+      contextWindow: 500000,
+      provider: 'xai',
+      origins: ['checker'],
+      verifiedAt: 1000,
+    },
+  ])
+  const grok = store.get('x-ai/grok-4.7')
   assert.equal(grok.id, 'grok-4.7')
   assert.equal(grok.type, 'chat')
   assert.deepEqual(grok.input, ['text', 'image'])
   assert.equal(grok.reasoning, true)
   assert.equal(grok.contextWindow, 500000)
-
-  const fable = lookupCatalogModel('anthropic/claude-fable-5')
-  assert.equal(fable.type, 'chat')
-  assert.deepEqual(fable.input, ['text', 'image'])
-  assert.equal(fable.contextWindow, 1000000)
-
-  const image = lookupCatalogModel('openai/gpt-image-2.5-flare')
-  assert.equal(image.type, 'image')
-  assert.deepEqual(image.output, ['image'])
-
-  assert.equal(lookupCatalogModel('totally-unknown-model-xyz'), undefined)
+  assert.equal(store.get('totally-unknown-model-xyz'), undefined)
 })
+
+/** A broken path forces an in-memory store the mtime memoizer never reloads. */
+function unreachable() {
+  if (process.platform === 'win32') return 'C:\\<unreachable>\\learned.json'
+  return '/<unreachable>/learned.json'
+}
 
 test('inferModelKind recognizes generation and infrastructure models', () => {
   assert.equal(inferModelKind('gpt-image-2.5-flare'), 'image')
@@ -105,14 +113,24 @@ test('mergeCapabilities ignores a defaulted text-only adapter declaration', () =
     {
       adapter: { id: 'grok-4.7', name: 'grok-4.7', inputModalities: ['text'], contextWindow: 262144 },
       profile: relayProfile(['grok-4.7']),
+      learned: {
+        id: 'grok-4.7',
+        type: 'chat',
+        input: ['text', 'image'],
+        reasoning: true,
+        contextWindow: 500000,
+        provider: 'xai',
+        origins: ['checker'],
+        verifiedAt: 1000,
+      },
     },
   )
   assert.equal(record.kind, 'chat')
   assert.deepEqual(record.inputModalities, ['text', 'image'])
-  assert.equal(record.sources.modalities, 'catalog')
+  assert.equal(record.sources.modalities, 'snapshot')
   assert.equal(record.contextWindow, 500000)
-  assert.equal(record.sources.context, 'catalog')
-  assert.equal(record.catalog.provider, 'xai')
+  assert.equal(record.sources.context, 'snapshot')
+  assert.equal(record.learned.id, 'grok-4.7')
 })
 
 test('mergeCapabilities prefers explicit config over every fallback', () => {
@@ -127,6 +145,7 @@ test('mergeCapabilities prefers explicit config over every fallback', () => {
       adapter: { id: 'mystery-vl', name: 'Mystery VL', inputModalities: ['text'], contextWindow: 262144 },
       profile,
       discovered: { id: 'mystery-vl', inputModalities: ['text'], contextWindow: 2048 },
+      learned: { id: 'mystery-vl', type: 'chat', contextWindow: 999 },
     },
   )
   assert.deepEqual(record.inputModalities, ['text', 'image'])
@@ -136,13 +155,14 @@ test('mergeCapabilities prefers explicit config over every fallback', () => {
   assert.equal(record.defaultMaxTokens, 99)
 })
 
-test('mergeCapabilities lets a relay listing beat the built-in catalog', () => {
+test('mergeCapabilities lets a relay listing beat a learned fact', () => {
   const record = mergeCapabilities(
     { id: 'grok-4.7', name: 'grok-4.7' },
     {
       adapter: { id: 'grok-4.7', name: 'grok-4.7', inputModalities: ['text'] },
       profile: relayProfile(['grok-4.7']),
       discovered: { id: 'grok-4.7', inputModalities: ['text'], contextWindow: 131072, reasoning: false },
+      learned: { id: 'grok-4.7', type: 'chat', input: ['text', 'image'], reasoning: true },
     },
   )
   assert.deepEqual(record.inputModalities, ['text'])
@@ -152,16 +172,46 @@ test('mergeCapabilities lets a relay listing beat the built-in catalog', () => {
   assert.equal(record.sources.reasoning, 'provider')
 })
 
+test('a learned fact can supply a reasoning ladder', () => {
+  const record = mergeCapabilities(
+    { id: 'relay-only-model', name: 'relay-only-model' },
+    {
+      profile: relayProfile(['relay-only-model']),
+      learned: {
+        id: 'relay-only-model',
+        type: 'chat',
+        reasoning: true,
+        reasoningEfforts: [
+          { id: 'low', name: 'Low' },
+          { id: 'high', name: 'High' },
+        ],
+        defaultEffort: 'high',
+        origins: ['public'],
+        verifiedAt: 42,
+      },
+    },
+  )
+  assert.equal(record.reasoningSupported, true)
+  assert.equal(record.sources.reasoning, 'snapshot')
+  assert.deepEqual(record.reasoning.efforts, [
+    { id: 'low', name: 'Low' },
+    { id: 'high', name: 'High' },
+  ])
+  assert.equal(record.reasoning.defaultEffort, 'high')
+  assert.equal(record.learned.origins[0], 'public')
+})
+
 test('mergeCapabilities labels image and video models and keeps no chat facts', () => {
   const image = mergeCapabilities(
     { id: 'gpt-image-2.5-flare-4k', name: 'gpt-image-2.5-flare-4k' },
     {
       adapter: { id: 'gpt-image-2.5-flare-4k', name: 'gpt-image-2.5-flare-4k', inputModalities: ['text'], contextWindow: 262144 },
       profile: relayProfile(['gpt-image-2.5-flare-4k']),
+      learned: { id: 'gpt-image-2.5-flare-4k', type: 'image', input: ['text', 'image'], output: ['image'] },
     },
   )
   assert.equal(image.kind, 'image')
-  assert.equal(image.sources.kind, 'catalog')
+  assert.equal(image.sources.kind, 'snapshot')
   assert.deepEqual(image.outputModalities, ['image'])
   assert.deepEqual(image.inputModalities, ['text', 'image'])
   assert.equal(image.contextWindow, undefined)
@@ -251,17 +301,27 @@ test('lookupCorrection targets the exact catalog row, not its variants', () => {
   assert.equal(lookupCorrection('grok-4.7'), undefined)
 })
 
-test('mergeCapabilities lets a vendor correction beat a wrong catalog row', () => {
+test('mergeCapabilities lets a vendor correction beat a wrong learned row', () => {
   const record = mergeCapabilities(
     { id: 'glm-5.3', name: 'glm-5.3' },
-    { profile: relayProfile(['glm-5.3']) },
+    {
+      profile: relayProfile(['glm-5.3']),
+      learned: {
+        id: 'glm-5.3',
+        type: 'chat',
+        input: ['text', 'image'],
+        contextWindow: 1048576,
+        origins: ['public'],
+        verifiedAt: 7,
+      },
+    },
   )
   assert.deepEqual(record.inputModalities, ['text'])
   assert.equal(record.sources.modalities, 'official')
   assert.equal(record.correction.code, 'glm-5.3-text-only')
-  // The rest of the catalog row stays useful.
+  // The rest of the learned row stays useful.
   assert.equal(record.contextWindow, 1048576)
-  assert.equal(record.sources.context, 'catalog')
+  assert.equal(record.sources.context, 'snapshot')
 })
 
 test('mergeCapabilities lets a vendor correction beat a relay listing too', () => {

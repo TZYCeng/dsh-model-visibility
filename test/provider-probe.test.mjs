@@ -5,6 +5,9 @@
  * touches the network, a real settings document or the credential store.
  */
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import {
@@ -17,6 +20,7 @@ import {
   readProviderProfiles,
 } from '../lib/provider-probe.js'
 import { createModelInfoService, describeCatalog } from '../lib/model-info.js'
+import { createLearnedCatalog } from '../lib/learned-catalog.js'
 
 /** A settings.describe() stand-in with one relay profile. */
 function descriptors(overrides = {}) {
@@ -355,6 +359,13 @@ test('the capability catalog carries probe diagnostics and relay kinds', async (
     credentials: { resolve: async () => ({ value: 'sk-test', source: 'test' }) },
     fetch: fetchImpl,
   })
+  const learned = createLearnedCatalog({
+    file: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mv-learned-probe-')), 'learned.json'),
+  })
+  learned.upsertEntries([
+    { id: 'grok-4.7', type: 'chat', input: ['text', 'image'], reasoning: true, contextWindow: 500000, origins: ['checker'], verifiedAt: 1 },
+    { id: 'gpt-image-2.5-sunburst-4k', type: 'image', input: ['text', 'image'], output: ['image'], origins: ['checker'], verifiedAt: 1 },
+  ])
   const llm = {
     listProviders: () => [{ id: 'relay', name: 'Relay' }],
     listModels: async () => [
@@ -373,6 +384,7 @@ test('the capability catalog carries probe diagnostics and relay kinds', async (
   }
   const service = createModelInfoService(llm, {
     enrichment: ({ fresh }) => probe.read({ fresh }),
+    learned,
   })
   const catalog = await service.read()
   assert.equal(catalog.groups.length, 1)
@@ -383,7 +395,7 @@ test('the capability catalog carries probe diagnostics and relay kinds', async (
   assert.deepEqual(grok.inputModalities, ['text', 'image'])
   assert.equal(grok.sources.modalities, 'provider')
   assert.equal(grok.contextWindow, 500000)
-  assert.equal(grok.sources.context, 'catalog')
+  assert.equal(grok.sources.context, 'snapshot')
 
   const image = models.find((model) => model.id === 'gpt-image-2.5-flare')
   assert.equal(image.kind, 'image')
@@ -393,14 +405,14 @@ test('the capability catalog carries probe diagnostics and relay kinds', async (
 
   const sunburst = models.find((model) => model.id === 'gpt-image-2.5-sunburst-4k')
   assert.equal(sunburst.kind, 'image')
-  assert.equal(sunburst.sources.kind, 'catalog')
+  assert.equal(sunburst.sources.kind, 'snapshot')
 
   assert.equal(catalog.providers.length, 1)
   assert.equal(catalog.providers[0].status, 'ok')
   assert.equal(catalog.providers[0].models, 2)
   assert.equal(catalog.providers[0].capabilities, 2)
-  assert.ok(catalog.catalog.models > 500)
-  assert.equal(typeof catalog.catalog.generatedAt, 'string')
+  assert.equal(catalog.learned.models, 2)
+  assert.ok(catalog.learned.features.includes('reload'))
 })
 
 test('describeCatalog survives a probe that cannot read settings', async () => {
