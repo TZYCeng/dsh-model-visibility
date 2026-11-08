@@ -485,6 +485,7 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - 1.10.0：学习快照联网校验（删静态模型目录）、token 用量账本 + 双 CSV 导出、client-src 模块化拆分（`npm run build` 产 bundle，Hygiene 测试守门）。
 - 1.10.1：修发布质量问题——`settings-section` 里引用了未定义的局部 `canVerify`，设置页整块渲染为空白；同批做了一次「React shim 渲染冒烟」排查（一次性脚本，未入库），以后 bundle 改动建议先跑一次渲染冒烟再发版。
 - 1.10.0 已发布（2026-11-08）：
+- 1.10.1 已发布（2026-11-08）：修复 1.10.0 的 `canVerify` 未定义导致设置页整块空白；npm shasum 见 registry（`npm view @tzyc/dsh-model-visibility@1.10.1 dist.shasum`），GitHub Release `v1.10.1` 双 tarball 就位，`releases/latest/download` 指向 1.10.1。
   - npm 2026-11-08T14:34Z，shasum `813d413bb59e927f6fc4d92a58fc727f89d52ec0`，39 个文件 / 695.4 kB，`latest` = 1.10.0；包含 `client-src/` 15 个模块与 4 个新 lib（usage-ledger / check-catalog / learned-catalog / export-csv）；包内 `client.js` 头两行是构建脚注即正确 builder。
   - GitHub Release `v1.10.0`（tag = `6ca3990`）带 `dsh-model-visibility-1.10.0.tgz` 与不带版本号的 `dsh-model-visibility.tgz`，`releases/latest/download` 指向最新包成立。
   - 发布过程中唯一额外 sweet：`package.json` 的 `files` 补进 `client-src`（否则 tarball 缺源码）。
