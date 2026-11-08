@@ -1,22 +1,910 @@
+/**
+ * Assembled by scripts/build-client.mjs from client-src/*.mjs — the sources
+ * are the readable place; this file must not be edited by hand.
+ */
 window.__ModuleLoader__.load({
-  id: '@tzyc/dsh-model-visibility',
+  id: "@tzyc/dsh-model-visibility",
   factory(require) {
+    const cache = new Map()
+    const definitions = new Map()
+    const define = (name, factory) => {
+      definitions.set(name, factory)
+    }
+    const moduleRequire = (name) => {
+      if (!definitions.has(name)) return require(name)
+      if (cache.has(name)) return cache.get(name)
+      if (cache.has(name + ':pending')) {
+        throw new Error('client bundles may not require "' + name + '" cyclically')
+      }
+      cache.set(name + ':pending', true)
+      const module = { exports: {} }
+      definitions.get(name)(moduleRequire, module, module.exports)
+      cache.set(name, module.exports)
+      return module.exports
+    }
+  // -------------------------------------------------------- catalog-store
+  define("catalog-store", function (require, module, exports) {
+    const { API } = require("constants")
+
+    exports.createCatalog = function createCatalog(ctx) {
+      const listeners = new Set()
+      let state = {
+        status: 'idle',
+        groups: [],
+        failures: [],
+        providers: [],
+        catalog: null,
+        error: null,
+        detailsError: null,
+        source: null,
+        generatedAt: 0,
+      }
+      let inflight = null
+      // A hard reload starts a new run even while `inflight` is set; the token
+      // keeps the older run from publishing its now-stale result afterwards.
+      let generation = 0
+
+      const publish = (next) => {
+        state = next
+        for (const listener of listeners) listener()
+      }
+
+      /** Message of a failed Remote envelope. */
+      const failureMessage = (response) => {
+        const failure = response && response.error
+        return failure
+          ? String(failure.code) + ': ' + String(failure.message)
+          : 'unknown error'
+      }
+
+      /**
+       * Read the enriched catalog from the Host half. It carries the same
+       * groups as `session.modelCatalog` plus context windows and modalities.
+       */
+      const fetchHostCatalog = async (fresh, reload) => {
+        const query = reload ? '?fresh=1&reload=1' : fresh ? '?fresh=1' : ''
+        const response = await fetch(API + '/models' + query, {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          redirect: 'error',
+        })
+        if (!response.ok) throw new Error('HTTP ' + response.status)
+        const body = await response.json()
+        const value = body && body.ok === true ? body.value : null
+        if (value === null || !Array.isArray(value.groups)) {
+          throw new Error('malformed capability catalog')
+        }
+        return value
+      }
+
+      /** Read the shipped catalog; the fallback when the route is unavailable. */
+      const fetchOfficialCatalog = async () => {
+        const response = await ctx.remote.session.modelCatalog()
+        if (!response || response.ok !== true) throw new Error(failureMessage(response))
+        const value = response.value || {}
+        return {
+          groups: Array.isArray(value.groups) ? value.groups : [],
+          failures: Array.isArray(value.failures) ? value.failures : [],
+          generatedAt: 0,
+        }
+      }
+
+      const load = (options) => {
+        const fresh = options !== null && typeof options === 'object' && options.fresh === true
+        const reload = options !== null && typeof options === 'object' && options.reload === true
+        // A soft load joins whatever is already running. A hard reload has to
+        // start its own run, otherwise it would receive the very stale result
+        // it is meant to replace.
+        if (inflight !== null && !reload) return inflight
+        if (state.status !== 'ready') {
+          publish({ ...state, status: 'loading', error: null })
+        }
+        const token = ++generation
+        const run = (async () => {
+          try {
+            const value = await fetchHostCatalog(fresh, reload)
+            if (token !== generation) return
+            publish({
+              status: 'ready',
+              groups: Array.isArray(value.groups) ? value.groups : [],
+              failures: Array.isArray(value.failures) ? value.failures : [],
+              providers: Array.isArray(value.providers) ? value.providers : [],
+              catalog: value.catalog && typeof value.catalog === 'object' ? value.catalog : null,
+              error: null,
+              detailsError: null,
+              source: 'host',
+              generatedAt: Number.isFinite(value.generatedAt) ? value.generatedAt : 0,
+            })
+            return
+          } catch (detailError) {
+            const detail = String(detailError && detailError.message ? detailError.message : detailError)
+            try {
+              const value = await fetchOfficialCatalog()
+              if (token !== generation) return
+              publish({
+                status: 'ready',
+                groups: value.groups,
+                failures: value.failures,
+                providers: [],
+                catalog: null,
+                error: null,
+                detailsError: detail,
+                source: 'catalog',
+                generatedAt: value.generatedAt,
+              })
+            } catch (error) {
+              if (token !== generation) return
+              publish({
+                ...state,
+                status: 'error',
+                error: String(error && error.message ? error.message : error),
+              })
+            }
+          } finally {
+            if (inflight === run) inflight = null
+          }
+        })()
+        inflight = run
+        return run
+      }
+
+      return {
+        subscribe(fn) {
+          listeners.add(fn)
+          return () => {
+            listeners.delete(fn)
+          }
+        },
+        getSnapshot() {
+          return state
+        },
+        load,
+        refresh() {
+          return load({ fresh: true })
+        },
+        reload() {
+          return load({ fresh: true, reload: true })
+        },
+      }
+    }
+
+    /**
+     * Manual capability overrides, persisted by the Host half.
+     *
+     * The page only edits one model at a time; the store keeps the whole list so
+     * every row knows whether it already has an override. An older Host half
+     * answers 404 and the editor stays hidden behind the `overrides` feature
+     * flag.
+     */
+    exports.createOverrides = function createOverrides() {
+      const listeners = new Set()
+      let state = { status: 'idle', entries: [], available: null, error: null }
+      let inflight = null
+
+      const publish = (next) => {
+        state = next
+        for (const listener of listeners) listener()
+      }
+
+      /** Error text for a failed envelope or HTTP response. */
+      const failureOf = async (response) => {
+        let detail = ''
+        try {
+          const body = await response.json()
+          if (body && body.error) {
+            detail = ' (' + String(body.error.code) + ': ' + String(body.error.message) + ')'
+          }
+        } catch (_error) {
+          // A proxy error page is not JSON; the status code is still useful.
+        }
+        return new Error('HTTP ' + response.status + detail)
+      }
+
+      const readEntries = async (response) => {
+        if (response.status === 404) {
+          publish({ status: 'ready', entries: [], available: false, error: null })
+          return null
+        }
+        if (!response.ok) throw await failureOf(response)
+        const body = await response.json()
+        const value = body && body.ok === true ? body.value : null
+        if (value === null || !Array.isArray(value.overrides)) {
+          throw new Error('malformed override list')
+        }
+        return value.overrides
+      }
+
+      const load = () => {
+        if (inflight !== null) return inflight
+        if (state.status !== 'ready') publish({ ...state, status: 'loading', error: null })
+        const run = (async () => {
+          try {
+            const response = await fetch(API + '/overrides', {
+              method: 'GET',
+              headers: { accept: 'application/json' },
+              credentials: 'same-origin',
+              cache: 'no-store',
+              redirect: 'error',
+            })
+            const entries = await readEntries(response)
+            if (entries !== null) {
+              publish({ status: 'ready', entries, available: true, error: null })
+            }
+          } catch (error) {
+            publish({
+              ...state,
+              status: 'error',
+              error: String(error && error.message ? error.message : error),
+            })
+          } finally {
+            if (inflight === run) inflight = null
+          }
+        })()
+        inflight = run
+        return run
+      }
+
+      /** POST one entry (or `{remove:true}`) and adopt the returned list. */
+      const write = async (payload) => {
+        const response = await fetch(API + '/overrides', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          redirect: 'error',
+          body: JSON.stringify(payload),
+        })
+        if (response.status === 404) {
+          publish({ status: 'ready', entries: [], available: false, error: null })
+          throw new Error('HTTP 404')
+        }
+        if (!response.ok) throw await failureOf(response)
+        const body = await response.json()
+        const value = body && body.ok === true ? body.value : null
+        if (value === null || !Array.isArray(value.overrides)) {
+          throw new Error('malformed override list')
+        }
+        publish({ status: 'ready', entries: value.overrides, available: true, error: null })
+        return value
+      }
+
+      return {
+        subscribe(fn) {
+          listeners.add(fn)
+          return () => {
+            listeners.delete(fn)
+          }
+        },
+        getSnapshot() {
+          return state
+        },
+        load,
+        save(entry) {
+          return write(entry)
+        },
+        remove(provider, model) {
+          return write({ remove: true, provider, model })
+        },
+      }
+    }
+
+    /* ------------------------------------------------------ composer filter */
+
+    /** Common failure text for envelopes and HTTP errors. */
+    function failureText(error) {
+      return String(error && error.message ? error.message : error)
+    }
+
+    /**
+     * Token-usage store behind the page's stats strip.
+     *
+     * Reads are cheap; the Host keeps a ledger and rescans on its own schedule,
+     * so the client only polls and prints. An older Host answers 404 and the
+     * strip renders its "host is stale" hint.
+     */
+    exports.createUsageApi = function createUsageApi() {
+      const listeners = new Set()
+      let state = { status: 'idle', snapshot: null, error: null }
+      let inflight = null
+      let timer = null
+
+      const publish = (next) => {
+        state = next
+        for (const listener of listeners) listener()
+      }
+
+      const read = async () => {
+        if (inflight !== null) return inflight
+        const run = (async () => {
+          try {
+            const response = await fetch(API + '/usage', {
+              headers: { accept: 'application/json' },
+              credentials: 'same-origin',
+              cache: 'no-store',
+              redirect: 'error',
+            })
+            if (!response.ok) throw new Error('HTTP ' + response.status)
+            const body = await response.json()
+            const value = body && body.ok === true ? body.value : null
+            if (value === null || typeof value !== 'object') throw new Error('malformed usage snapshot')
+            publish({ status: 'ready', snapshot: value, error: null })
+          } catch (error) {
+            publish({ ...state, status: 'error', error: failureText(error) })
+          } finally {
+            if (inflight === run) inflight = null
+          }
+        })()
+        inflight = run
+        return run
+      }
+
+      /** One poll now and another every POLL_MS while someone subscribes. */
+      const POLL_MS = 30_000
+      const startTimer = () => {
+        if (timer !== null) return
+        timer = setInterval(() => read(), POLL_MS)
+      }
+      const stopTimer = () => {
+        if (timer !== null) {
+          clearInterval(timer)
+          timer = null
+        }
+      }
+
+      return {
+        subscribe(fn) {
+          const first = listeners.size === 0
+          listeners.add(fn)
+          if (first) startTimer()
+          return () => {
+            listeners.delete(fn)
+            if (listeners.size === 0) stopTimer()
+          }
+        },
+        getSnapshot() {
+          return state
+        },
+        load() {
+          return read()
+        },
+        refresh() {
+          // A POST rescan is never needed: the Host rescan throttle refreshes on
+          // reads anyway. A plain read is enough here.
+          return read()
+        },
+      }
+    }
+
+    /**
+     * The verify sweep's client store: read progress, start, cancel. The Host
+     * keeps the run in memory, so the store just mirrors its snapshots and keeps
+     * one 2 s poll alive while a sweep is running (or being observed).
+     */
+    exports.createVerifyApi = function createVerifyApi() {
+      const listeners = new Set()
+      let state = { status: 'idle', snapshot: null, error: null }
+      let inflight = null
+      let timer = null
+
+      const publish = (next) => {
+        state = next
+        for (const listener of listeners) listener()
+      }
+
+      const read = async () => {
+        if (inflight !== null) return inflight
+        const run = (async () => {
+          try {
+            const response = await fetch(API + '/verify', {
+              headers: { accept: 'application/json' },
+              credentials: 'same-origin',
+              cache: 'no-store',
+              redirect: 'error',
+            })
+            if (!response.ok) throw new Error('HTTP ' + response.status)
+            const body = await response.json()
+            const value = body && body.ok === true ? body.value : null
+            if (value === null || typeof value !== 'object') throw new Error('malformed verify snapshot')
+            publish({ status: 'ready', snapshot: value, error: null })
+          } catch (error) {
+            publish({ ...state, status: 'error', error: failureText(error) })
+          } finally {
+            if (inflight === run) inflight = null
+          }
+        })()
+        inflight = run
+        return run
+      }
+
+      const post = async (payload) => {
+        const response = await fetch(API + '/verify', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          redirect: 'error',
+          body: JSON.stringify(payload ?? {}),
+        })
+        if (response.status === 404) throw new Error('HTTP 404')
+        if (!response.ok) {
+          let detail = ''
+          try {
+            const body = await response.json()
+            if (body?.error) detail = String(body.error.code) + ': ' + String(body.error.message)
+          } catch (_error) {
+            // Non-JSON error body: the status code is enough.
+          }
+          throw new Error('HTTP ' + response.status + detail)
+        }
+        const body = await response.json()
+        if (body?.ok === true) {
+          publish({ status: 'ready', snapshot: body.value, error: null })
+          return body.value
+        }
+        throw new Error(failureText(body?.error))
+      }
+
+      const SWEEP_POLL_MS = 2_000
+      const IDLE_POLL_MS = 60_000
+      const startTimer = () => {
+        if (timer !== null) return
+        timer = setInterval(() => {
+          void read()
+        }, state.snapshot?.state?.running === true ? SWEEP_POLL_MS : IDLE_POLL_MS)
+      }
+      const stopTimer = () => {
+        if (timer !== null) {
+          clearInterval(timer)
+          timer = null
+        }
+      }
+
+      return {
+        subscribe(fn) {
+          const first = listeners.size === 0
+          listeners.add(fn)
+          if (first) {
+            void read()
+            startTimer()
+          }
+          return () => {
+            listeners.delete(fn)
+            if (listeners.size === 0) stopTimer()
+          }
+        },
+        getSnapshot() {
+          return state
+        },
+        load() {
+          return read()
+        },
+        start(payload) {
+          return post(payload)
+        },
+        cancel() {
+          return post({ cancel: true })
+        },
+      }
+    }
+
+  })
+
+  // -------------------------------------------------------- checker-view
+  define("checker-view", function (require, module, exports) {
+    /**
+     * The online capability verification panel.
+     *
+     * The user picks a checker route (provider + model) and a write-back switch,
+     * runs the sweep, and the panel polls the Host for progress and the checker's
+     * token spend. The last route choice is kept in browser storage only: the
+     * Host persists run facts, not UI selections.
+     *
+     * @module client-src/checker-view
+     */
+
     const React = require('react')
     const h = React.createElement
 
+    const { API } = require("constants")
+    const { formatTokens } = require("pure")
+    const { useSource } = require("hooks")
+
+    const PICK_KEY = 'dsh-model-visibility:checker-pick:v1'
+
+    function readPick() {
+      try {
+        const parsed = JSON.parse(window.localStorage.getItem(PICK_KEY))
+        return parsed !== null && typeof parsed === 'object'
+          ? {
+              provider: typeof parsed.provider === 'string' ? parsed.provider : '',
+              model: typeof parsed.model === 'string' ? parsed.model : '',
+              writeBack: parsed.writeBack !== false,
+            }
+          : { provider: '', model: '', writeBack: true }
+      } catch (_error) {
+        return { provider: '', model: '', writeBack: true }
+      }
+    }
+
+    function persistPick(pick) {
+      try {
+        window.localStorage.setItem(PICK_KEY, JSON.stringify(pick))
+      } catch (_error) {
+        // Storage availability is optional for this preference.
+      }
+    }
+
+    /** Routes with at least one model, from a loaded catalog — checker choices. */
+    exports.checkerRoutesOf = function checkerRoutesOf(groups) {
+      const routes = []
+      for (const group of groups ?? []) {
+        if (group === null || typeof group !== 'object') continue
+        const models = Array.isArray(group.models) ? group.models : []
+        if (models.length > 0) routes.push({ id: group.id, name: group.name ?? group.id })
+      }
+      return routes
+    }
+
+    exports.VerifyPanel = function VerifyPanel({ verify, catalog, t, canUse }) {
+      const state = useSource(verify)
+      const [pick, setPick] = React.useState(readPick)
+      const [message, setMessage] = React.useState(null)
+      const [open, setOpen] = React.useState(false)
+
+      React.useEffect(() => {
+        verify.load()
+      }, [verify])
+
+      const routeOptions = checkerRoutesOf(catalog?.groups)
+      const route = routeOptions.find((entry) => entry.id === pick.provider) ?? null
+      const progress = state.snapshot?.state
+      const running = progress?.running === true
+      const finished = progress?.phase === 'done' || progress?.phase === 'cancelled'
+      const models = (catalog?.groups ?? [])
+        .find((group) => group.id === pick.provider)?.models ?? []
+
+      if (!canUse) {
+        return h('div', { className: 'mvp_fallback' }, t('checker.hostStale'))
+      }
+
+      const tokensSpent = progress ? formatTokens((progress.tokenUsage?.[0] ?? 0) + (progress.tokenUsage?.[1] ?? 0)) : null
+
+      const commit = (next) => {
+        setPick(next)
+        persistPick(next)
+      }
+
+      const run = () => {
+        setMessage(null)
+        verify
+          .start({ provider: pick.provider, model: pick.model, writeBack: pick.writeBack })
+          .then((result) => {
+            if (result !== undefined && result.ok === false) {
+              setMessage(result.message ?? t('checker.failed'))
+            }
+          })
+          .catch((error) => setMessage(String(error?.message ?? error)))
+      }
+
+      const cancel = () => {
+        verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
+      }
+
+      return h(
+        'div',
+        { className: 'mvp_checker' + (open ? '' : ' mvp_checker--closed') },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'mvp_checkerHead',
+            'aria-expanded': open,
+            onClick: () => setOpen(!open),
+          },
+          h('span', { className: 'mvp_checkerTitle' }, t('checker.title')),
+          h(
+            'span',
+            { className: 'mvp_checkerSummary' },
+            running
+              ? t('checker.running', {
+                  done: progress?.done ?? 0,
+                  total: progress?.total ?? 0,
+                  phase: t(`checker.phase.${progress?.phase ?? 'checker'}`),
+                })
+              : finished
+                ? t('checker.finished', { done: progress?.done ?? 0, total: progress?.total ?? 0, tokens: tokensSpent })
+                : t('checker.idle'),
+          ),
+        ),
+        open
+          ? h(
+              'div',
+              { className: 'mvp_checkerBody' },
+              h('div', { className: 'mvp_checkerHint' }, t('checker.description')),
+              h(
+                'div',
+                { className: 'mvp_checkerForm' },
+                h(
+                  'label',
+                  { className: 'mvp_field' },
+                  h('span', { className: 'mvp_fieldLabel' }, t('checker.provider')),
+                  h(
+                    'select',
+                    {
+                      className: 'mvp_select',
+                      value: pick.provider,
+                      'aria-label': t('checker.provider'),
+                      onChange: (event) => commit({ ...pick, provider: event.target.value, model: '' }),
+                    },
+                    h('option', { key: '', value: '' }, t('override.kindAuto')),
+                    routeOptions.map((entry) => h('option', { key: entry.id, value: entry.id }, entry.name)),
+                  ),
+                ),
+                h(
+                  'label',
+                  { className: 'mvp_field' },
+                  h('span', { className: 'mvp_fieldLabel' }, t('checker.model')),
+                  h(
+                    'select',
+                    {
+                      className: 'mvp_select',
+                      value: pick.model,
+                      'aria-label': t('checker.model'),
+                      disabled: route === null,
+                      onChange: (event) => commit({ ...pick, model: event.target.value }),
+                    },
+                    h('option', { key: '', value: '' }, t('override.kindAuto')),
+                    models.map((model) =>
+                      h('option', { key: model.id, value: model.id }, model.name ?? model.id),
+                    ),
+                  ),
+                ),
+              ),
+              h(
+                'div',
+                { className: 'mvp_checkerActions' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    role: 'switch',
+                    className: 'mvp_switch',
+                    'aria-checked': pick.writeBack,
+                    title: t('checker.writeBackTitle'),
+                    disabled: running,
+                    onClick: () => commit({ ...pick, writeBack: !pick.writeBack }),
+                  },
+                  h('span', { className: 'mvp_thumb' }),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'mvp_button',
+                    title: t('checker.writeBackTitle'),
+                    onClick: () => commit({ ...pick, writeBack: !pick.writeBack }),
+                  },
+                  t('checker.writeBack'),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: running ? 'mvp_button' : 'mvp_button mvp_button--accent',
+                    disabled: running ? false : pick.provider === '' || pick.model === '',
+                    title: running ? t('checker.cancelTitle') : t('checker.startTitle'),
+                    onClick: running ? cancel : run,
+                  },
+                  running ? t('checker.cancel') : t('checker.start'),
+                ),
+              ),
+              progress !== null && (running || finished)
+                ? h(
+                    'div',
+                    { className: 'mvp_checkerProgress' },
+                    t('checker.progress', {
+                      done: progress?.done ?? 0,
+                      total: progress?.total ?? 0,
+                      tokens: tokensSpent,
+                    }),
+                  )
+                : null,
+              (progress?.errors?.length ?? 0) > 0
+                ? h(
+                    'div',
+                    {
+                      className: 'mvp_usageHint mvp_usageHint--warn',
+                      title: progress.errors.join('\n'),
+                    },
+                    t('checker.errors', { count: progress.errors.length }),
+                  )
+                : null,
+              message !== null ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn' }, message) : null,
+            )
+          : null,
+      )
+    }
+
+    void API
+
+  })
+
+  // -------------------------------------------------------- composer-filter
+  define("composer-filter", function (require, module, exports) {
+    const { keyOf } = require("format")
+    const { FIELD } = require("constants")
+
+    function hiddenListOf(snapshot) {
+      const value = snapshot && snapshot.value
+      return value && Array.isArray(value[FIELD]) ? value[FIELD] : []
+    }
+
+    /**
+     * Rewrite one directory store in place so its snapshots omit hidden models.
+     *
+     * The shipped composer seat may capture the directory store before this plugin
+     * applies, so replacing the store object would never reach it; rewriting
+     * getSnapshot/subscribe on the captured object does. The session's active
+     * model stays listed even while hidden, because the shipped trigger
+     * resolves its label from this same catalog.
+     */
+    exports.patchDirectoryStore = function patchDirectoryStore(store, form) {
+      const readBase = store.getSnapshot.bind(store)
+      const subscribeBase = store.subscribe.bind(store)
+      const originalGet = store.getSnapshot
+      const originalSubscribe = store.subscribe
+      const listeners = new Set()
+      let snapshot = null
+      let lastBase
+      let lastSignature
+
+      const build = (baseSnapshot) => {
+        const hidden = new Set(hiddenListOf(form.getSnapshot()))
+        const activeSelection = baseSnapshot.current
+        const groups = []
+        for (const group of baseSnapshot.groups || []) {
+          const all = group.models || []
+          const models = []
+          for (const model of all) {
+            const key = keyOf(group.id, model.id)
+            const active =
+              activeSelection !== null &&
+              activeSelection !== undefined &&
+              activeSelection.provider === group.id &&
+              activeSelection.model === model.id
+            if (!hidden.has(key) || active) models.push(model)
+          }
+          if (models.length === 0) continue
+          groups.push(models.length === all.length ? group : { ...group, models })
+        }
+        return { ...baseSnapshot, groups }
+      }
+
+      const current = () => {
+        const baseSnapshot = readBase()
+        const signature = hiddenListOf(form.getSnapshot()).join('\u0000')
+        if (snapshot !== null && baseSnapshot === lastBase && signature === lastSignature) {
+          return snapshot
+        }
+        lastBase = baseSnapshot
+        lastSignature = signature
+        snapshot = build(baseSnapshot)
+        return snapshot
+      }
+
+      const emit = () => {
+        const previous = snapshot
+        const next = current()
+        if (previous === next) return
+        for (const listener of Array.from(listeners)) listener()
+      }
+
+      Object.defineProperties(store, {
+        __modelVisibilityPatched: { value: true, configurable: true },
+        getSnapshot: { value: current, configurable: true, writable: true },
+        subscribe: {
+          value(listener) {
+            listeners.add(listener)
+            const stop = subscribeBase(listener)
+            return () => {
+              listeners.delete(listener)
+              stop()
+            }
+          },
+          configurable: true,
+          writable: true,
+        },
+      })
+
+      return {
+        emit,
+        restore() {
+          Object.defineProperties(store, {
+            getSnapshot: { value: originalGet, configurable: true, writable: true },
+            subscribe: { value: originalSubscribe, configurable: true, writable: true },
+          })
+          delete store.__modelVisibilityPatched
+          listeners.clear()
+        },
+      }
+    }
+
+    /**
+     * Patch every model directory — the ones already live when the plugin
+     * applies and every directory resolved later — so the shipped seat keeps
+     * owning the trigger, the Model / Effort rows, and third-party menu
+     * enhancements such as the reasoning-effort slider.
+     */
+    exports.installComposerFilter = function installComposerFilter(scope, form) {
+      const models = scope.modelDirectories
+      const original = models.directoryFor
+      if (typeof original !== 'function') return
+      const records = new Set()
+
+      const ensure = (directory) => {
+        if (directory === undefined || directory === null) return directory
+        const store = directory.store
+        if (store === undefined || store === null || store.__modelVisibilityPatched === true) {
+          return directory
+        }
+        try {
+          records.add(patchDirectoryStore(store, form))
+        } catch (_error) {
+          // Fail open: an unwritable store simply keeps showing every model.
+        }
+        return directory
+      }
+
+      scope.effect(() => {
+        const live = models.live && models.live.directories ? models.live.directories.values : null
+        if (live instanceof Set) for (const directory of live) ensure(directory)
+
+        const stopForm = form.subscribe(() => {
+          for (const record of records) record.emit()
+        })
+
+        const wrapper = function directoryFor(sessionId) {
+          return ensure(original.call(this, sessionId))
+        }
+        Object.defineProperty(models, 'directoryFor', {
+          value: wrapper,
+          configurable: true,
+          writable: true,
+        })
+
+        return () => {
+          stopForm()
+          for (const record of records) record.restore()
+          records.clear()
+          if (Object.getOwnPropertyDescriptor(models, 'directoryFor')?.value === wrapper) {
+            delete models.directoryFor
+          }
+        }
+      }, 'model-visibility: filtered model directory')
+    }
+
+    /* ----------------------------------------------------- settings page */
+
+  })
+
+  // -------------------------------------------------------- constants
+  define("constants", function (require, module, exports) {
     /** Dictionary namespace owned by this plugin. */
-    const NS = 'model-visibility'
+    exports.NS = 'model-visibility'
     /** Host entry id from cordis.patch.yml; also the settings namespace. */
-    const ENTRY = 'model-visibility'
+    exports.ENTRY = 'model-visibility'
     /** Config field persisted by the Host settings document. */
-    const FIELD = 'hidden'
+    exports.FIELD = 'hidden'
     /** Settings section id. */
-    const SECTION_ID = 'model-visibility'
+    exports.SECTION_ID = 'model-visibility'
     /**
      * Same-origin route the Host half registers through `connection.fetch`.
      * Resolved against the page base so a reverse-proxy prefix is preserved.
      */
-    const API = (() => {
+    exports.API = (() => {
+      if (typeof document === 'undefined') return '/api/dsh-model-visibility'
       try {
         return new URL('api/dsh-model-visibility', document.baseURI).pathname
       } catch (_error) {
@@ -24,7 +912,264 @@ window.__ModuleLoader__.load({
       }
     })()
 
-    const DICT = {
+  })
+
+  // -------------------------------------------------------- css
+  define("css", function (require, module, exports) {
+    exports.CSS = `
+    .mvp_page{box-sizing:border-box;width:100%;height:100%;min-height:0;flex-direction:column;display:flex;overflow-y:auto;padding-bottom:24px}
+    .mvp_head{flex:none;flex-direction:column;gap:6px;padding:4px 0 14px;display:flex}
+    .mvp_title{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
+    .mvp_desc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px}
+    .mvp_toolbar{border-bottom:.5px solid var(--dsw-alias-border-l2);flex:none;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;display:flex}
+    .mvp_summary{color:var(--dsw-alias-label-secondary);flex:1;min-width:0;font-size:12px;line-height:18px}
+    .mvp_actions{flex:none;align-items:center;justify-content:flex-end;gap:8px;display:flex;flex-wrap:wrap}
+    .mvp_button{box-sizing:border-box;height:28px;color:var(--dsw-alias-label-primary);cursor:pointer;background:0 0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 10px;font-family:inherit;font-size:12px;line-height:18px}
+    .mvp_button--accent{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent)}
+    .mvp_button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
+    .mvp_button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+    .mvp_button:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
+    .mvp_group{flex:none;flex-direction:column;display:flex}
+    .mvp_groupHead{justify-content:space-between;align-items:center;gap:12px;padding:14px 0 6px;display:flex}
+    .mvp_groupTitle{color:var(--dsw-alias-label-primary);align-items:baseline;row-gap:2px;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex;flex-wrap:wrap}
+    .mvp_groupName{min-width:0}
+    .mvp_collapse{box-sizing:border-box;flex:none;align-self:center;width:18px;height:18px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:0;font-family:inherit;font-size:11px;line-height:18px;display:inline-flex}
+    .mvp_collapse:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
+    .mvp_collapse:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+    .mvp_groupCount{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}
+    .mvp_row{border-bottom:.5px solid var(--dsw-alias-border-l1);justify-content:space-between;align-items:center;gap:16px;padding:10px 0;display:flex}
+    .mvp_row--gen{background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
+    .mvp_row--kind-image{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-business-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 4%, transparent)}
+    .mvp_row--kind-video{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-success-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 4%, transparent)}
+    .mvp_row--kind-embedding{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-warn-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 4%, transparent)}
+    .mvp_row--kind-rerank{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-primary) 60%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 3%, transparent)}
+    .mvp_row--kind-audio{box-shadow:inset 2px 0 0 color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 70%, transparent);background:transparent;background:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 4%, transparent)}
+    .mvp_row--kind-classifier{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-secondary) 60%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 3%, transparent)}
+    .mvp_row--kind-translation{box-shadow:inset 2px 0 0 var(--dsw-alias-border-l2)}
+    .mvp_rowText{flex-direction:column;gap:2px;min-width:0;display:flex}
+    .mvp_rowTitle{color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
+    .mvp_rowMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px;overflow:hidden}
+    .mvp_error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;padding:6px 0}
+    .mvp_switch{position:relative;flex:none;box-sizing:border-box;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--dsw-alias-border-l2);cursor:pointer;transition:background-color .15s ease}
+    .mvp_switch[aria-checked="true"]{background:var(--dsw-alias-bg-base)}
+    .mvp_switch:disabled{opacity:.45;cursor:default}
+    .mvp_switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+    .mvp_thumb{position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-secondary);transition:transform .15s ease,background-color .15s ease}
+    .mvp_switch[aria-checked="true"] .mvp_thumb{background:var(--dsw-alias-label-primary);transform:translateX(16px)}
+    .mvp_tags{flex-wrap:wrap;align-items:center;gap:4px;margin-top:4px;display:flex}
+    .mvp_tag{box-sizing:border-box;max-width:100%;height:18px;color:var(--dsw-alias-label-secondary);white-space:nowrap;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:4px;align-items:center;padding:0 6px;font-size:11px;line-height:16px;display:inline-flex;overflow:hidden;text-overflow:ellipsis}
+    .mvp_tag--accent{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent)}
+    .mvp_tag--vision{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent)}
+    .mvp_tag--kind{font-weight:500}
+    .mvp_tag--kind-image{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent)}
+    .mvp_tag--kind-video{color:var(--dsw-alias-state-success-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 55%, transparent)}
+    .mvp_tag--kind-embedding{color:var(--dsw-alias-state-warn-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 55%, transparent)}
+    .mvp_tag--kind-rerank{color:var(--dsw-alias-state-error-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent)}
+    .mvp_tag--kind-audio{color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary));background:transparent;background:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 12%, transparent);border-color:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 50%, transparent)}
+    .mvp_tag--kind-classifier{color:var(--dsw-alias-state-error-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 55%, transparent)}
+    .mvp_tag--kind-translation{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2)}
+    .mvp_tag--kind-unknown{color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-border-l2)}
+    .mvp_tag--inferred{border-style:dashed}
+    .mvp_tag--muted{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l1)}
+    .mvp_groupCap{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:400;line-height:16px}
+    .mvp_kindCount--image{color:var(--dsw-alias-state-business-primary)}
+    .mvp_kindCount--video{color:var(--dsw-alias-state-success-primary)}
+    .mvp_kindCount--other{color:var(--dsw-alias-state-warn-primary)}
+    .mvp_applyRow{flex:none;align-items:flex-start;gap:10px;margin:8px 0 2px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:8px 10px;display:flex;background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
+    .mvp_applyText{flex-direction:column;gap:2px;min-width:0;display:flex}
+    .mvp_applyTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px}
+    .mvp_applyHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .mvp_applyRow .mvp_switch{margin-top:1px}
+    .mvp_groupProbe{color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l2);border-radius:4px;max-width:100%;white-space:nowrap;text-overflow:ellipsis;padding:0 5px;font-size:10px;line-height:15px;overflow:hidden}
+    .mvp_filters{align-items:center;gap:6px;padding:8px 0 2px;display:flex;flex-wrap:wrap}
+    .mvp_filterLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .mvp_search{align-items:center;gap:6px;display:flex;min-width:220px;flex:1 1 220px}
+    .mvp_searchInput{box-sizing:border-box;width:100%;height:28px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px;line-height:18px}
+    .mvp_searchInput:focus-visible,.mvp_contextSelect:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+    .mvp_context{align-items:center;gap:6px;display:flex}
+    .mvp_contextSelect{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 6px;font-family:inherit;font-size:11px;line-height:18px}
+    .mvp_filter{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 9px;font-family:inherit;font-size:11px;line-height:18px}
+    .mvp_filter:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
+    .mvp_filter[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
+    .mvp_filter:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+    .mvp_note{color:var(--dsw-alias-label-tertiary);flex:none;padding:6px 0 0;font-size:10px;line-height:15px}
+    .mvp_legend{color:var(--dsw-alias-label-tertiary);flex:none;padding:8px 0 2px;font-size:11px;line-height:16px}
+    .mvp_fallback{color:var(--dsw-alias-label-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);border-radius:var(--dsw-radius-sm,6px);padding:6px 8px;font-size:11px;line-height:16px;margin-top:8px}
+    .mvp_rowActions{flex:none;align-items:center;gap:8px;display:flex}
+    .mvp_editButton{height:24px;padding:0 8px;font-size:11px;line-height:18px}
+    .mvp_editButton[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent)}
+    .mvp_editor{box-sizing:border-box;border:.5px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);border-radius:var(--dsw-radius-sm,6px);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent);margin:2px 0 12px;padding:10px 12px;flex-direction:column;gap:10px;display:flex}
+    .mvp_editorHead{flex-direction:column;gap:2px;display:flex}
+    .mvp_editorTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px}
+    .mvp_editorSub{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .mvp_editorGrid{flex-wrap:wrap;align-items:flex-end;gap:10px 16px;display:flex}
+    .mvp_field{flex-direction:column;gap:4px;min-width:140px;display:flex}
+    .mvp_field--wide{flex:1 1 100%}
+    .mvp_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
+    .mvp_select,.mvp_number{box-sizing:border-box;height:26px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px;line-height:18px}
+    .mvp_number{width:180px}
+    .mvp_select:focus-visible,.mvp_number:focus-visible,.mvp_chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+    .mvp_chips{flex-wrap:wrap;align-items:center;gap:6px;display:flex}
+    .mvp_chip{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 10px;font-family:inherit;font-size:11px;line-height:18px}
+    .mvp_chip:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
+    .mvp_chip[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
+    .mvp_chip:disabled{opacity:.45;cursor:default}
+    .mvp_editorFooter{justify-content:space-between;align-items:center;gap:12px;display:flex;flex-wrap:wrap}
+    .mvp_editorNote{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:15px;flex:1 1 220px;min-width:0}
+    .mvp_check{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
+    .mvp_check input{accent-color:var(--dsw-alias-brand-primary, #4c8dff);margin:0}
+    .mvp_editorActions{flex:none;align-items:center;gap:6px;display:flex;flex-wrap:wrap}
+    /* ---------------------------------------------------- usage & checker */
+
+    .mvp_usage {
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--dsw-alias-border, transparent);
+      border-radius: 10px;
+      background: transparent;
+      background: color-mix(in srgb, currentColor 4%, transparent);
+    }
+
+    .mvp_usage--off {
+      opacity: 0.75;
+    }
+
+    .mvp_usageHead {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .mvp_usageTitle {
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .mvp_usageComputing {
+      color: var(--dsw-alias-text-tertiary, currentColor);
+      font-size: 11px;
+    }
+
+    .mvp_usageActions {
+      display: flex;
+      gap: 8px;
+      margin-left: auto;
+    }
+
+    .mvp_usageRanges {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .mvp_stat {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .mvp_statLabel {
+      font-size: 11px;
+      color: var(--dsw-alias-text-tertiary, currentColor);
+    }
+
+    .mvp_statValue {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .mvp_stat--total .mvp_statValue {
+      font-weight: 600;
+    }
+
+    .mvp_usageHint {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--dsw-alias-text-tertiary, currentColor);
+    }
+
+    .mvp_usageHint--warn {
+      color: var(--dsw-alias-danger, #d0605e);
+    }
+
+    .mvp_checker {
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--dsw-alias-border, transparent);
+      border-radius: 10px;
+    }
+
+    .mvp_checkerHead {
+      display: flex;
+      width: 100%;
+      align-items: center;
+      gap: 10px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .mvp_checkerTitle {
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .mvp_checkerSummary {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--dsw-alias-text-tertiary, currentColor);
+    }
+
+    .mvp_checker--closed.mvp_checker {
+      padding: 8px 12px;
+    }
+
+    .mvp_checkerBody {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .mvp_checkerHint {
+      font-size: 11px;
+      color: var(--dsw-alias-text-tertiary, currentColor);
+    }
+
+    .mvp_checkerForm {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      max-width: 560px;
+    }
+
+    .mvp_checkerActions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .mvp_checkerSwitchText {
+      font-size: 12px;
+    }
+
+    .mvp_checkerProgress {
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      color: var(--dsw-alias-text-secondary, currentColor);
+    }
+
+    `
+
+  })
+
+  // -------------------------------------------------------- dict
+  define("dict", function (require, module, exports) {
+    exports.DICT = {
       zh: {
         'nav': '模型显示',
         'page.title': '模型显示',
@@ -60,6 +1205,48 @@ window.__ModuleLoader__.load({
         'page.probeSummary': '中转站探测：{ok} 个已读取模型列表，{caps} 个公布了能力字段',
         'page.probeSummaryNone': '中转站探测：暂无可读取的路由配置',
         'page.catalogNote': '内置目录：pi-ai {version} 快照（{date}），共 {models} 个模型',
+        'page.learnedNote': '学习快照：联网校验（{date}），缓存 {models} 个模型的可验证事实',
+        'usage.title': 'token 用量',
+        'usage.computing': '统计中…',
+        'usage.none': '—',
+        'usage.range': '输入 {input} · 输出 {output}（合计 {total}）',
+        'usage.today': '今天',
+        'usage.todayTitle': '本地自然日（今天 0 点起）',
+        'usage.week': '本周',
+        'usage.weekTitle': '本周一 0 点起',
+        'usage.month': '本月',
+        'usage.monthTitle': '本月 1 日 0 点起',
+        'usage.total': '总计',
+        'usage.totalTitle': '全部历史（更早的按会话创建日粗算）',
+        'usage.exportUsage': '导出用量 CSV',
+        'usage.exportUsageTitle': '下载按天分桶、含每模型 token 分解的 CSV',
+        'usage.exportModels': '导出模型清单 CSV',
+        'usage.exportModelsTitle': '下载全部提供商模型的可见性与能力表',
+        'usage.hostStale': '宿主半尚未提供用量统计，重启 DSH 即可启用。',
+        'checker.title': '联网校验模型能力',
+        'checker.description':
+          '选定一个模型作为校验员：先把两个公开目录（models.dev / OpenRouter）拉下来做基准，再把其余模型分批交给它核对上下文窗口、输入模态、思考档位与类型；结果回填本页并（在开关打开时）写入对应提供商配置，同时存进本地快照 learned.json，之后同名模型直接复用缓存。校验请求会消耗所选模型的 API 额度，其 token 消耗会计入上方用量统计。',
+        'checker.provider': '校验员提供商',
+        'checker.model': '校验员模型',
+        'checker.start': '开始校验',
+        'checker.startTitle': '在宿主侧后台跑一轮全模型校验',
+        'checker.cancel': '取消',
+        'checker.cancelTitle': '中止正在进行的校验',
+        'checker.writeBack': '校验通过即写入提供商配置',
+        'checker.writeBackTitle':
+          '开启：判定到的 input / contextWindow / 推理档位直接写进各提供商该模型条目（learned.json 只留写不进去的字段）；关闭：只更新本页与快照，需要时再用「编辑能力」手动写入。',
+        'checker.idle': '未运行',
+        'checker.running': '进行中 {phase} · {done}/{total} · 已耗 {tokens}',
+        'checker.finished': '已完成 {done}/{total} · 校验耗 token {tokens}',
+        'checker.progress': '{done}/{total} 已核对 · 校验本身消耗 {tokens} token',
+        'checker.errors': '{count} 个批次失败（悬停看详情）',
+        'checker.pickNeeded': '请先选择校验员提供商与模型。',
+        'checker.failed': '校验任务未能启动。',
+        'checker.hostStale': '宿主半不支持联网校验，请重启 DSH 后使用。',
+        'checker.phase.public': '（读取公开目录）',
+        'checker.phase.checker': '（读取公开目录）',
+        'checker.phase.verifying': '（分批校验）',
+        'source.snapshot': '已校验',
         'page.applyInput': '让输入框按能力标注放行图像',
         'page.applyInputHint':
           '开启后，被标注为「多模态」的中转站对话模型会在发送请求时自动补上图像输入能力；关闭则完全按 Provider 配置里的 input 声明。只影响中转站（pi-ai）路由，不改任何配置文件；若某个上游实际拒绝图像，关闭此开关即可。',
@@ -228,6 +1415,48 @@ window.__ModuleLoader__.load({
         'page.probeSummary': 'Relay probe: {ok} model lists read, {caps} published capability fields',
         'page.probeSummaryNone': 'Relay probe: no readable route configuration',
         'page.catalogNote': 'Built-in catalog: pi-ai {version} snapshot ({date}), {models} models',
+        'page.learnedNote': 'Learned snapshot: online verification ({date}), {models} verified models',
+        'usage.title': 'Token usage',
+        'usage.computing': 'scanning…',
+        'usage.none': '—',
+        'usage.range': 'in {input} · out {output} ({total} total)',
+        'usage.today': 'Today',
+        'usage.todayTitle': 'Local calendar day',
+        'usage.week': 'This week',
+        'usage.weekTitle': 'Since Monday 00:00 local',
+        'usage.month': 'This month',
+        'usage.monthTitle': 'Since the 1st local',
+        'usage.total': 'Total',
+        'usage.totalTitle': 'All history (older months attributed by session start day)',
+        'usage.exportUsage': 'Export usage CSV',
+        'usage.exportUsageTitle': 'Download a day-bucketed CSV with per-model breakdown',
+        'usage.exportModels': 'Export model list CSV',
+        'usage.exportModelsTitle': 'Download visibility and capability table of every provider model',
+        'usage.hostStale': 'The Host half does not provide usage stats yet; restart DSH to enable it.',
+        'checker.title': 'Verify model capabilities online',
+        'checker.description':
+          'Pick one model as the checker: two public catalogs (models.dev / OpenRouter) are fetched first, then the remaining models are verified in batches — context window, input modalities, effort ladder and kind. Confirmed facts fill this page and, with the switch on, are written into the provider entries; they are also stored in the local learned.json snapshot so a same-named model on another route reuses the cache. Verification spends the checker route quota and its tokens count in the usage strip above.',
+        'checker.provider': 'Checker provider',
+        'checker.model': 'Checker model',
+        'checker.start': 'Verify all',
+        'checker.startTitle': 'Run a background verification sweep in the Host',
+        'checker.cancel': 'Cancel',
+        'checker.cancelTitle': 'Abort the running sweep',
+        'checker.writeBack': 'Write confirmed facts into provider settings',
+        'checker.writeBackTitle':
+          'On: the judged input / contextWindow / efforts are written into each provider entry (learned.json keeps only what cannot be mapped). Off: only this page and the snapshot update; use Edit capabilities to write manually.',
+        'checker.idle': 'not run yet',
+        'checker.running': 'running {phase} · {done}/{total} · {tokens} spent',
+        'checker.finished': 'finished {done}/{total} · checker spent {tokens} tokens',
+        'checker.progress': '{done}/{total} verified · checker spent {tokens} tokens',
+        'checker.errors': '{count} failed batches (hover for details)',
+        'checker.pickNeeded': 'Pick a checker provider and model first.',
+        'checker.failed': 'The verify sweep could not start.',
+        'checker.hostStale': 'The Host half does not support online verification yet; restart DSH.',
+        'checker.phase.public': '(fetching public catalogs)',
+        'checker.phase.checker': '(fetching public catalogs)',
+        'checker.phase.verifying': '(verifying in batches)',
+        'source.snapshot': 'verified',
         'page.applyInput': 'Let the composer admit images shown as supported',
         'page.applyInputHint':
           'When on, relay chat models labelled Multimodal advertise image input to the request path; when off, only the Provider input declaration counts. Relay (pi-ai) routes only — no configuration file is modified. Turn it off if a particular upstream still rejects images.',
@@ -367,134 +1596,30 @@ window.__ModuleLoader__.load({
         'provider.account': 'DeepSeek Account',
       },
     }
+  })
 
-    const CSS = `
-.mvp_page{box-sizing:border-box;width:100%;height:100%;min-height:0;flex-direction:column;display:flex;overflow-y:auto;padding-bottom:24px}
-.mvp_head{flex:none;flex-direction:column;gap:6px;padding:4px 0 14px;display:flex}
-.mvp_title{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
-.mvp_desc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px}
-.mvp_toolbar{border-bottom:.5px solid var(--dsw-alias-border-l2);flex:none;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;display:flex}
-.mvp_summary{color:var(--dsw-alias-label-secondary);flex:1;min-width:0;font-size:12px;line-height:18px}
-.mvp_actions{flex:none;align-items:center;justify-content:flex-end;gap:8px;display:flex;flex-wrap:wrap}
-.mvp_button{box-sizing:border-box;height:28px;color:var(--dsw-alias-label-primary);cursor:pointer;background:0 0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 10px;font-family:inherit;font-size:12px;line-height:18px}
-.mvp_button--accent{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent)}
-.mvp_button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-.mvp_button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.mvp_button:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
-.mvp_group{flex:none;flex-direction:column;display:flex}
-.mvp_groupHead{justify-content:space-between;align-items:center;gap:12px;padding:14px 0 6px;display:flex}
-.mvp_groupTitle{color:var(--dsw-alias-label-primary);align-items:baseline;row-gap:2px;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex;flex-wrap:wrap}
-.mvp_groupName{min-width:0}
-.mvp_collapse{box-sizing:border-box;flex:none;align-self:center;width:18px;height:18px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:0;font-family:inherit;font-size:11px;line-height:18px;display:inline-flex}
-.mvp_collapse:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-.mvp_collapse:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.mvp_groupCount{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}
-.mvp_row{border-bottom:.5px solid var(--dsw-alias-border-l1);justify-content:space-between;align-items:center;gap:16px;padding:10px 0;display:flex}
-.mvp_row--gen{background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
-.mvp_row--kind-image{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-business-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 4%, transparent)}
-.mvp_row--kind-video{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-success-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 4%, transparent)}
-.mvp_row--kind-embedding{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-warn-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 4%, transparent)}
-.mvp_row--kind-rerank{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-primary) 60%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 3%, transparent)}
-.mvp_row--kind-audio{box-shadow:inset 2px 0 0 color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 70%, transparent);background:transparent;background:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 4%, transparent)}
-.mvp_row--kind-classifier{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-secondary) 60%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 3%, transparent)}
-.mvp_row--kind-translation{box-shadow:inset 2px 0 0 var(--dsw-alias-border-l2)}
-.mvp_rowText{flex-direction:column;gap:2px;min-width:0;display:flex}
-.mvp_rowTitle{color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
-.mvp_rowMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px;overflow:hidden}
-.mvp_error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;padding:6px 0}
-.mvp_switch{position:relative;flex:none;box-sizing:border-box;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--dsw-alias-border-l2);cursor:pointer;transition:background-color .15s ease}
-.mvp_switch[aria-checked="true"]{background:var(--dsw-alias-bg-base)}
-.mvp_switch:disabled{opacity:.45;cursor:default}
-.mvp_switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.mvp_thumb{position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-secondary);transition:transform .15s ease,background-color .15s ease}
-.mvp_switch[aria-checked="true"] .mvp_thumb{background:var(--dsw-alias-label-primary);transform:translateX(16px)}
-.mvp_tags{flex-wrap:wrap;align-items:center;gap:4px;margin-top:4px;display:flex}
-.mvp_tag{box-sizing:border-box;max-width:100%;height:18px;color:var(--dsw-alias-label-secondary);white-space:nowrap;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:4px;align-items:center;padding:0 6px;font-size:11px;line-height:16px;display:inline-flex;overflow:hidden;text-overflow:ellipsis}
-.mvp_tag--accent{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent)}
-.mvp_tag--vision{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent)}
-.mvp_tag--kind{font-weight:500}
-.mvp_tag--kind-image{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent)}
-.mvp_tag--kind-video{color:var(--dsw-alias-state-success-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 55%, transparent)}
-.mvp_tag--kind-embedding{color:var(--dsw-alias-state-warn-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 55%, transparent)}
-.mvp_tag--kind-rerank{color:var(--dsw-alias-state-error-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent)}
-.mvp_tag--kind-audio{color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary));background:transparent;background:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 12%, transparent);border-color:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 50%, transparent)}
-.mvp_tag--kind-classifier{color:var(--dsw-alias-state-error-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 55%, transparent)}
-.mvp_tag--kind-translation{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2)}
-.mvp_tag--kind-unknown{color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-border-l2)}
-.mvp_tag--inferred{border-style:dashed}
-.mvp_tag--muted{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l1)}
-.mvp_groupCap{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:400;line-height:16px}
-.mvp_kindCount--image{color:var(--dsw-alias-state-business-primary)}
-.mvp_kindCount--video{color:var(--dsw-alias-state-success-primary)}
-.mvp_kindCount--other{color:var(--dsw-alias-state-warn-primary)}
-.mvp_applyRow{flex:none;align-items:flex-start;gap:10px;margin:8px 0 2px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:8px 10px;display:flex;background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
-.mvp_applyText{flex-direction:column;gap:2px;min-width:0;display:flex}
-.mvp_applyTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px}
-.mvp_applyHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
-.mvp_applyRow .mvp_switch{margin-top:1px}
-.mvp_groupProbe{color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l2);border-radius:4px;max-width:100%;white-space:nowrap;text-overflow:ellipsis;padding:0 5px;font-size:10px;line-height:15px;overflow:hidden}
-.mvp_filters{align-items:center;gap:6px;padding:8px 0 2px;display:flex;flex-wrap:wrap}
-.mvp_filterLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
-.mvp_search{align-items:center;gap:6px;display:flex;min-width:220px;flex:1 1 220px}
-.mvp_searchInput{box-sizing:border-box;width:100%;height:28px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px;line-height:18px}
-.mvp_searchInput:focus-visible,.mvp_contextSelect:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.mvp_context{align-items:center;gap:6px;display:flex}
-.mvp_contextSelect{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 6px;font-family:inherit;font-size:11px;line-height:18px}
-.mvp_filter{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 9px;font-family:inherit;font-size:11px;line-height:18px}
-.mvp_filter:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-.mvp_filter[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
-.mvp_filter:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.mvp_note{color:var(--dsw-alias-label-tertiary);flex:none;padding:6px 0 0;font-size:10px;line-height:15px}
-.mvp_legend{color:var(--dsw-alias-label-tertiary);flex:none;padding:8px 0 2px;font-size:11px;line-height:16px}
-.mvp_fallback{color:var(--dsw-alias-label-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);border-radius:var(--dsw-radius-sm,6px);padding:6px 8px;font-size:11px;line-height:16px;margin-top:8px}
-.mvp_rowActions{flex:none;align-items:center;gap:8px;display:flex}
-.mvp_editButton{height:24px;padding:0 8px;font-size:11px;line-height:18px}
-.mvp_editButton[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent)}
-.mvp_editor{box-sizing:border-box;border:.5px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);border-radius:var(--dsw-radius-sm,6px);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent);margin:2px 0 12px;padding:10px 12px;flex-direction:column;gap:10px;display:flex}
-.mvp_editorHead{flex-direction:column;gap:2px;display:flex}
-.mvp_editorTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px}
-.mvp_editorSub{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
-.mvp_editorGrid{flex-wrap:wrap;align-items:flex-end;gap:10px 16px;display:flex}
-.mvp_field{flex-direction:column;gap:4px;min-width:140px;display:flex}
-.mvp_field--wide{flex:1 1 100%}
-.mvp_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
-.mvp_select,.mvp_number{box-sizing:border-box;height:26px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px;line-height:18px}
-.mvp_number{width:180px}
-.mvp_select:focus-visible,.mvp_number:focus-visible,.mvp_chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.mvp_chips{flex-wrap:wrap;align-items:center;gap:6px;display:flex}
-.mvp_chip{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 10px;font-family:inherit;font-size:11px;line-height:18px}
-.mvp_chip:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-.mvp_chip[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
-.mvp_chip:disabled{opacity:.45;cursor:default}
-.mvp_editorFooter{justify-content:space-between;align-items:center;gap:12px;display:flex;flex-wrap:wrap}
-.mvp_editorNote{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:15px;flex:1 1 220px;min-width:0}
-.mvp_check{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
-.mvp_check input{accent-color:var(--dsw-alias-brand-primary, #4c8dff);margin:0}
-.mvp_editorActions{flex:none;align-items:center;gap:6px;display:flex;flex-wrap:wrap}
-.mvp_editorError{color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:16px}
-`
+  // -------------------------------------------------------- format
+  define("format", function (require, module, exports) {
+    const { FIELD } = require("constants")
 
-    /* ---------------------------------------------------------------- data */
-
-    /** Opaque key; never parsed back, so ids containing "/" stay unambiguous. */
-    function keyOf(provider, model) {
+    exports.keyOf = function keyOf(provider, model) {
       return provider + '/' + model
     }
 
-    function hiddenSetOf(snapshot) {
+    exports.hiddenSetOf = function hiddenSetOf(snapshot) {
       const value = snapshot && snapshot.value
       const list = value && Array.isArray(value[FIELD]) ? value[FIELD] : []
       return new Set(list)
     }
 
-    function providerLabel(group, t) {
+    exports.providerLabel = function providerLabel(group, t) {
       return group.id === 'deepseek-account' ? t('provider.account') : group.name
     }
 
-    const COLLAPSE_KEY = 'dsh-model-visibility:collapsed-groups:v1'
+    exports.COLLAPSE_KEY = 'dsh-model-visibility:collapsed-groups:v1'
 
     /** Group ids whose model lists the page keeps collapsed. */
-    function readCollapsedGroups() {
+    exports.readCollapsedGroups = function readCollapsedGroups() {
       try {
         const raw = window.localStorage.getItem(COLLAPSE_KEY)
         if (raw === null) return new Set()
@@ -505,7 +1630,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function persistCollapsedGroups(collapsed) {
+    exports.persistCollapsedGroups = function persistCollapsedGroups(collapsed) {
       try {
         window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify(Array.from(collapsed)))
       } catch (_error) {
@@ -514,14 +1639,14 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function countModels(groups) {
+    exports.countModels = function countModels(groups) {
       let total = 0
       for (const group of groups || []) total += (group.models || []).length
       return total
     }
 
     /** Human context size: 1048576 → "1M", 128000 → "128K". */
-    function formatContext(tokens) {
+    exports.formatContext = function formatContext(tokens) {
       if (!Number.isFinite(tokens) || tokens <= 0) return null
       if (tokens >= 1_000_000) return Math.round(tokens / 100_000) / 10 + 'M'
       if (tokens >= 1_000) return Math.round(tokens / 100) / 10 + 'K'
@@ -529,7 +1654,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Effort display names in catalog order. */
-    function effortNames(reasoning) {
+    exports.effortNames = function effortNames(reasoning) {
       const efforts = reasoning && Array.isArray(reasoning.efforts) ? reasoning.efforts : []
       const names = []
       for (const effort of efforts) {
@@ -541,7 +1666,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Display name of the default effort, or null when none is published. */
-    function defaultEffortName(reasoning) {
+    exports.defaultEffortName = function defaultEffortName(reasoning) {
       if (!reasoning || typeof reasoning.defaultEffort !== 'string') return null
       const efforts = Array.isArray(reasoning.efforts) ? reasoning.efforts : []
       const found = efforts.find((effort) => effort !== null && effort.id === reasoning.defaultEffort)
@@ -551,262 +1676,90 @@ window.__ModuleLoader__.load({
     }
 
     /** Localized name of one input modality. */
-    function modalityLabel(id, t) {
+    exports.modalityLabel = function modalityLabel(id, t) {
       const key = 'modality.' + id
       const label = t(key)
       return label === key ? id : label
     }
 
     /** Localized provenance label ("adapter", "relay model list", …). */
-    function sourceLabel(source, t) {
+    exports.sourceLabel = function sourceLabel(source, t) {
       const key = 'source.' + (source || 'unknown')
       const label = t(key)
       return label === key ? t('source.unknown') : label
     }
 
     /** Per-field provenance recorded by the Host. */
-    function sourceOf(model, field) {
+    exports.sourceOf = function sourceOf(model, field) {
       const sources = model && model.sources
       return sources && typeof sources[field] === 'string' ? sources[field] : 'unknown'
     }
 
     /** Catalog and name heuristics are completed values, not declarations. */
-    function isInferredSource(source) {
+    exports.isInferredSource = function isInferredSource(source) {
       return source === 'catalog' || source === 'inferred'
     }
 
     /** Kind with a safe fallback for records from an older Host. */
-    function kindOf(model) {
+    exports.kindOf = function kindOf(model) {
       return model && typeof model.kind === 'string' && model.kind !== '' ? model.kind : 'chat'
     }
 
     /** Filter bucket: chat / image / video / other. */
-    function bucketOf(kind) {
+    exports.bucketOf = function bucketOf(kind) {
       if (kind === 'image') return 'image'
       if (kind === 'video') return 'video'
       if (kind === 'chat') return 'chat'
       return 'other'
     }
 
-    function isGenerationKind(kind) {
+    exports.isGenerationKind = function isGenerationKind(kind) {
       return kind === 'image' || kind === 'video' || kind === 'audio'
     }
 
     /** Resolution tier advertised in the model id ("-4k", "2K"). */
-    function resolutionOf(model) {
+    exports.resolutionOf = function resolutionOf(model) {
       const text = String((model && model.id) || '')
       const match = /(?:^|[-_/])(4k|2k|8k|uhd|hd)(?:$|[-_/])/i.exec(text)
       return match === null ? null : match[1].toUpperCase()
     }
 
     /** "文本 / 图像" for one modality array. */
-    function modalityNames(modalities, t) {
+    exports.modalityNames = function modalityNames(modalities, t) {
       return (Array.isArray(modalities) ? modalities : []).map((id) => modalityLabel(id, t)).join(' / ')
     }
 
     /** Input modalities the manual editor can declare, in display order. */
-    const OVERRIDE_MODALITIES = ['text', 'image', 'audio', 'video', 'file']
+    exports.OVERRIDE_MODALITIES = ['text', 'image', 'audio', 'video', 'file']
 
     /** Effort levels the manual editor can declare, in display order. */
-    const OVERRIDE_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+    exports.OVERRIDE_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
     /** Localized name of one effort id. */
-    function effortLabel(id, t) {
+    exports.effortLabel = function effortLabel(id, t) {
       const key = 'effort.' + id
       const label = t(key)
       return label === key ? id : label
     }
 
     /** Identity of a manual override entry; same shape as the row key. */
-    function overrideKeyOf(entry) {
+    exports.overrideKeyOf = function overrideKeyOf(entry) {
       return entry ? keyOf(entry.provider, entry.model) : null
     }
 
     /** Model fields whose provenance can be manual. */
-    function manualFieldsOf(model) {
+    exports.manualFieldsOf = function manualFieldsOf(model) {
       const sources = model && model.sources ? model.sources : {}
       return ['kind', 'reasoning', 'context', 'modalities'].filter(
         (field) => sources[field] === 'manual',
       )
     }
 
-    function manualTag(model, t) {
-      return manualFieldsOf(model).length === 0
-        ? null
-        : {
-            key: 'manual',
-            tone: 'accent',
-            label: t('tag.manual'),
-            title: t('tag.manualTitle'),
-          }
-    }
+  })
 
-    /** Tags for image / video / embedding / rerank / audio / moderation models. */
-    function generationTags(model, t) {
-      const kind = kindOf(model)
-      const kindSource = sourceOf(model, 'kind')
-      const kindLabel = t('tag.kind.' + kind) === 'tag.kind.' + kind ? t('tag.kind.unknown') : t('tag.kind.' + kind)
-      const titleKey = kind === 'image' ? 'tag.kindImageTitle' : kind === 'video' ? 'tag.kindVideoTitle' : 'tag.kindTitle'
-      const tags = [
-        {
-          key: 'kind',
-          tone: 'kind-' + kind,
-          label: kindLabel,
-          title: t(titleKey, { kind: kindLabel, source: sourceLabel(kindSource, t) }),
-          inferred: isInferredSource(kindSource),
-        },
-      ]
-      const resolution = resolutionOf(model)
-      if (resolution !== null && (kind === 'image' || kind === 'video')) {
-        tags.push({
-          key: 'resolution',
-          tone: 'neutral',
-          label: resolution,
-          title: t('tag.resolutionTitle', { value: resolution }),
-        })
-      }
-      // Image editing capability is the one input fact worth showing on a
-      // generation row; it never turns into the chat "multimodal" tag.
-      if (kind === 'image' && Array.isArray(model.inputModalities) && model.inputModalities.includes('image')) {
-        tags.push({
-          key: 'image-input',
-          tone: 'neutral',
-          label: t('tag.imageInput'),
-          title: t('tag.imageInputTitle'),
-        })
-      }
-      const manual = manualTag(model, t)
-      if (manual !== null) tags.push(manual)
-      return tags
-    }
-
-    /**
-     * Per-model capability tags. The same model may know only part of its
-     * capabilities: an adapter that cannot answer produces `infoError`, and the
-     * unknown facts are shown as such instead of being guessed. Each tag knows
-     * whether its value is a declaration (solid border) or a completion from the
-     * built-in catalog / name heuristics (dashed border).
-     */
-    function capabilityTags(model, t) {
-      const kind = kindOf(model)
-      if (kind !== 'chat') return generationTags(model, t)
-
-      const tags = []
-      const reasoning = model.reasoning
-      const levels = effortNames(reasoning)
-      const reasoningSource = sourceOf(model, 'reasoning')
-      const errorTitle =
-        typeof model.infoError === 'string' && model.infoError !== ''
-          ? t('tag.infoErrorTitle', { message: model.infoError })
-          : t('tag.unknownTitle')
-
-      if (levels.length > 0) {
-        tags.push({
-          key: 'reasoning',
-          tone: 'accent',
-          label: t('tag.reasoning'),
-          title: t('tag.reasoningTitle', {
-            levels: levels.join(' / '),
-            source: sourceLabel(reasoningSource, t),
-          }),
-        })
-        const fallback = defaultEffortName(reasoning)
-        tags.push({
-          key: 'effort',
-          tone: 'neutral',
-          label: t('tag.effort') + ' ' + levels.join('/'),
-          title:
-            fallback === null
-              ? t('tag.effortTitleNoFallback', {
-                  levels: levels.join(' / '),
-                  source: sourceLabel(reasoningSource, t),
-                })
-              : t('tag.effortTitle', {
-                  levels: levels.join(' / '),
-                  fallback,
-                  source: sourceLabel(reasoningSource, t),
-                }),
-        })
-      } else if (model.reasoningSupported === true) {
-        tags.push({
-          key: 'reasoning',
-          tone: 'accent',
-          label: t('tag.reasoning'),
-          title: t('tag.reasoningCatalogTitle', { source: sourceLabel(reasoningSource, t) }),
-          inferred: isInferredSource(reasoningSource),
-        })
-      } else if (model.reasoningSupported === false) {
-        tags.push({
-          key: 'reasoning',
-          tone: 'muted',
-          label: t('tag.noReasoning'),
-          title: sourceLabel(reasoningSource, t),
-          inferred: isInferredSource(reasoningSource),
-        })
-      } else {
-        tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.reasoningUnknown'), title: errorTitle })
-      }
-
-      const contextSource = sourceOf(model, 'context')
-      const context = formatContext(model.contextWindow)
-      tags.push({
-        key: 'context',
-        tone: context === null ? 'muted' : 'neutral',
-        label: t('tag.context') + ' ' + (context === null ? t('tag.unknown') : context),
-        title:
-          context === null
-            ? errorTitle
-            : t('tag.contextTitle', {
-                tokens: Number(model.contextWindow).toLocaleString(),
-                source: sourceLabel(contextSource, t),
-              }),
-        inferred: context !== null && isInferredSource(contextSource),
-      })
-
-      const modalities = Array.isArray(model.inputModalities) ? model.inputModalities : null
-      const modalitySource = sourceOf(model, 'modalities')
-      if (modalities === null || modalities.length === 0) {
-        tags.push({ key: 'modality', tone: 'muted', label: t('tag.modalityUnknown'), title: errorTitle })
-      } else {
-        const vision = modalities.includes('image')
-        tags.push({
-          key: 'modality',
-          tone: vision ? 'vision' : 'neutral',
-          label: vision ? t('tag.multimodal') : t('tag.textOnly'),
-          title: t('tag.modalityTitle', {
-            modalities: modalityNames(modalities, t),
-            source: sourceLabel(modalitySource, t),
-          }),
-          inferred: isInferredSource(modalitySource),
-        })
-      }
-
-      // A vendor-documented correction is the one non-dashed value that is not
-      // an adapter declaration; keep it visible so "why is this text-only?"
-      // has an answer next to the tag.
-      const correction = model.correction
-      if (correction !== null && typeof correction === 'object' && typeof correction.code === 'string') {
-        const noteKey = 'correction.' + correction.code
-        const localized = t(noteKey)
-        const note = localized === noteKey
-          ? typeof correction.note === 'string' && correction.note !== ''
-            ? correction.note
-            : correction.code
-          : localized
-        tags.push({
-          key: 'correction',
-          tone: 'muted',
-          label: t('tag.correction'),
-          title: t('tag.correctionTitle', {
-            note,
-            source: typeof correction.source === 'string' && correction.source !== '' ? correction.source : '—',
-          }),
-        })
-      }
-      const manual = manualTag(model, t)
-      if (manual !== null) tags.push(manual)
-      return tags
-    }
+  // -------------------------------------------------------- hooks
+  define("hooks", function (require, module, exports) {
+    const React = require('react')
 
     function subscribeOf(source) {
       return (fn) => source.subscribe(fn)
@@ -828,489 +1781,19 @@ window.__ModuleLoader__.load({
       return { hidden, snapshot }
     }
 
-    /** Host-generation catalog, shared by the settings page. */
-    function createCatalog(ctx) {
-      const listeners = new Set()
-      let state = {
-        status: 'idle',
-        groups: [],
-        failures: [],
-        providers: [],
-        catalog: null,
-        error: null,
-        detailsError: null,
-        source: null,
-        generatedAt: 0,
-      }
-      let inflight = null
-      // A hard reload starts a new run even while `inflight` is set; the token
-      // keeps the older run from publishing its now-stale result afterwards.
-      let generation = 0
+    exports.subscribeOf = subscribeOf
+    exports.snapshotOf = snapshotOf
+    exports.useSource = useSource
+    exports.useHidden = useHidden
 
-      const publish = (next) => {
-        state = next
-        for (const listener of listeners) listener()
-      }
+  })
 
-      /** Message of a failed Remote envelope. */
-      const failureMessage = (response) => {
-        const failure = response && response.error
-        return failure
-          ? String(failure.code) + ': ' + String(failure.message)
-          : 'unknown error'
-      }
+  // -------------------------------------------------------- override-editor
+  define("override-editor", function (require, module, exports) {
+    const React = require('react')
+    const h = React.createElement
 
-      /**
-       * Read the enriched catalog from the Host half. It carries the same
-       * groups as `session.modelCatalog` plus context windows and modalities.
-       */
-      const fetchHostCatalog = async (fresh, reload) => {
-        const query = reload ? '?fresh=1&reload=1' : fresh ? '?fresh=1' : ''
-        const response = await fetch(API + '/models' + query, {
-          method: 'GET',
-          headers: { accept: 'application/json' },
-          credentials: 'same-origin',
-          cache: 'no-store',
-          redirect: 'error',
-        })
-        if (!response.ok) throw new Error('HTTP ' + response.status)
-        const body = await response.json()
-        const value = body && body.ok === true ? body.value : null
-        if (value === null || !Array.isArray(value.groups)) {
-          throw new Error('malformed capability catalog')
-        }
-        return value
-      }
-
-      /** Read the shipped catalog; the fallback when the route is unavailable. */
-      const fetchOfficialCatalog = async () => {
-        const response = await ctx.remote.session.modelCatalog()
-        if (!response || response.ok !== true) throw new Error(failureMessage(response))
-        const value = response.value || {}
-        return {
-          groups: Array.isArray(value.groups) ? value.groups : [],
-          failures: Array.isArray(value.failures) ? value.failures : [],
-          generatedAt: 0,
-        }
-      }
-
-      const load = (options) => {
-        const fresh = options !== null && typeof options === 'object' && options.fresh === true
-        const reload = options !== null && typeof options === 'object' && options.reload === true
-        // A soft load joins whatever is already running. A hard reload has to
-        // start its own run, otherwise it would receive the very stale result
-        // it is meant to replace.
-        if (inflight !== null && !reload) return inflight
-        if (state.status !== 'ready') {
-          publish({ ...state, status: 'loading', error: null })
-        }
-        const token = ++generation
-        const run = (async () => {
-          try {
-            const value = await fetchHostCatalog(fresh, reload)
-            if (token !== generation) return
-            publish({
-              status: 'ready',
-              groups: Array.isArray(value.groups) ? value.groups : [],
-              failures: Array.isArray(value.failures) ? value.failures : [],
-              providers: Array.isArray(value.providers) ? value.providers : [],
-              catalog: value.catalog && typeof value.catalog === 'object' ? value.catalog : null,
-              error: null,
-              detailsError: null,
-              source: 'host',
-              generatedAt: Number.isFinite(value.generatedAt) ? value.generatedAt : 0,
-            })
-            return
-          } catch (detailError) {
-            const detail = String(detailError && detailError.message ? detailError.message : detailError)
-            try {
-              const value = await fetchOfficialCatalog()
-              if (token !== generation) return
-              publish({
-                status: 'ready',
-                groups: value.groups,
-                failures: value.failures,
-                providers: [],
-                catalog: null,
-                error: null,
-                detailsError: detail,
-                source: 'catalog',
-                generatedAt: value.generatedAt,
-              })
-            } catch (error) {
-              if (token !== generation) return
-              publish({
-                ...state,
-                status: 'error',
-                error: String(error && error.message ? error.message : error),
-              })
-            }
-          } finally {
-            if (inflight === run) inflight = null
-          }
-        })()
-        inflight = run
-        return run
-      }
-
-      return {
-        subscribe(fn) {
-          listeners.add(fn)
-          return () => {
-            listeners.delete(fn)
-          }
-        },
-        getSnapshot() {
-          return state
-        },
-        load,
-        refresh() {
-          return load({ fresh: true })
-        },
-        reload() {
-          return load({ fresh: true, reload: true })
-        },
-      }
-    }
-
-    /**
-     * Manual capability overrides, persisted by the Host half.
-     *
-     * The page only edits one model at a time; the store keeps the whole list so
-     * every row knows whether it already has an override. An older Host half
-     * answers 404 and the editor stays hidden behind the `overrides` feature
-     * flag.
-     */
-    function createOverrides() {
-      const listeners = new Set()
-      let state = { status: 'idle', entries: [], available: null, error: null }
-      let inflight = null
-
-      const publish = (next) => {
-        state = next
-        for (const listener of listeners) listener()
-      }
-
-      /** Error text for a failed envelope or HTTP response. */
-      const failureOf = async (response) => {
-        let detail = ''
-        try {
-          const body = await response.json()
-          if (body && body.error) {
-            detail = ' (' + String(body.error.code) + ': ' + String(body.error.message) + ')'
-          }
-        } catch (_error) {
-          // A proxy error page is not JSON; the status code is still useful.
-        }
-        return new Error('HTTP ' + response.status + detail)
-      }
-
-      const readEntries = async (response) => {
-        if (response.status === 404) {
-          publish({ status: 'ready', entries: [], available: false, error: null })
-          return null
-        }
-        if (!response.ok) throw await failureOf(response)
-        const body = await response.json()
-        const value = body && body.ok === true ? body.value : null
-        if (value === null || !Array.isArray(value.overrides)) {
-          throw new Error('malformed override list')
-        }
-        return value.overrides
-      }
-
-      const load = () => {
-        if (inflight !== null) return inflight
-        if (state.status !== 'ready') publish({ ...state, status: 'loading', error: null })
-        const run = (async () => {
-          try {
-            const response = await fetch(API + '/overrides', {
-              method: 'GET',
-              headers: { accept: 'application/json' },
-              credentials: 'same-origin',
-              cache: 'no-store',
-              redirect: 'error',
-            })
-            const entries = await readEntries(response)
-            if (entries !== null) {
-              publish({ status: 'ready', entries, available: true, error: null })
-            }
-          } catch (error) {
-            publish({
-              ...state,
-              status: 'error',
-              error: String(error && error.message ? error.message : error),
-            })
-          } finally {
-            if (inflight === run) inflight = null
-          }
-        })()
-        inflight = run
-        return run
-      }
-
-      /** POST one entry (or `{remove:true}`) and adopt the returned list. */
-      const write = async (payload) => {
-        const response = await fetch(API + '/overrides', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
-          credentials: 'same-origin',
-          cache: 'no-store',
-          redirect: 'error',
-          body: JSON.stringify(payload),
-        })
-        if (response.status === 404) {
-          publish({ status: 'ready', entries: [], available: false, error: null })
-          throw new Error('HTTP 404')
-        }
-        if (!response.ok) throw await failureOf(response)
-        const body = await response.json()
-        const value = body && body.ok === true ? body.value : null
-        if (value === null || !Array.isArray(value.overrides)) {
-          throw new Error('malformed override list')
-        }
-        publish({ status: 'ready', entries: value.overrides, available: true, error: null })
-        return value
-      }
-
-      return {
-        subscribe(fn) {
-          listeners.add(fn)
-          return () => {
-            listeners.delete(fn)
-          }
-        },
-        getSnapshot() {
-          return state
-        },
-        load,
-        save(entry) {
-          return write(entry)
-        },
-        remove(provider, model) {
-          return write({ remove: true, provider, model })
-        },
-      }
-    }
-
-    /* ------------------------------------------------------ composer filter */
-
-    /** Hidden model keys as the plain array the Host stores. */
-    function hiddenListOf(snapshot) {
-      const value = snapshot && snapshot.value
-      return value && Array.isArray(value[FIELD]) ? value[FIELD] : []
-    }
-
-    /**
-     * Rewrite one directory store in place so its snapshots omit hidden models.
-     *
-     * The shipped composer seat may capture the directory store before this plugin
-     * applies, so replacing the store object would never reach it; rewriting
-     * getSnapshot/subscribe on the captured object does. The session's active
-     * model stays listed even while hidden, because the shipped trigger
-     * resolves its label from this same catalog.
-     */
-    function patchDirectoryStore(store, form) {
-      const readBase = store.getSnapshot.bind(store)
-      const subscribeBase = store.subscribe.bind(store)
-      const originalGet = store.getSnapshot
-      const originalSubscribe = store.subscribe
-      const listeners = new Set()
-      let snapshot = null
-      let lastBase
-      let lastSignature
-
-      const build = (baseSnapshot) => {
-        const hidden = new Set(hiddenListOf(form.getSnapshot()))
-        const activeSelection = baseSnapshot.current
-        const groups = []
-        for (const group of baseSnapshot.groups || []) {
-          const all = group.models || []
-          const models = []
-          for (const model of all) {
-            const key = keyOf(group.id, model.id)
-            const active =
-              activeSelection !== null &&
-              activeSelection !== undefined &&
-              activeSelection.provider === group.id &&
-              activeSelection.model === model.id
-            if (!hidden.has(key) || active) models.push(model)
-          }
-          if (models.length === 0) continue
-          groups.push(models.length === all.length ? group : { ...group, models })
-        }
-        return { ...baseSnapshot, groups }
-      }
-
-      const current = () => {
-        const baseSnapshot = readBase()
-        const signature = hiddenListOf(form.getSnapshot()).join('\u0000')
-        if (snapshot !== null && baseSnapshot === lastBase && signature === lastSignature) {
-          return snapshot
-        }
-        lastBase = baseSnapshot
-        lastSignature = signature
-        snapshot = build(baseSnapshot)
-        return snapshot
-      }
-
-      const emit = () => {
-        const previous = snapshot
-        const next = current()
-        if (previous === next) return
-        for (const listener of Array.from(listeners)) listener()
-      }
-
-      Object.defineProperties(store, {
-        __modelVisibilityPatched: { value: true, configurable: true },
-        getSnapshot: { value: current, configurable: true, writable: true },
-        subscribe: {
-          value(listener) {
-            listeners.add(listener)
-            const stop = subscribeBase(listener)
-            return () => {
-              listeners.delete(listener)
-              stop()
-            }
-          },
-          configurable: true,
-          writable: true,
-        },
-      })
-
-      return {
-        emit,
-        restore() {
-          Object.defineProperties(store, {
-            getSnapshot: { value: originalGet, configurable: true, writable: true },
-            subscribe: { value: originalSubscribe, configurable: true, writable: true },
-          })
-          delete store.__modelVisibilityPatched
-          listeners.clear()
-        },
-      }
-    }
-
-    /**
-     * Patch every model directory — the ones already live when the plugin
-     * applies and every directory resolved later — so the shipped seat keeps
-     * owning the trigger, the Model / Effort rows, and third-party menu
-     * enhancements such as the reasoning-effort slider.
-     */
-    function installComposerFilter(scope, form) {
-      const models = scope.modelDirectories
-      const original = models.directoryFor
-      if (typeof original !== 'function') return
-      const records = new Set()
-
-      const ensure = (directory) => {
-        if (directory === undefined || directory === null) return directory
-        const store = directory.store
-        if (store === undefined || store === null || store.__modelVisibilityPatched === true) {
-          return directory
-        }
-        try {
-          records.add(patchDirectoryStore(store, form))
-        } catch (_error) {
-          // Fail open: an unwritable store simply keeps showing every model.
-        }
-        return directory
-      }
-
-      scope.effect(() => {
-        const live = models.live && models.live.directories ? models.live.directories.values : null
-        if (live instanceof Set) for (const directory of live) ensure(directory)
-
-        const stopForm = form.subscribe(() => {
-          for (const record of records) record.emit()
-        })
-
-        const wrapper = function directoryFor(sessionId) {
-          return ensure(original.call(this, sessionId))
-        }
-        Object.defineProperty(models, 'directoryFor', {
-          value: wrapper,
-          configurable: true,
-          writable: true,
-        })
-
-        return () => {
-          stopForm()
-          for (const record of records) record.restore()
-          records.clear()
-          if (Object.getOwnPropertyDescriptor(models, 'directoryFor')?.value === wrapper) {
-            delete models.directoryFor
-          }
-        }
-      }, 'model-visibility: filtered model directory')
-    }
-
-    /* ----------------------------------------------------- settings page */
-
-    /** Count models per filter bucket for one group. */
-    function countKinds(models) {
-      const counts = { chat: 0, image: 0, video: 0, other: 0 }
-      for (const model of models || []) counts[bucketOf(kindOf(model))] += 1
-      return counts
-    }
-
-    /** Compact label + tooltip for one provider probe diagnostic. */
-    function probeOf(state, group, t) {
-      const list = Array.isArray(state.providers) ? state.providers : []
-      const diagnostic = list.find((item) => item && item.id === group.id)
-      if (diagnostic === undefined) return null
-      const details = [
-        diagnostic.host ? 'host: ' + diagnostic.host : null,
-        diagnostic.status ? 'status: ' + diagnostic.status : null,
-        diagnostic.message ? 'message: ' + diagnostic.message : null,
-        diagnostic.pricing && diagnostic.pricing !== 'skipped' ? 'pricing: ' + diagnostic.pricing : null,
-      ]
-        .filter(Boolean)
-        .join('\n')
-      if (diagnostic.status === 'ok') {
-        return {
-          label:
-            Number(diagnostic.capabilities) > 0
-              ? t('group.probeOk', {
-                  models: diagnostic.models ?? 0,
-                  caps: diagnostic.capabilities,
-                })
-              : t('group.probeNoCaps', { models: diagnostic.models ?? 0 }),
-          title: details,
-        }
-      }
-      if (diagnostic.status === 'failed' || diagnostic.status === 'unauthorized') {
-        return { label: t('group.probeFailed'), title: details }
-      }
-      return { label: t('group.probeSkipped'), title: details }
-    }
-
-    /** Class list for one capability tag. */
-    function tagClassOf(tag) {
-      const tone =
-        tag.tone === 'accent'
-          ? ' mvp_tag--accent'
-          : tag.tone === 'vision'
-            ? ' mvp_tag--vision'
-            : tag.tone === 'kind'
-              ? ' mvp_tag--kind'
-              : typeof tag.tone === 'string' && tag.tone.startsWith('kind-')
-                ? ' mvp_tag--kind mvp_tag--' + tag.tone
-                : tag.tone === 'muted'
-                  ? ' mvp_tag--muted'
-                  : ''
-      return 'mvp_tag' + tone + (tag.inferred === true ? ' mvp_tag--inferred' : '')
-    }
-
-    /**
-     * Per-model capability editor.
-     *
-     * Every field is optional: a blank field means "keep using automatic
-     * detection", so a user can fix only the reasoning ladder or only the
-     * context window without lying about the rest. Saving a fully blank form is
-     * the same as "use automatic" and removes the entry on the Host side.
-     */
-    /** Human sentence for the Host's provider write-back result, or null. */
+    const { modalityLabel, effortLabel, OVERRIDE_MODALITIES, OVERRIDE_EFFORTS } = require("format")
     function providerWriteNote(result, t) {
       if (result === null || typeof result !== 'object') return null
       if (result.written === true) {
@@ -1589,9 +2072,178 @@ window.__ModuleLoader__.load({
           ),
         ),
       )
+        }
+
+    exports.ModelOverrideEditor = ModelOverrideEditor
+    exports.providerWriteNote = providerWriteNote
+
+
+  })
+
+  // -------------------------------------------------------- pure
+  define("pure", function (require, module, exports) {
+    /**
+     * Pure helpers that never touch React or the DOM, so `node --test` can call
+     * them directly.
+     *
+     * @module client-src/pure
+     */
+
+    /** Number of one bucket's token sum, guarding partial buckets. */
+    exports.bucketTotalOf = function bucketTotalOf(buckets) {
+      if (!Array.isArray(buckets)) return 0
+      return buckets.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0)
     }
 
-    function makeSection(form, catalog, overrides) {
+    /** 1234567 → "1.2M"; 4096 → "4.1K"; 0/undefined → "0". */
+    exports.formatTokens = function formatTokens(value) {
+      const tokens = Number.isFinite(value) ? value : 0
+      if (tokens >= 1_000_000) {
+        const millions = Math.round((tokens / 100_000)) / 10
+        return Number.isInteger(millions) ? `${millions}M` : millions.toFixed(1) + 'M'
+      }
+      if (tokens >= 1_000) {
+        const thousands = Math.round(tokens / 100) / 10
+        return Number.isInteger(thousands) ? `${thousands}K` : thousands.toFixed(1) + 'K'
+      }
+      return String(tokens)
+    }
+
+    /** Local-calendar `YYYY-MM-DD` stamp used by the ledger's day buckets. */
+    exports.dayKeyOf = function dayKeyOf(time) {
+      const date = new Date(Number.isFinite(time) ? time : Date.now())
+      if (Number.isNaN(date.getTime())) return ''
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    }
+
+    /** First day (Monday) of the local ISO week of `time`. */
+    exports.weekKeyOf = function weekKeyOf(time) {
+      const date = new Date(Number.isFinite(time) ? time : Date.now())
+      const weekday = (date.getDay() + 6) % 7
+      date.setDate(date.getDate() - weekday)
+      return dayKeyOf(date.getTime())
+    }
+
+    /** Local calendar month prefix of `time`. */
+    exports.monthPrefixOf = function monthPrefixOf(time) {
+      return dayKeyOf(time).slice(0, 7)
+    }
+
+    /**
+     * Apply the section's filters to one catalog.
+     *
+     * Mirrors the settings page exactly; the composer filter is a separate,
+     * simpler pass (visibility only). Inputs are the loaded groups plus the five
+     * filter axes; output keeps the group objects in order with only kept models.
+     */
+    exports.computeFilteredGroups = function computeFilteredGroups(groups, { filter = 'all', query = '', multimodalOnly = false, reasoningOnly = false, minContext = 0 } = {}) {
+      const normalized = String(query ?? '').trim().toLowerCase()
+      const filtered = []
+      for (const group of groups ?? []) {
+        const models = []
+        for (const model of group.models ?? []) {
+          if (filter !== 'all' && bucket(model) !== filter) continue
+          if (normalized !== '') {
+            const name = String(model.name ?? '').toLowerCase()
+            const id = String(model.id ?? '').toLowerCase()
+            if (!name.includes(normalized) && !id.includes(normalized)) continue
+          }
+          if (multimodalOnly && !(Array.isArray(model.inputModalities) && model.inputModalities.includes('image'))) {
+            continue
+          }
+          if (reasoningOnly && model.reasoningSupported !== true) continue
+          if (minContext > 0 && !(Number.isFinite(model.contextWindow) && model.contextWindow >= minContext)) {
+            continue
+          }
+          models.push(model)
+        }
+        if (models.length > 0) filtered.push({ ...group, models })
+      }
+      return filtered
+    }
+
+    function bucket(model) {
+      const kind = model && typeof model.kind === 'string' && model.kind !== '' ? model.kind : 'chat'
+      if (kind === 'image') return 'image'
+      if (kind === 'video') return 'video'
+      if (kind === 'chat') return 'chat'
+      return 'other'
+    }
+
+    /** Counts per kind bucket for the whole list. */
+    exports.countKinds = function countKinds(models) {
+      const counts = { chat: 0, image: 0, video: 0, other: 0 }
+      for (const model of models ?? []) counts[bucket(model)] += 1
+      return counts
+    }
+
+    /** Checker-model candidates from a loaded catalog state. */
+    exports.checkerRoutesOf = function checkerRoutesOf(groups) {
+      const routes = []
+      for (const group of groups ?? []) {
+        if (group === null || typeof group !== 'object') continue
+        const models = Array.isArray(group.models) ? group.models : []
+        if (models.length > 0) routes.push({ id: group.id, name: group.name ?? group.id })
+      }
+      return routes
+    }
+
+  })
+
+  // -------------------------------------------------------- section-parts
+  define("section-parts", function (require, module, exports) {
+    const { bucketOf, kindOf } = require("format")
+
+    function countKinds(models) {
+      const counts = { chat: 0, image: 0, video: 0, other: 0 }
+      for (const model of models || []) counts[bucketOf(kindOf(model))] += 1
+      return counts
+    }
+
+    /** Compact label + tooltip for one provider probe diagnostic. */
+    function probeOf(state, group, t) {
+      const list = Array.isArray(state.providers) ? state.providers : []
+      const diagnostic = list.find((item) => item && item.id === group.id)
+      if (diagnostic === undefined) return null
+      const details = [
+        diagnostic.host ? 'host: ' + diagnostic.host : null,
+        diagnostic.status ? 'status: ' + diagnostic.status : null,
+        diagnostic.message ? 'message: ' + diagnostic.message : null,
+        diagnostic.pricing && diagnostic.pricing !== 'skipped' ? 'pricing: ' + diagnostic.pricing : null,
+      ]
+        .filter(Boolean)
+        .join('\n')
+      if (diagnostic.status === 'ok') {
+        return {
+          label:
+            Number(diagnostic.capabilities) > 0
+              ? t('group.probeOk', {
+                  models: diagnostic.models ?? 0,
+                  caps: diagnostic.capabilities,
+                })
+              : t('group.probeNoCaps', { models: diagnostic.models ?? 0 }),
+          title: details,
+        }
+      }
+      if (diagnostic.status === 'failed' || diagnostic.status === 'unauthorized') {
+        return { label: t('group.probeFailed'), title: details }
+      }
+      return { label: t('group.probeSkipped'), title: details }
+    }
+
+  })
+
+  // -------------------------------------------------------- settings-section
+  define("settings-section", function (require, module, exports) {
+    const React = require('react')
+    const h = React.createElement
+
+    const { keyOf, kindOf, isGenerationKind, providerLabel, countModels, readCollapsedGroups, persistCollapsedGroups, overrideKeyOf } = require("format")
+    const { computeFilteredGroups, countKinds } = require("pure")
+    const { UsageToolbar } = require("usage-view")
+    const { VerifyPanel } = require("checker-view")
+
+    function makeSection(form, catalog, overrides, usage, verify) {
       return function ModelVisibilitySection({ t }) {
         const { hidden, snapshot } = useHidden(form)
         const state = useSource(catalog)
@@ -1610,7 +2262,7 @@ window.__ModuleLoader__.load({
           // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [])
 
-        const catalogMeta = state.catalog && typeof state.catalog === 'object' ? state.catalog : null
+        const catalogMeta = state.learned && typeof state.learned === 'object' ? state.learned : null
         const hostFeatures =
           catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
         const canEdit = state.source === 'host' && hostFeatures.includes('overrides')
@@ -1636,26 +2288,13 @@ window.__ModuleLoader__.load({
         const [reasoningOnly, setReasoningOnly] = React.useState(false)
         const [minContext, setMinContext] = React.useState(0)
         const normalizedQuery = query.trim().toLowerCase()
-        const filteredGroups = []
-        for (const group of groups) {
-          const models = (group.models || []).filter((model) => {
-            if (filter !== 'all' && bucketOf(kindOf(model)) !== filter) return false
-            if (normalizedQuery !== '') {
-              const name = String(model.name || '').toLowerCase()
-              const id = String(model.id || '').toLowerCase()
-              if (!name.includes(normalizedQuery) && !id.includes(normalizedQuery)) return false
-            }
-            if (multimodalOnly && !(Array.isArray(model.inputModalities) && model.inputModalities.includes('image'))) {
-              return false
-            }
-            if (reasoningOnly && model.reasoningSupported !== true) return false
-            if (minContext > 0 && !(Number.isFinite(model.contextWindow) && model.contextWindow >= minContext)) {
-              return false
-            }
-            return true
-          })
-          if (models.length > 0) filteredGroups.push({ ...group, models })
-        }
+        const filteredGroups = computeFilteredGroups(groups, {
+          filter,
+          query: normalizedQuery,
+          multimodalOnly,
+          reasoningOnly,
+          minContext,
+        })
         const disabled = busy || !writable
 
         const writeField = (field, value) => {
@@ -1939,16 +2578,17 @@ window.__ModuleLoader__.load({
         // A hard reload is only meaningful when the Host half understands it.
         const canReload = state.source === 'host' && hostFeatures.includes('reload')
         const anyCollapsed = groups.some((group) => collapsed.has(group.id))
-        const catalogDate =
-          catalogMeta && typeof catalogMeta.generatedAt === 'string'
-            ? catalogMeta.generatedAt.slice(0, 10)
+        const learnedDate =
+          catalogMeta && Number.isFinite(catalogMeta.updatedAt)
+            ? catalogMeta.updatedAt > 0
+              ? new Date(catalogMeta.updatedAt).toISOString().slice(0, 10)
+              : null
             : null
         const catalogNote =
           catalogMeta !== null
-            ? t('page.catalogNote', {
-                version: catalogMeta.piAiVersion || '?',
-                date: catalogDate || '?',
+            ? t('page.learnedNote', {
                 models: catalogMeta.models ?? 0,
+                date: learnedDate || '?',
               })
             : null
         const filterOptions = [
@@ -1964,6 +2604,7 @@ window.__ModuleLoader__.load({
         return h(
           'div',
           { className: 'mvp_page' },
+          h(UsageToolbar, { usage, t, features: state.source === 'host' ? hostFeatures : [] }),
           h(
             'div',
             { className: 'mvp_head' },
@@ -2123,6 +2764,10 @@ window.__ModuleLoader__.load({
               h('div', { className: 'mvp_applyHint' }, t('page.applyInputHint')),
             ),
           ),
+          h(
+            VerifyPanel,
+            { verify, catalog: state, t, canUse: canVerify },
+          ),
           h('div', { className: 'mvp_legend' }, t('page.legend')),
           h('div', { className: 'mvp_legend' }, t('page.kindLegend')),
           h('div', { className: 'mvp_legend' }, t('page.manualNote')),
@@ -2167,7 +2812,349 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /* --------------------------------------------------------------- plugin */
+    exports.makeSection = makeSection
+
+  })
+
+  // -------------------------------------------------------- tags
+  define("tags", function (require, module, exports) {
+    const { kindOf, sourceOf, isInferredSource, formatContext, effortNames, defaultEffortName, modalityNames, modalityLabel, resolutionOf, manualFieldsOf } = require("format")
+
+    function manualTag(model, t) {
+      return manualFieldsOf(model).length === 0
+        ? null
+        : {
+            key: 'manual',
+            tone: 'accent',
+            label: t('tag.manual'),
+            title: t('tag.manualTitle'),
+          }
+    }
+
+    /** Tags for image / video / embedding / rerank / audio / moderation models. */
+    function generationTags(model, t) {
+      const kind = kindOf(model)
+      const kindSource = sourceOf(model, 'kind')
+      const kindLabel = t('tag.kind.' + kind) === 'tag.kind.' + kind ? t('tag.kind.unknown') : t('tag.kind.' + kind)
+      const titleKey = kind === 'image' ? 'tag.kindImageTitle' : kind === 'video' ? 'tag.kindVideoTitle' : 'tag.kindTitle'
+      const tags = [
+        {
+          key: 'kind',
+          tone: 'kind-' + kind,
+          label: kindLabel,
+          title: t(titleKey, { kind: kindLabel, source: sourceLabel(kindSource, t) }),
+          inferred: isInferredSource(kindSource),
+        },
+      ]
+      const resolution = resolutionOf(model)
+      if (resolution !== null && (kind === 'image' || kind === 'video')) {
+        tags.push({
+          key: 'resolution',
+          tone: 'neutral',
+          label: resolution,
+          title: t('tag.resolutionTitle', { value: resolution }),
+        })
+      }
+      // Image editing capability is the one input fact worth showing on a
+      // generation row; it never turns into the chat "multimodal" tag.
+      if (kind === 'image' && Array.isArray(model.inputModalities) && model.inputModalities.includes('image')) {
+        tags.push({
+          key: 'image-input',
+          tone: 'neutral',
+          label: t('tag.imageInput'),
+          title: t('tag.imageInputTitle'),
+        })
+      }
+      const manual = manualTag(model, t)
+      if (manual !== null) tags.push(manual)
+      return tags
+    }
+
+    /**
+     * Per-model capability tags. The same model may know only part of its
+     * capabilities: an adapter that cannot answer produces `infoError`, and the
+     * unknown facts are shown as such instead of being guessed. Each tag knows
+     * whether its value is a declaration (solid border) or a completion from the
+     * built-in catalog / name heuristics (dashed border).
+     */
+    function capabilityTags(model, t) {
+      const kind = kindOf(model)
+      if (kind !== 'chat') return generationTags(model, t)
+
+      const tags = []
+      const reasoning = model.reasoning
+      const levels = effortNames(reasoning)
+      const reasoningSource = sourceOf(model, 'reasoning')
+      const errorTitle =
+        typeof model.infoError === 'string' && model.infoError !== ''
+          ? t('tag.infoErrorTitle', { message: model.infoError })
+          : t('tag.unknownTitle')
+
+      if (levels.length > 0) {
+        tags.push({
+          key: 'reasoning',
+          tone: 'accent',
+          label: t('tag.reasoning'),
+          title: t('tag.reasoningTitle', {
+            levels: levels.join(' / '),
+            source: sourceLabel(reasoningSource, t),
+          }),
+        })
+        const fallback = defaultEffortName(reasoning)
+        tags.push({
+          key: 'effort',
+          tone: 'neutral',
+          label: t('tag.effort') + ' ' + levels.join('/'),
+          title:
+            fallback === null
+              ? t('tag.effortTitleNoFallback', {
+                  levels: levels.join(' / '),
+                  source: sourceLabel(reasoningSource, t),
+                })
+              : t('tag.effortTitle', {
+                  levels: levels.join(' / '),
+                  fallback,
+                  source: sourceLabel(reasoningSource, t),
+                }),
+        })
+      } else if (model.reasoningSupported === true) {
+        tags.push({
+          key: 'reasoning',
+          tone: 'accent',
+          label: t('tag.reasoning'),
+          title: t('tag.reasoningCatalogTitle', { source: sourceLabel(reasoningSource, t) }),
+          inferred: isInferredSource(reasoningSource),
+        })
+      } else if (model.reasoningSupported === false) {
+        tags.push({
+          key: 'reasoning',
+          tone: 'muted',
+          label: t('tag.noReasoning'),
+          title: sourceLabel(reasoningSource, t),
+          inferred: isInferredSource(reasoningSource),
+        })
+      } else {
+        tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.reasoningUnknown'), title: errorTitle })
+      }
+
+      const contextSource = sourceOf(model, 'context')
+      const context = formatContext(model.contextWindow)
+      tags.push({
+        key: 'context',
+        tone: context === null ? 'muted' : 'neutral',
+        label: t('tag.context') + ' ' + (context === null ? t('tag.unknown') : context),
+        title:
+          context === null
+            ? errorTitle
+            : t('tag.contextTitle', {
+                tokens: Number(model.contextWindow).toLocaleString(),
+                source: sourceLabel(contextSource, t),
+              }),
+        inferred: context !== null && isInferredSource(contextSource),
+      })
+
+      const modalities = Array.isArray(model.inputModalities) ? model.inputModalities : null
+      const modalitySource = sourceOf(model, 'modalities')
+      if (modalities === null || modalities.length === 0) {
+        tags.push({ key: 'modality', tone: 'muted', label: t('tag.modalityUnknown'), title: errorTitle })
+      } else {
+        const vision = modalities.includes('image')
+        tags.push({
+          key: 'modality',
+          tone: vision ? 'vision' : 'neutral',
+          label: vision ? t('tag.multimodal') : t('tag.textOnly'),
+          title: t('tag.modalityTitle', {
+            modalities: modalityNames(modalities, t),
+            source: sourceLabel(modalitySource, t),
+          }),
+          inferred: isInferredSource(modalitySource),
+        })
+      }
+
+      // A vendor-documented correction is the one non-dashed value that is not
+      // an adapter declaration; keep it visible so "why is this text-only?"
+      // has an answer next to the tag.
+      const correction = model.correction
+      if (correction !== null && typeof correction === 'object' && typeof correction.code === 'string') {
+        const noteKey = 'correction.' + correction.code
+        const localized = t(noteKey)
+        const note = localized === noteKey
+          ? typeof correction.note === 'string' && correction.note !== ''
+            ? correction.note
+            : correction.code
+          : localized
+        tags.push({
+          key: 'correction',
+          tone: 'muted',
+          label: t('tag.correction'),
+          title: t('tag.correctionTitle', {
+            note,
+            source: typeof correction.source === 'string' && correction.source !== '' ? correction.source : '—',
+          }),
+        })
+      }
+      const manual = manualTag(model, t)
+      if (manual !== null) tags.push(manual)
+      return tags
+    }
+
+    function tagClassOf(tag) {
+      const tone =
+        tag.tone === 'accent'
+          ? ' mvp_tag--accent'
+          : tag.tone === 'vision'
+            ? ' mvp_tag--vision'
+            : tag.tone === 'kind'
+              ? ' mvp_tag--kind'
+              : typeof tag.tone === 'string' && tag.tone.startsWith('kind-')
+                ? ' mvp_tag--kind mvp_tag--' + tag.tone
+                : tag.tone === 'muted'
+                  ? ' mvp_tag--muted'
+                  : ''
+      return 'mvp_tag' + tone + (tag.inferred === true ? ' mvp_tag--inferred' : '')
+    }
+
+    exports.capabilityTags = capabilityTags
+    exports.tagClassOf = tagClassOf
+
+  })
+
+  // -------------------------------------------------------- usage-view
+  define("usage-view", function (require, module, exports) {
+    /**
+     * Token-usage strip with the one-click exports.
+     *
+     * The strip renders the ledger's today/week/month/total buckets and links the
+     * two CSV endpoints. It is an inner piece of the settings section: the section
+     * supplies the translator and the usage store instance.
+     *
+     * @module client-src/usage-view
+     */
+
+    const React = require('react')
+    const h = React.createElement
+
+    const { API } = require("constants")
+    const { formatTokens } = require("pure")
+    const { useSource } = require("hooks")
+
+    /** Render one [in, out] window as "输入 x · 输出 y". */
+    function rangeText(range, t) {
+      if (!Array.isArray(range) || range.every((value) => value === 0)) return t('usage.none')
+      const input = (range[0] ?? 0) + (range[2] ?? 0) + (range[3] ?? 0)
+      const output = range[1] ?? 0
+      return t('usage.range', {
+        input: formatTokens(input),
+        output: formatTokens(output),
+        total: formatTokens(input + output),
+      })
+    }
+
+    /** Trigger a same-origin download without leaving the page. */
+    function download(href) {
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.rel = 'noopener'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+    }
+
+    exports.UsageToolbar = function UsageToolbar({ usage, t, features }) {
+      const state = useSource(usage)
+      const supported = features.length === 0 || features.includes('usage')
+      const ranges = state.snapshot?.ranges
+      const computing = state.snapshot?.computing === true
+      return h(
+        'div',
+        { className: 'mvp_usage' + (supported ? '' : ' mvp_usage--off') },
+        h(
+          'div',
+          { className: 'mvp_usageHead' },
+          h('span', { className: 'mvp_usageTitle' }, t('usage.title')),
+          computing ? h('span', { className: 'mvp_usageComputing' }, t('usage.computing')) : null,
+          h(
+            'span',
+            { className: 'mvp_usageActions' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'mvp_button',
+                title: t('usage.exportUsageTitle'),
+                onClick: () => download(`${API}/export?type=usage`),
+              },
+              t('usage.exportUsage'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'mvp_button',
+                title: t('usage.exportModelsTitle'),
+                onClick: () => download(`${API}/export?type=models`),
+              },
+              t('usage.exportModels'),
+            ),
+          ),
+        ),
+        supported
+          ? h(
+              'div',
+              { className: 'mvp_usageRanges' },
+              h(
+                'span',
+                { className: 'mvp_stat', title: t('usage.todayTitle') },
+                h('span', { className: 'mvp_statLabel' }, t('usage.today')),
+                h('span', { className: 'mvp_statValue' }, rangeText(ranges?.today, t)),
+              ),
+              h(
+                'span',
+                { className: 'mvp_stat', title: t('usage.weekTitle') },
+                h('span', { className: 'mvp_statLabel' }, t('usage.week')),
+                h('span', { className: 'mvp_statValue' }, rangeText(ranges?.week, t)),
+              ),
+              h(
+                'span',
+                { className: 'mvp_stat', title: t('usage.monthTitle') },
+                h('span', { className: 'mvp_statLabel' }, t('usage.month')),
+                h('span', { className: 'mvp_statValue' }, rangeText(ranges?.month, t)),
+              ),
+              h(
+                'span',
+                { className: 'mvp_stat mvp_stat--total', title: t('usage.totalTitle') },
+                h('span', { className: 'mvp_statLabel' }, t('usage.total')),
+                h('span', { className: 'mvp_statValue' }, rangeText(ranges?.total, t)),
+              ),
+            )
+          : h('div', { className: 'mvp_usageHint' }, t('usage.hostStale')),
+        state.error !== null
+          ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn' }, state.error)
+          : null,
+      )
+    }
+
+  })
+
+  // -------------------------------------------------------- entry
+  define("entry", function (require, module, exports) {
+    /**
+     * Plugin entry: store wiring, facts inputs and effect registration.
+     *
+     * Assembled with the other modules by `scripts/build-client.mjs`; the bundle
+     * factory returns `{ inject, apply }` exactly like the original single-file
+     * bundle, but every subsystem now lives in its own module.
+     */
+
+    const React = require('react')
+    const h = React.createElement
+
+    const { NS, ENTRY, SECTION_ID } = require("constants")
+    const { DICT } = require("dict")
+    const { CSS } = require("css")
+    const { createCatalog, createOverrides, createUsageApi, createVerifyApi } = require("catalog-store")
+    const { makeSection } = require("settings-section")
+    const { installComposerFilter } = require("composer-filter")
 
     const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.session']
 
@@ -2187,6 +3174,8 @@ window.__ModuleLoader__.load({
       const form = ctx.configForms.get(ENTRY)
       const catalog = createCatalog(ctx)
       const overrides = createOverrides()
+      const usage = createUsageApi()
+      const verify = createVerifyApi()
 
       ctx.effect(() => {
         const disposers = []
@@ -2194,19 +3183,15 @@ window.__ModuleLoader__.load({
           ctx.on('connection/reset', () => {
             catalog.refresh()
             overrides.load()
+            usage.refresh()
           }),
         )
         if (ctx.remote !== undefined && typeof ctx.remote.$on === 'function') {
-          // A route change can alter capabilities (an adapter may report a new
-          // effort ladder), so that read bypasses the Host-side cache.
           disposers.push(
             ctx.remote.$on('llm/adapters-updated', () => {
               catalog.refresh()
             }),
           )
-          // Settings and credential writes can also change what the registry
-          // knows, but hiding a model writes settings too — a normal read lets
-          // the Host cache absorb that write instead of re-probing every model.
           for (const event of [
             'settings/document-updated',
             'credentials/record-updated',
@@ -2230,7 +3215,7 @@ window.__ModuleLoader__.load({
         }
       }, 'model-visibility: catalog refresh')
 
-      const Section = makeSection(form, catalog, overrides)
+      const Section = makeSection(form, catalog, overrides, usage, verify)
       ctx.effect(
         () =>
           ctx.slots.inject('settings.section', () =>
@@ -2253,6 +3238,12 @@ window.__ModuleLoader__.load({
       })
     }
 
-    return { inject, apply }
+    exports.inject = inject
+    exports.apply = apply
+
+  })
+
+    const entryModule = moduleRequire("entry")
+    return { inject: entryModule.inject, apply: entryModule.apply }
   },
 })

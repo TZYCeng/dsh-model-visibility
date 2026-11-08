@@ -1,7 +1,7 @@
 # HANDOVER — dsh-model-visibility
 
 > 给下一个接手的人 / AI。目标：**不用重新啃 DSH 源码就能继续加功能**。
-> 当前版本 **1.7.0**（真实能力探测 + 生成类模型标注 + 官方校正 + 请求侧图像准入对齐 + 名称搜索 / 能力筛选 + 整组折叠 + 强制重新获取能力）。
+> 当前版本 **1.10.0**（学习快照联网校验 + token 用量账本与导出 + client 模块化拆分 + 前述全部能力；静态内置目录已删除）。
 
 ---
 
@@ -20,6 +20,9 @@
 5. **整组折叠**：设置页每组标题左侧有折叠箭头，工具栏有「折叠全部分组 / 展开全部分组」。折叠只影响渲染，不写入 `hidden`；状态在浏览器 `localStorage`（key `dsh-model-visibility:collapsed-groups:v1`），换浏览器 / 清缓存会丢，这是故意的，不污染 Host 设置。
 6. **强制重新获取能力**：工具栏「重新获取能力」走 `?reload=1`，清空能力缓存、探测缓存、图像准入缓存和 in-flight 扫描后重读。用于上游有、页面偶发没识别到的情况；不能强迫 pi-ai 适配器重建它自己的快照，见决策 12。
 
+7. **token 用量账本**：设置页顶部常驻今天 / 本周 / 本月 / 总计 token，数据来自会话日志（`lib/usage-ledger.js`，增量扫描），并有两个一键 CSV 导出（用量 / 模型清单）。
+8. **联网校验**：设置页面板选择一个「校验员」模型，先拉 models.dev / OpenRouter 公开目录，再分批问校验员其余模型的类型 / 上下文 / 模态 / 档位；结果写入学习快照 `learned.json` 与（开关默认开）提供商配置；同名模型以后直接命中快照缓存（`lib/check-catalog.js`）。
+
 它**不接管**输入框的模型座位，因此官方的「模型 / 推理等级」菜单、`dsh-codex-effort-slider`、`dsh-model-effort-defaults` 都能和它共存。
 
 ---
@@ -34,7 +37,7 @@
 | Host 行 id / 设置命名空间 | `model-visibility` |
 | 客户端插件 id | `dsh-model-visibility` |
 | 依赖的服务 | Host：`llm`、`connection`，可选 `settings`、`credentials`；Client：`slots`、`locale`、`configForms`、`remote`、`remote.session`、`modelDirectories` |
-| 构建 | 无。`client.js` 是手写 ModuleLoader bundle，直接加载 |
+| 构建 | `npm run build`（`scripts/build-client.mjs` 把 `client-src/*.mjs` 机械拼装成 `client.js`）；产物照旧提交进仓库 |
 | 测试 | `npm test`（Node 内置 test runner） |
 
 profile 里的接线（不要改名）：
@@ -50,6 +53,11 @@ profile 里的接线（不要改名）：
 ```
 index.js                     Host 半：hidden 持久化 + 影子副本 + /models 与 /overrides 路由 + 图像闸门安装
 lib/model-info.js            Host 能力合并（纯函数 + 缓存），单元测试直接测它
+lib/model-id.js              model-id 归一化与别名变体（各匹配层共用）
+lib/learned-catalog.js       学习快照 learned.json：读写、mtime 失效、归一化 id 索引
+lib/check-catalog.js         联网校验编排：公开目录双源、校验员分批、写回、token 记账
+lib/usage-ledger.js          token 用量账本：zstd 帧解码、投影级折叠、按天/模型增量账
+lib/export-csv.js            用量 / 模型清单两个 CSV 生成器（纯函数）
 lib/model-overrides.js       手动覆盖的校验与 overrides.json 读写（按 mtime 失效）
 lib/provider-write.js        把可对应的手动字段写回 llm-pi-ai Provider 配置（settings.mutate 路径操作）
 lib/provider-probe.js        Host 中转站探测：读配置、解凭据、GET /models 与 /api/pricing
@@ -58,7 +66,8 @@ lib/capability-corrections.js  厂商文档校正表（GLM-5.3 纯文本等）�
 lib/image-input-gate.js      pi-ai 适配器 modelOf 包装（请求侧图像准入，可逆）
 lib/model-catalog.js         由 scripts/build-catalog.mjs 生成的 models.dev 快照（勿手改）
 scripts/build-catalog.mjs    重新生成目录
-client.js                    浏览器半：设置页 + 筛选 + 能力标签（按类型着色）+ 整组折叠 / 强制重取 + 目录过滤 + 手动覆盖编辑器
+client-src/*.mjs             浏览器半源码，15 个模块（dict / css / pure / format 等），index.mjs 是入口
+client.js                    构建产物（勿手改），npm run build 重新生成
 cordis.patch.yml             Host 行声明
 locale/zh.json, en.json      插件列表标题/描述
 docs/*.png                   设置页截图（v1.3；v1.4 截图因沙箱 ACL 暂未落盘）
@@ -160,6 +169,8 @@ package.json                 bundle 清单 / exports / files / npm test
 
 ```ts
 type ModelRecord = {
+  learned?: { id: string; verifiedAt?: number; origins?: string[]; checker?: object }  // 命中的学习快照行
+  //（snapshot 是 sources 的一个取值，原来写作 catalog）
   id: string
   name: string
   description?: string
@@ -207,6 +218,10 @@ type Catalog = {
 - `GET /api/dsh-model-visibility/models?reload=1`（或 `&fresh=1&reload=1`）—— 先 `service.invalidate()` + `probe.invalidate()` + `clearFallbackProfiles()` + `imageInput.refresh()` + `overrides.invalidate()`，再重读；旧 in-flight 结果因 generation 变化被丢弃。页面「重新获取能力」用这条。
 - `GET /api/dsh-model-visibility/overrides` —— `200 { ok: true, value: { overrides: [...] } }`。
 - `POST /api/dsh-model-visibility/overrides` —— 一条覆盖（缺失字段表示不覆盖）或 `{ remove: true, provider, model }`；可选 `applyToProvider`（默认 true）把 `input` / `contextWindow` / `reasoningEfforts` 写进 Provider 配置。响应 `{ ok: true, value: { overrides, provider: { written, fields, ns?, reason?, message? } } }`；成功后清能力缓存、Provider profile 缓存与图像准入缓存。请求体不是 JSON → `400 overrides/body`；非 GET/POST → `405 overrides/method`；回写失败不改变 HTTP 状态（本地覆盖仍然生效，原因放在 `provider.reason`）。
+- `GET /api/dsh-model-visibility/usage` —— 用量快照 `{ ranges: { today, week, month, total }, days, byModel, computing, progress }`；每次 GET 触发节流重扫（60s），POST 立即重扫。
+- `GET /api/dsh-model-visibility/export?type=usage|models` —— CSV 附件下载。
+- `GET /api/dsh-model-visibility/verify` —— `{ state }`（进度/批次/token）+ `{ learned }` meta；`POST { provider, model, writeBack? | cancel: true }`。
+- 能力响应里的 `catalog` 已改名为 `learned`（`{ models, updatedAt?, checker?, features }`）。
 - 成功：`200 { "ok": true, "value": Catalog }`
 - 失败：`500 { "ok": false, "error": { code: "model-info/failed", message } }`
 - 路由通过 `ctx.connection.fetch.register` 注册，走 DSH 的同源认证（owner peer），**不要**改成裸 `http.Server`。
@@ -245,6 +260,10 @@ type Catalog = {
     覆盖值是结构化对象（类型 + 数组 + 可选档位），不是扁平开关；它由设置页频繁局部修改，而 Config 的一次写入会重写整份 `cordis.patch.yml`（profile 自愈 / 插件重装还会清掉该行）。独立文件还能让请求侧同步读取、支持手改，并按 mtime 自动生效；代价是多一个路由与一个校验模块，但这部分逻辑可以完全单测覆盖。
 15. **回写为什么走 `settings.mutate` 的路径操作，而不是 `update` 整个 Provider？**
     `update` 的对象合并会把数组整体替换：拿到的是已经展开默认值的 `describe().value`，写回去会把未声明的字段一起固化，还可能冲掉并发写入。`mutate` 用 `['providers', id, 'models', String(index), field]` 只改目标字段；`providers` 是 volatile dict，路径合法。不能用 `modelOverrides`：Provider 一旦有 `models` 数组，适配器会明确拒绝同时设置 `modelOverrides`。写入前先 `describe()` 找 `ns`（优先含 `pi-ai`）和模型下标；找不到就返回原因（`provider-missing` / `models-missing` / `model-missing`），本地覆盖继续生效。`kind` 与 `defaultEffort` 没有对应的 per-model Provider 字段（`reasoning` 默认档是 per-Provider），只有 `off` 的档位会被 Provider schema 拒绝（“offers no level beyond off”），这三类都只留在本地文件。成功写入的字段随即从 `overrides.json` 剥离，避免同一事实存两份；旧 Host 不认识 `applyToProvider` 时忽略该字段，行为退化为纯本地覆盖。
+16. **为什么删除静态内置目录、改为联网校验 + 学习快照？** 中转站大多不公布上下文/模态/档位，models.dev 快照快速过时且只能手动重生成。校验把「公开目录基准（免密钥）」与「用户自选的校验员模型」分开：前者标注可公开比对的声明，后者覆盖冷门模型；`unknown` 一律允许，绝不猜。结果落 `learned.json`（键 = 归一化 id），跨路由同名模型直接复用。写回开关默认开：能对应 provider schema 的字段直接写进配置，所有表面读同一份事实。
+17. **为什么自建用量账本而不是读官方投影缓存？** token-meter 投影是按会话的总计，没有按天分桶与路由归属；usage-ledger 直接折叠会话日志（语义与投影逐位一致，测试对账验证），所以能出今天/周/月/总计与按模型分解。增量扫描以 (mtime, size) 为键，成本只随改动走。
+18. **为什么历史只有本月精确、更早按会话创建日粗算？** 全史精确回填要解压全部日志（约 119MB / 575 个会话，首次几十秒）；总量始终精确，粗算只影响较早的日期归属。
+19. **为什么拆成 client-src 而不用 tsdown chunks？** 组合脚本只发 `client.js` 入口，异步 chunk 要大改结构且收益有限；`scripts/build-client.mjs` 用机械文本变换（受限 import/export 语法 + 纯文本拼接）产出单文件 bundle，官方 Loader 协议零风险，受限语法由构建脚本硬断言。
 
 ---
 
@@ -367,6 +386,11 @@ Host 的 `console` 输出在 DSH 桌面进程里；没有独立日志文件。�
 23. **回写后必须刷新 profile 缓存**：Provider 的 `input` / `contextWindow` 改动不一定改变探测指纹，但 `probe.profiles()` 是同步图像闸门的数据源。写完调用 `clearFallbackProfiles()` + `probe?.noteSettingsChanged()`（`noteSettingsChanged` 会无条件刷新 `cached.profiles`），否则页面已经显示新值、输入框却仍按旧的 `input` 拒绝图片。
 24. **不要把 `off` 单独写进 `reasoningEfforts`**：Provider schema 要求至少有一个非 `off` 的档位（“offers no level beyond off”），只勾 `off` 时回写必须跳过思考强度、把档位留在本地覆盖里；否则整个 `mutate` 会被 schema 拒绝，连模态和上下文也一起写不进去（当前实现是按字段发 ops，但未来合并成一次多字段校验时要记得这个约束）。
 25. **`client.js` 的 `id` 必须逐字等于 `package.json` 的 `name`**：Host 按包名请求浏览器模块，Loader 找不到同 id 的注册就报「loaded without registering」。改名成作用域包（`dsh-model-visibility` → `@tzyc/dsh-model-visibility`）时，`client.js` 第 2 行、`cordis.patch.yml` 的 `name`、profile patch 里的插件行必须一起改；只改其中两处就会出现「服务端能加载、页面同步失败」。改完用 `node` 跑一遍假 Loader 模拟（见 `test/` 之外的临时脚本思路）或直接重启验证。
+26. **先 `npm run build` 再 Ctrl+R**：改 `client-src/` 忘了构建会一直跑旧 bundle；构建脚本同样检查所有受限语法。
+27. **会话日志是逐行 zstd 帧拼接**（不是单流压缩）：整文件 `zstdDecompressSync` 只解出第一行；必须按帧扫描（魔法数 + 帧头/块头步行）逐帧解。Node 24 的 `zlib.zstd*` 原族够用，不需要依赖。
+28. **用量共同体不 double count**：每文件的分桶里 `*` 是当天合计的便利行，聚合（天/模型/区间）必须跳过它。
+29. **校验批的 JSON 容错**：允许 ``` 围栏与前后闲话（`extractJsonBlock`），但只接受本批 id 的条目，`kind` 必须在白名单里，模态经 `normalizeModalities` 过滤；`unknown` 返回 null 事实。
+30. **公开目录请求免凭据、不跟随重定向**：models.dev / OpenRouter 各自 15s 超时，失败按空目录处理（进度照常继续）。
 
 ---
 
