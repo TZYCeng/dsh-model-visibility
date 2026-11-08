@@ -1,5 +1,7 @@
 const React = require('react')
 
+import { hiddenSetOf } from './format.mjs'
+
 function subscribeOf(source) {
   return (fn) => source.subscribe(fn)
 }

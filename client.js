@@ -507,8 +507,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
-    const { API } = require("constants")
-    const { formatTokens } = require("pure")
+    const { formatTokens, checkerRoutesOf } = require("pure")
     const { useSource } = require("hooks")
 
     const PICK_KEY = 'dsh-model-visibility:checker-pick:v1'
@@ -534,17 +533,6 @@ window.__ModuleLoader__.load({
       } catch (_error) {
         // Storage availability is optional for this preference.
       }
-    }
-
-    /** Routes with at least one model, from a loaded catalog — checker choices. */
-    exports.checkerRoutesOf = function checkerRoutesOf(groups) {
-      const routes = []
-      for (const group of groups ?? []) {
-        if (group === null || typeof group !== 'object') continue
-        const models = Array.isArray(group.models) ? group.models : []
-        if (models.length > 0) routes.push({ id: group.id, name: group.name ?? group.id })
-      }
-      return routes
     }
 
     exports.VerifyPanel = function VerifyPanel({ verify, catalog, t, canUse }) {
@@ -726,8 +714,6 @@ window.__ModuleLoader__.load({
           : null,
       )
     }
-
-    void API
 
   })
 
@@ -1761,6 +1747,8 @@ window.__ModuleLoader__.load({
   define("hooks", function (require, module, exports) {
     const React = require('react')
 
+    const { hiddenSetOf } = require("format")
+
     function subscribeOf(source) {
       return (fn) => source.subscribe(fn)
     }
@@ -2188,20 +2176,8 @@ window.__ModuleLoader__.load({
       return routes
     }
 
-  })
-
-  // -------------------------------------------------------- section-parts
-  define("section-parts", function (require, module, exports) {
-    const { bucketOf, kindOf } = require("format")
-
-    function countKinds(models) {
-      const counts = { chat: 0, image: 0, video: 0, other: 0 }
-      for (const model of models || []) counts[bucketOf(kindOf(model))] += 1
-      return counts
-    }
-
     /** Compact label + tooltip for one provider probe diagnostic. */
-    function probeOf(state, group, t) {
+    exports.probeOf = function probeOf(state, group, t) {
       const list = Array.isArray(state.providers) ? state.providers : []
       const diagnostic = list.find((item) => item && item.id === group.id)
       if (diagnostic === undefined) return null
@@ -2239,7 +2215,10 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const { keyOf, kindOf, isGenerationKind, providerLabel, countModels, readCollapsedGroups, persistCollapsedGroups, overrideKeyOf } = require("format")
-    const { computeFilteredGroups, countKinds } = require("pure")
+    const { computeFilteredGroups, countKinds, probeOf } = require("pure")
+    const { capabilityTags, tagClassOf } = require("tags")
+    const { ModelOverrideEditor, providerWriteNote } = require("override-editor")
+    const { useHidden, useSource } = require("hooks")
     const { UsageToolbar } = require("usage-view")
     const { VerifyPanel } = require("checker-view")
 
@@ -2818,7 +2797,7 @@ window.__ModuleLoader__.load({
 
   // -------------------------------------------------------- tags
   define("tags", function (require, module, exports) {
-    const { kindOf, sourceOf, isInferredSource, formatContext, effortNames, defaultEffortName, modalityNames, modalityLabel, resolutionOf, manualFieldsOf } = require("format")
+    const { kindOf, sourceOf, sourceLabel, isInferredSource, formatContext, effortNames, defaultEffortName, modalityNames, modalityLabel, resolutionOf, manualFieldsOf } = require("format")
 
     function manualTag(model, t) {
       return manualFieldsOf(model).length === 0

@@ -1,4 +1,4 @@
-import { kindOf, sourceOf, isInferredSource, formatContext, effortNames, defaultEffortName, modalityNames, modalityLabel, resolutionOf, manualFieldsOf } from './format.mjs'
+import { kindOf, sourceOf, sourceLabel, isInferredSource, formatContext, effortNames, defaultEffortName, modalityNames, modalityLabel, resolutionOf, manualFieldsOf } from './format.mjs'
 
 function manualTag(model, t) {
   return manualFieldsOf(model).length === 0

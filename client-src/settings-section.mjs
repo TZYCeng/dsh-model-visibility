@@ -2,7 +2,10 @@ const React = require('react')
 const h = React.createElement
 
 import { keyOf, kindOf, isGenerationKind, providerLabel, countModels, readCollapsedGroups, persistCollapsedGroups, overrideKeyOf } from './format.mjs'
-import { computeFilteredGroups, countKinds } from './pure.mjs'
+import { computeFilteredGroups, countKinds, probeOf } from './pure.mjs'
+import { capabilityTags, tagClassOf } from './tags.mjs'
+import { ModelOverrideEditor, providerWriteNote } from './override-editor.mjs'
+import { useHidden, useSource } from './hooks.mjs'
 import { UsageToolbar } from './usage-view.mjs'
 import { VerifyPanel } from './checker-view.mjs'
 

@@ -12,8 +12,7 @@
 const React = require('react')
 const h = React.createElement
 
-import { API } from './constants.mjs'
-import { formatTokens } from './pure.mjs'
+import { formatTokens, checkerRoutesOf } from './pure.mjs'
 import { useSource } from './hooks.mjs'
 
 const PICK_KEY = 'dsh-model-visibility:checker-pick:v1'
@@ -39,17 +38,6 @@ function persistPick(pick) {
   } catch (_error) {
     // Storage availability is optional for this preference.
   }
-}
-
-/** Routes with at least one model, from a loaded catalog — checker choices. */
-export function checkerRoutesOf(groups) {
-  const routes = []
-  for (const group of groups ?? []) {
-    if (group === null || typeof group !== 'object') continue
-    const models = Array.isArray(group.models) ? group.models : []
-    if (models.length > 0) routes.push({ id: group.id, name: group.name ?? group.id })
-  }
-  return routes
 }
 
 export function VerifyPanel({ verify, catalog, t, canUse }) {
@@ -231,5 +219,3 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
       : null,
   )
 }
-
-void API

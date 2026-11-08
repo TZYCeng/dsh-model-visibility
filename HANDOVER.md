@@ -427,17 +427,24 @@ npm test
 
 ---
 
-## 10. 发布
+## 10. 发布（每次版本更新必须完整走完 GitHub + npm 两件事）
+
+每一次升版本，下面五步缺一不可（这也是历史踩坑后的标准链路，照抄即可）：
 
 ```powershell
-cd D:\\code\\dsh-model-visibility
-git add -A
-git commit -m "feat: real capability sources, relay probe, generation model tags"
-git push origin main
+cd D:\code\dsh-model-visibility
+npm test                      # 必须全绿
+npm run build                 # client-src 变化后重新拼装 bundle
+npm pack --dry-run            # 核对 files 清单（client-src 已加入 files）
 ```
+**① 更新版本号与文档** → `package.json` 的 `version`、README/HANDOVER 里的版本徽章与手工清单。
+**② commit + tag + push GitHub**：`git commit` + `git tag v1.10.0` + `git push origin main` + `git push origin v1.10.0`（tag 为 GMT 命名 v<版本>）。
+**③ 打 tar 包**：`npm pack --pack-destination .publish`（生成 `tzyc-dsh-model-visibility-<v>.tgz`）。
+**④ GitHub Release**：用 REST（Bearer 通过 `git credential fill` 拿 device token；`.publish/release.mjs` 已写好全流程）创建 tag 对应 release，资源同时上传两个：**带版本号**的 `dsh-model-visibility-<v>.tgz` 与**不带版本号**的 `dsh-model-visibility.tgz`——市场条目的 `releases/latest/download/...` 依赖不带版本名，否则安装路径直接 404。
+**⑤ npm publish**：作用域名 `@tzyc/dsh-model-visibility`。直发不通就按下面 token 流程；发完后核对 `npm view @tzyc/dsh-model-visibility version` 与从 registry 下载包检查 `client.js` 里 `id` 是作用域名。
 
-- 版本号在 `package.json`；当前 `1.9.1`。
-- 发版三步：改版本号与 README/HANDOVER → `npm test` → commit + tag `v1.9.1` + push → `npm pack --pack-destination .publish` → 建 Release 并上传 **不带版本号** 的 `dsh-model-visibility.tgz`（市场条目的 `releases/latest/download/...` 因此永远指向最新包），再补一份带版本号的产物。
+版本号在 `package.json`；当前 `1.10.0`。
+- 发版五步见本节开头（改版本号 → commit+tag+push → pack → GitHub Release 双资源 → npm publish）。1.10.0 起 `client-src` 已加入 `files`，tarball 里源码与产物一起发布。
 - `files` 已包含 `lib`；`scripts` / `test` / `.tools` 不进包。
 - `docs/` 只留 `settings-page.png`、`capability-tags.png`（1.9.0 起）与 `icon-180.png`；换截图时同步改 `screenshots.json` 与 README 的 `<img>`。如果重新截图，先确认目录可写（见坑 18）。
 - npm 发布见 10.2；名字是作用域 `@tzyc/dsh-model-visibility`，`cordis.patch.yml` 里的 `name` 必须与 `package.json` 的 `name` 完全一致，否则 bundle 安装时 loader 找不到包。
@@ -475,8 +482,9 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - 安装：`install_bundle target = @tzyc/dsh-model-visibility`。
 - 1.9.0 已发布：2026-11-03T15:47:15Z，`shasum 3d2fcaf3d7fbfe607c3e1e88de991092b1569224`，`latest` = `1.9.0`，21 个文件 / 288.2 kB。npm 的 staged publish 会在版本列表里留下一个 `0.0.0-stage` 占位版本（网站标「Temporary package placeholder for staged publishing」），`latest` 仍指向 `1.9.0`，不用处理。
 - 1.9.1：修复包名改成作用域后 `client.js` 仍注册 `dsh-model-visibility` 导致的启动报错「loaded without registering "@tzyc/dsh-model-visibility"」；前端注册 id 现在与 `package.json` 的 `name` 一致（见坑 25）。只影响浏览器半，Host 半无需改动。
+- 1.10.0：学习快照联网校验（删静态模型目录）、token 用量账本 + 双 CSV 导出、client-src 模块化拆分（`npm run build` 产 bundle，Hygiene 测试守门）。发布记录见下。
 - 1.9.1 已发布：npm 2026-11-04T04:52:17Z，`shasum 1f9a12b8051ee498ed4f1901f4af37e225538ab7`，`latest` = `1.9.1`，21 个文件 / 288.2 kB（包内 `package/client.js` 第 2 行确认是 `id: '@tzyc/dsh-model-visibility'`）；GitHub Release `v1.9.1`（id `433528919`）带 `dsh-model-visibility-1.9.1.tgz` 与不带版本号的 `dsh-model-visibility.tgz`，均 288246 B，`releases/latest/download/dsh-model-visibility.tgz` 回 206。**npm 上的 1.9.0 是坏的（注册 id 仍是旧名），1.9.1 才是第一个能 npm 安装的版本。**
-- 本机 `npm publish` 会被要求 OTP（`EOTP`），而 npm 会把一次性网页地址在输出里打码（`https://www.npmjs.com/auth/cli/***`）。两条可行路径：① 在仓库里自己跑 `npm publish`，浏览器完成认证；② 用带 2FA bypass 的 granular token，写进一份临时 userconfig（`npm publish --userconfig .publish/npmrc`，该文件在 gitignore 内），不要覆盖用户自己的 `~/.npmrc`。
+- **npm 2FA / token**：帐号开了 2FA，CLI 直发会 `EOTP` 且 npm 把一次性网页地址打码（`https://www.npmjs.com/auth/cli/****`），自动流程无法走通。两条路：① 我方用户在仓库里手跑 `npm publish`，浏览器完成认证后终端自动继续（若 npm 给出的链接已在输出里打码则弃用）；② 推荐 —— 给一段 **granular token（带 2FA-bypass 勾选的 expiry ≤ 7 天）**，把它写进临时 userconfig（`.publish/npmrc`，gitignore 内）：`npm publish --userconfig .publish/npmrc`，发布后立即删除临时文件；不要覆盖用户自己的 `~/.npmrc`。若 token 失效或用完，向项目组要新的一枚。
 - 发布后核对：`npm view @tzyc/dsh-model-visibility version` 与 `npm pack @tzyc/dsh-model-visibility@1.9.0` 后看 `package/cordis.patch.yml` 里的 `name` 是否为作用域名。CDN 传播可能 1–3 分钟，期间 registry 仍回 404，属正常。
 
 ---
