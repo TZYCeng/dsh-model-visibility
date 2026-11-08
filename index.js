@@ -29,6 +29,9 @@ import z from '@deepseek-ai/schemastery'
 import { createModelInfoService } from './lib/model-info.js'
 import { createLearnedCatalog } from './lib/learned-catalog.js'
 import { createOverrideStore } from './lib/model-overrides.js'
+import { createCapabilityVerifier } from './lib/check-catalog.js'
+import { toModelListCsv, toUsageCsv } from './lib/export-csv.js'
+import { createUsageLedger } from './lib/usage-ledger.js'
 import { createProviderProbe, readProviderProfiles } from './lib/provider-probe.js'
 import { stripWrittenFields, writeCapabilities } from './lib/provider-write.js'
 import { installImageInputGate } from './lib/image-input-gate.js'
@@ -280,6 +283,36 @@ export function apply(ctx, config) {
     })
     scope.effect(() => () => imageInput.dispose(), 'model-visibility: image input gate')
 
+    // Token-usage ledger behind the page's stats strip: session logs are read
+    // incrementally in a background pass, the check sweep records its own
+    // spend into the same buckets.
+    const usageLedger = createUsageLedger({ logger })
+    let lastRescanAt = -Infinity
+    const nowMs = () => Date.now()
+    const maybeRescan = () => {
+      if (usageLedger.isScanning()) return
+      if (nowMs() - lastRescanAt < 60_000) return
+      lastRescanAt = nowMs()
+      usageLedger.rescan().catch(() => {})
+    }
+
+    // The online capability verifier: the user's chosen checker model plus
+    // two public catalogs fill the learned snapshot and (optionally) write
+    // back into the provider settings documents.
+    const verifier = createCapabilityVerifier({
+      llm: scope.llm,
+      settings,
+      learned: learnedService,
+      ledger: usageLedger,
+      logger,
+      onApplied: () => {
+        clearFallbackProfiles()
+        probe?.noteSettingsChanged()
+        service.invalidate()
+        imageInput.refresh()
+      },
+    })
+
     /** Answer with JSON; the route is diagnostics-friendly on purpose. */
     const json = (value, status = 200) =>
       new Response(JSON.stringify(value), {
@@ -449,6 +482,134 @@ export function apply(ctx, config) {
           },
         }),
       'model-visibility: override route',
+    )
+
+    // Token-usage read for the page's stats strip; the background scan runs
+    // whenever the ledger could have grown and the page asks for a read.
+    scope.effect(
+      () =>
+        connection.fetch.register({
+          path: `${API}/usage`,
+          methods: ['GET', 'POST'],
+          requestBody: 'buffered',
+          async fetch(request) {
+            if (String(request.method || 'GET').toUpperCase() === 'POST') {
+              lastRescanAt = -Infinity
+            }
+            maybeRescan()
+            try {
+              return json({ ok: true, value: usageLedger.read() })
+            } catch (error) {
+              return json(
+                {
+                  ok: false,
+                  error: {
+                    code: 'usage/failed',
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                },
+                500,
+              )
+            }
+          },
+        }),
+      'model-visibility: usage route',
+    )
+
+    // One-click exports: the token ledger and the visible-model capability
+    // list, both as CSV downloads through the same-origin route.
+    scope.effect(
+      () =>
+        connection.fetch.register({
+          path: `${API}/export`,
+          methods: ['GET'],
+          requestBody: 'buffered',
+          async fetch(request) {
+            const params = new URL(request.url).searchParams
+            const which = params.get('type') === 'models' ? 'models' : 'usage'
+            let body
+            let name
+            try {
+              if (which === 'usage') {
+                body = toUsageCsv(usageLedger.read())
+                name = `model-visibility-usage-${new Date().toISOString().slice(0, 10)}.csv`
+              } else {
+                const catalog = await service.read()
+                body = toModelListCsv(catalog, { hidden: liveList() })
+                name = `model-visibility-models-${new Date().toISOString().slice(0, 10)}.csv`
+              }
+            } catch (error) {
+              return json(
+                {
+                  ok: false,
+                  error: {
+                    code: 'export/failed',
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                },
+                500,
+              )
+            }
+            return new Response(body, {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/csv; charset=utf-8',
+                'Content-Disposition': `attachment; filename="${name}"`,
+                'Cache-Control': 'no-store',
+              },
+            })
+          },
+        }),
+      'model-visibility: export route',
+    )
+
+    // The verify sweep: state reads are instant, a start posts and the Host
+    // runs batches in the background without holding the HTTP call open.
+    scope.effect(
+      () =>
+        connection.fetch.register({
+          path: `${API}/verify`,
+          methods: ['GET', 'POST'],
+          requestBody: 'buffered',
+          async fetch(request) {
+            const method = String(request.method || 'GET').toUpperCase()
+            if (method === 'GET') {
+              return json({ ok: true, value: { state: verifier.snapshot(), learned: learnedService.meta() } })
+            }
+            let body
+            try {
+              body = await request.json()
+            } catch (_error) {
+              body = {}
+            }
+            if (body !== null && typeof body === 'object' && body.cancel === true) {
+              verifier.cancel()
+              return json({ ok: true, value: { state: verifier.snapshot() } })
+            }
+            const provider = typeof body?.provider === 'string' ? body.provider : undefined
+            const model = typeof body?.model === 'string' ? body.model : undefined
+            if (provider === undefined || model === undefined) {
+              return json(
+                { ok: false, error: { code: 'verify/params', message: 'provider and model are required' } },
+                400,
+              )
+            }
+            // The sweep runs in the background: the response only reports that
+            // it was accepted, and polling GET observes the progress state.
+            if (!verifier.isRunning()) {
+              verifier
+                .start({ checker: { provider, model }, writeBack: body?.writeBack !== false })
+                .then(() => {
+                  // Learned facts (and possibly provider settings) changed.
+                  service.invalidate()
+                  imageInput.refresh()
+                })
+                .catch(() => {})
+            }
+            return json({ ok: true, value: { state: verifier.snapshot(), accepted: true } })
+          },
+        }),
+      'model-visibility: verify route',
     )
 
     // A route/credential change invalidates both the capability cache and (when

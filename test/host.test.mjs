@@ -79,15 +79,25 @@ function createHarness() {
     { id: 'glm-5.3-flash', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['public'], verifiedAt: 1 },
   ])
 
-  const route = { current: null, overrides: null }
+  const route = {
+    models: null,
+    overrides: null,
+    usage: null,
+    export: null,
+    verify: null,
+  }
   const scope = {
     llm,
     settings,
     connection: {
       fetch: {
         register(value) {
-          if (String(value.path).endsWith('/overrides')) route.overrides = value
-          else route.current = value
+          const path = String(value.path)
+          if (path.endsWith('/overrides')) route.overrides = value
+          else if (path.endsWith('/usage')) route.usage = value
+          else if (path.endsWith('/export')) route.export = value
+          else if (path.endsWith('/verify')) route.verify = value
+          else route.models = value
           return () => {}
         },
       },
@@ -129,8 +139,8 @@ test('the Host route exposes the vendor correction and the gate aligns images', 
   }
   apply(harness.ctx, config)
 
-  assert.ok(harness.route.current !== null)
-  const response = await harness.route.current.fetch(
+  assert.ok(harness.route.models !== null)
+  const response = await harness.route.models.fetch(
     new Request('http://local/api/dsh-model-visibility/models'),
   )
   const body = await response.json()
@@ -164,7 +174,7 @@ test('a hard reload drops the cache and advertises the reload feature', async ()
   })
 
   const read = async (url) => {
-    const response = await harness.route.current.fetch(new Request(url))
+    const response = await harness.route.models.fetch(new Request(url))
     return response.json()
   }
 
@@ -212,7 +222,7 @@ test('the override route persists manual capabilities and feeds the gate', async
   assert.equal(saved.value.overrides.length, 1)
 
   const models = await (
-    await harness.route.current.fetch(
+    await harness.route.models.fetch(
       new Request('http://local/api/dsh-model-visibility/models?fresh=1'),
     )
   ).json()
@@ -268,7 +278,7 @@ test('a manual override is written through to the provider settings', async () =
   assert.equal(harness.settings.calls.length, 1)
 
   const models = await (
-    await harness.route.current.fetch(
+    await harness.route.models.fetch(
       new Request('http://local/api/dsh-model-visibility/models?fresh=1'),
     )
   ).json()
@@ -317,7 +327,7 @@ test('write-through keeps fields with no provider equivalent in the local overri
   )
 
   const models = await (
-    await harness.route.current.fetch(
+    await harness.route.models.fetch(
       new Request('http://local/api/dsh-model-visibility/models?fresh=1'),
     )
   ).json()
