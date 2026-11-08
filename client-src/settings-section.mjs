@@ -32,6 +32,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const hostFeatures =
       catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
     const canEdit = state.source === 'host' && hostFeatures.includes('overrides')
+    const canVerify = state.source === 'host' && hostFeatures.includes('verify')
     const overrideEntries = new Map()
     for (const entry of overrideState.entries) {
       overrideEntries.set(overrideKeyOf(entry), entry)
