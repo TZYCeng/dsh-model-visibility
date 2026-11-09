@@ -1,7 +1,7 @@
 # HANDOVER — dsh-model-visibility
 
 > 给下一个接手的人 / AI。目标：**不用重新啃 DSH 源码就能继续加功能**。
-> 当前版本 **1.10.2**（学习快照联网校验 + token 用量账本与导出 + client 模块化拆分 + 前述全部能力；静态内置目录已删除）。
+> 当前版本 **1.10.3**（学习快照联网校验 + token 用量账本与导出 + client 模块化拆分 + 前述全部能力；静态内置目录已删除）。
 
 ---
 
@@ -443,7 +443,7 @@ npm pack --dry-run            # 核对 files 清单（client-src 已加入 files
 **④ GitHub Release**：用 REST（Bearer 通过 `git credential fill` 拿 device token；`.publish/release.mjs` 已写好全流程）创建 tag 对应 release，资源同时上传两个：**带版本号**的 `dsh-model-visibility-<v>.tgz` 与**不带版本号**的 `dsh-model-visibility.tgz`——市场条目的 `releases/latest/download/...` 依赖不带版本名，否则安装路径直接 404。
 **⑤ npm publish**：作用域名 `@tzyc/dsh-model-visibility`。直发不通就按下面 token 流程；发完后核对 `npm view @tzyc/dsh-model-visibility version` 与从 registry 下载包检查 `client.js` 里 `id` 是作用域名。
 
-版本号在 `package.json`；当前 `1.10.2`。
+版本号在 `package.json`；当前 `1.10.3`。
 - 发版五步见本节开头（改版本号 → commit+tag+push → pack → GitHub Release 双资源 → npm publish）。1.10.0 起 `client-src` 已加入 `files`，tarball 里源码与产物一起发布。
 - `files` 已包含 `lib`；`scripts` / `test` / `.tools` 不进包。
 - `docs/` 只留 `settings-page.png`、`capability-tags.png`（1.9.0 起）与 `icon-180.png`；换截图时同步改 `screenshots.json` 与 README 的 `<img>`。如果重新截图，先确认目录可写（见坑 18）。
@@ -488,6 +488,7 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - 1.10.0 已发布（2026-11-08）：
 - 1.10.1 已发布（2026-11-08）：修复 1.10.0 的 `canVerify` 未定义导致设置页整块空白；npm shasum 见 registry（`npm view @tzyc/dsh-model-visibility@1.10.1 dist.shasum`），GitHub Release `v1.10.1` 双 tarball 就位，`releases/latest/download` 指向 1.10.1。
 - 1.10.2 已发布（2026-11-09）：修设置页空白的真正根因——build-client 的 `export function/class/const` 变换改回「模块内绑定延后 exports 指派」，并加了「bundle 不允许 `exports.NAME = function/class`」守门测试；npm 39 文件 / 696.6 kB，GitHub Release `v1.10.2` 双 tarball，`releases/latest/download` 指向 1.10.2。
+- 1.10.3 已发布（2026-11-09）：修 host-能力横幅永挂的最后一块——client `createCatalog` 的 host 成功发布里漏了 `learned` 字段（还写的是老 key `catalog`），而 settings-section 读的是 `state.learned`，导致 `learned.features` 永远 undefined、两条 host-stale 横幅无论重启多少次都在。改动仅限 client.js 字段名对齐：host 成功分支写 `learned: value.learned ?? null`，official 回退分支写 `learned: null`。
   - npm 2026-11-08T14:34Z，shasum `813d413bb59e927f6fc4d92a58fc727f89d52ec0`，39 个文件 / 695.4 kB，`latest` = 1.10.0；包含 `client-src/` 15 个模块与 4 个新 lib（usage-ledger / check-catalog / learned-catalog / export-csv）；包内 `client.js` 头两行是构建脚注即正确 builder。
   - GitHub Release `v1.10.0`（tag = `6ca3990`）带 `dsh-model-visibility-1.10.0.tgz` 与不带版本号的 `dsh-model-visibility.tgz`，`releases/latest/download` 指向最新包成立。
   - 发布过程中唯一额外 sweet：`package.json` 的 `files` 补进 `client-src`（否则 tarball 缺源码）。

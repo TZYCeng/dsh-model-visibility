@@ -9,7 +9,7 @@
 [![license](https://img.shields.io/badge/license-MIT-3da639?style=flat-square)](LICENSE)
 [![dsh bundle](https://img.shields.io/badge/DeepSeek%20Harness-bundle-4d6bfe?style=flat-square)](package.json)
 [![tests](https://img.shields.io/badge/tests-114%20passing-3da639?style=flat-square)](test)
-[![version](https://img.shields.io/badge/version-1.10.2-4d6bfe?style=flat-square)](https://github.com/TZYCeng/dsh-model-visibility/releases)
+[![version](https://img.shields.io/badge/version-1.10.3-4d6bfe?style=flat-square)](https://github.com/TZYCeng/dsh-model-visibility/releases)
 [![marketplace](https://img.shields.io/badge/awesome--dsh--plugin-listed-8a2be2?style=flat-square)](https://awesome-dsh-plugin.com/p/TZYCeng/dsh-model-visibility/)
 
 </div>

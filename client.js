@@ -111,7 +111,10 @@ window.__ModuleLoader__.load({
               groups: Array.isArray(value.groups) ? value.groups : [],
               failures: Array.isArray(value.failures) ? value.failures : [],
               providers: Array.isArray(value.providers) ? value.providers : [],
-              catalog: value.catalog && typeof value.catalog === 'object' ? value.catalog : null,
+              // The section reads `state.learned` (the learned-snapshot meta with
+              // its feature flags); this store is its only source, so the field
+              // name must stay in lock-step with lib/model-info.js's response.
+              learned: value.learned && typeof value.learned === 'object' ? value.learned : null,
               error: null,
               detailsError: null,
               source: 'host',
@@ -128,7 +131,7 @@ window.__ModuleLoader__.load({
                 groups: value.groups,
                 failures: value.failures,
                 providers: [],
-                catalog: null,
+                learned: null,
                 error: null,
                 detailsError: detail,
                 source: 'catalog',
