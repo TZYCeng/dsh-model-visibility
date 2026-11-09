@@ -1,7 +1,7 @@
 # HANDOVER — dsh-model-visibility
 
 > 给下一个接手的人 / AI。目标：**不用重新啃 DSH 源码就能继续加功能**。
-> 当前版本 **1.10.1**（学习快照联网校验 + token 用量账本与导出 + client 模块化拆分 + 前述全部能力；静态内置目录已删除）。
+> 当前版本 **1.10.2**（学习快照联网校验 + token 用量账本与导出 + client 模块化拆分 + 前述全部能力；静态内置目录已删除）。
 
 ---
 
@@ -443,7 +443,7 @@ npm pack --dry-run            # 核对 files 清单（client-src 已加入 files
 **④ GitHub Release**：用 REST（Bearer 通过 `git credential fill` 拿 device token；`.publish/release.mjs` 已写好全流程）创建 tag 对应 release，资源同时上传两个：**带版本号**的 `dsh-model-visibility-<v>.tgz` 与**不带版本号**的 `dsh-model-visibility.tgz`——市场条目的 `releases/latest/download/...` 依赖不带版本名，否则安装路径直接 404。
 **⑤ npm publish**：作用域名 `@tzyc/dsh-model-visibility`。直发不通就按下面 token 流程；发完后核对 `npm view @tzyc/dsh-model-visibility version` 与从 registry 下载包检查 `client.js` 里 `id` 是作用域名。
 
-版本号在 `package.json`；当前 `1.10.1`。
+版本号在 `package.json`；当前 `1.10.2`。
 - 发版五步见本节开头（改版本号 → commit+tag+push → pack → GitHub Release 双资源 → npm publish）。1.10.0 起 `client-src` 已加入 `files`，tarball 里源码与产物一起发布。
 - `files` 已包含 `lib`；`scripts` / `test` / `.tools` 不进包。
 - `docs/` 只留 `settings-page.png`、`capability-tags.png`（1.9.0 起）与 `icon-180.png`；换截图时同步改 `screenshots.json` 与 README 的 `<img>`。如果重新截图，先确认目录可写（见坑 18）。
@@ -483,7 +483,8 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - 1.9.0 已发布：2026-11-03T15:47:15Z，`shasum 3d2fcaf3d7fbfe607c3e1e88de991092b1569224`，`latest` = `1.9.0`，21 个文件 / 288.2 kB。npm 的 staged publish 会在版本列表里留下一个 `0.0.0-stage` 占位版本（网站标「Temporary package placeholder for staged publishing」），`latest` 仍指向 `1.9.0`，不用处理。
 - 1.9.1：修复包名改成作用域后 `client.js` 仍注册 `dsh-model-visibility` 导致的启动报错「loaded without registering "@tzyc/dsh-model-visibility"」；前端注册 id 现在与 `package.json` 的 `name` 一致（见坑 25）。只影响浏览器半，Host 半无需改动。
 - 1.10.0：学习快照联网校验（删静态模型目录）、token 用量账本 + 双 CSV 导出、client-src 模块化拆分（`npm run build` 产 bundle，Hygiene 测试守门）。
-- 1.10.1：修发布质量问题——`settings-section` 里引用了未定义的局部 `canVerify`，设置页整块渲染为空白；同批做了一次「React shim 渲染冒烟」排查（一次性脚本，未入库），以后 bundle 改动建议先跑一次渲染冒烟再发版。
+- 1.10.1：修了一次「渲染冒烟 + handover」排查过程——发现 1.10.0 的 `settings-section` 引用了未定义的局部 `canVerify`；当时的修复不完整，`build-client.mjs` 的 `export function` → `exports.NAME = function NAME` 变换把模块内部对同一函数/常量的裸调用变成了 ReferenceError（真实的 DevTools 报错：`modalityLabel is not defined` → `slot entry crashed in 'settings.section'`）。教训已气化在两处测试上：`client-hygiene` 多了一条「compile 后 bundle 不允许 `exports.NAME = function/class` 形态」的守门。
+- 1.10.2：把变换改成「let the module-scope binding stay visible and defer the export assignment」（保留模块内名字可达、exports 指派延后），并补了渲染守门测试。发版记录见下。
 - 1.10.0 已发布（2026-11-08）：
 - 1.10.1 已发布（2026-11-08）：修复 1.10.0 的 `canVerify` 未定义导致设置页整块空白；npm shasum 见 registry（`npm view @tzyc/dsh-model-visibility@1.10.1 dist.shasum`），GitHub Release `v1.10.1` 双 tarball 就位，`releases/latest/download` 指向 1.10.1。
   - npm 2026-11-08T14:34Z，shasum `813d413bb59e927f6fc4d92a58fc727f89d52ec0`，39 个文件 / 695.4 kB，`latest` = 1.10.0；包含 `client-src/` 15 个模块与 4 个新 lib（usage-ledger / check-catalog / learned-catalog / export-csv）；包内 `client.js` 头两行是构建脚注即正确 builder。

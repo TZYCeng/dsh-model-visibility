@@ -86,3 +86,16 @@ test('the bundle factory only falls back to the shell require for react', () => 
   const external = [...required].filter((name) => !registry.has(name))
   assert.deepEqual(external, ['react'])
 })
+
+test('exported functions bind as plain declarations, never assigned expressions', () => {
+  const bundle = fs.readFileSync(path.join(root, 'client.js'), 'utf8')
+  // The bug class that blanked the settings page: `exports.NAME = function
+  // NAME` leaves the name resolvable only inside its own function body, so
+  // sibling code in the same module hits a ReferenceError at render time.
+  assert.deepEqual(
+    [...bundle.matchAll(/exports\.[A-Za-z_$][\w$]*\s*=\s*(?:function|class)\b/g)].map(
+      (match) => match[0],
+    ),
+    [],
+  )
+})

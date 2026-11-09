@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({
   define("catalog-store", function (require, module, exports) {
     const { API } = require("constants")
 
-    exports.createCatalog = function createCatalog(ctx) {
+    function createCatalog(ctx) {
       const listeners = new Set()
       let state = {
         status: 'idle',
@@ -178,7 +178,7 @@ window.__ModuleLoader__.load({
      * answers 404 and the editor stays hidden behind the `overrides` feature
      * flag.
      */
-    exports.createOverrides = function createOverrides() {
+    function createOverrides() {
       const listeners = new Set()
       let state = { status: 'idle', entries: [], available: null, error: null }
       let inflight = null
@@ -304,7 +304,7 @@ window.__ModuleLoader__.load({
      * so the client only polls and prints. An older Host answers 404 and the
      * strip renders its "host is stale" hint.
      */
-    exports.createUsageApi = function createUsageApi() {
+    function createUsageApi() {
       const listeners = new Set()
       let state = { status: 'idle', snapshot: null, error: null }
       let inflight = null
@@ -382,7 +382,7 @@ window.__ModuleLoader__.load({
      * keeps the run in memory, so the store just mirrors its snapshots and keeps
      * one 2 s poll alive while a sweep is running (or being observed).
      */
-    exports.createVerifyApi = function createVerifyApi() {
+    function createVerifyApi() {
       const listeners = new Set()
       let state = { status: 'idle', snapshot: null, error: null }
       let inflight = null
@@ -489,6 +489,11 @@ window.__ModuleLoader__.load({
       }
     }
 
+
+    exports.createCatalog = createCatalog
+    exports.createOverrides = createOverrides
+    exports.createUsageApi = createUsageApi
+    exports.createVerifyApi = createVerifyApi
   })
 
   // -------------------------------------------------------- checker-view
@@ -535,7 +540,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    exports.VerifyPanel = function VerifyPanel({ verify, catalog, t, canUse }) {
+    function VerifyPanel({ verify, catalog, t, canUse }) {
       const state = useSource(verify)
       const [pick, setPick] = React.useState(readPick)
       const [message, setMessage] = React.useState(null)
@@ -715,6 +720,8 @@ window.__ModuleLoader__.load({
       )
     }
 
+
+    exports.VerifyPanel = VerifyPanel
   })
 
   // -------------------------------------------------------- composer-filter
@@ -736,7 +743,7 @@ window.__ModuleLoader__.load({
      * model stays listed even while hidden, because the shipped trigger
      * resolves its label from this same catalog.
      */
-    exports.patchDirectoryStore = function patchDirectoryStore(store, form) {
+    function patchDirectoryStore(store, form) {
       const readBase = store.getSnapshot.bind(store)
       const subscribeBase = store.subscribe.bind(store)
       const originalGet = store.getSnapshot
@@ -823,7 +830,7 @@ window.__ModuleLoader__.load({
      * owning the trigger, the Model / Effort rows, and third-party menu
      * enhancements such as the reasoning-effort slider.
      */
-    exports.installComposerFilter = function installComposerFilter(scope, form) {
+    function installComposerFilter(scope, form) {
       const models = scope.modelDirectories
       const original = models.directoryFor
       if (typeof original !== 'function') return
@@ -873,23 +880,26 @@ window.__ModuleLoader__.load({
 
     /* ----------------------------------------------------- settings page */
 
+
+    exports.patchDirectoryStore = patchDirectoryStore
+    exports.installComposerFilter = installComposerFilter
   })
 
   // -------------------------------------------------------- constants
   define("constants", function (require, module, exports) {
     /** Dictionary namespace owned by this plugin. */
-    exports.NS = 'model-visibility'
+    const NS = 'model-visibility'
     /** Host entry id from cordis.patch.yml; also the settings namespace. */
-    exports.ENTRY = 'model-visibility'
+    const ENTRY = 'model-visibility'
     /** Config field persisted by the Host settings document. */
-    exports.FIELD = 'hidden'
+    const FIELD = 'hidden'
     /** Settings section id. */
-    exports.SECTION_ID = 'model-visibility'
+    const SECTION_ID = 'model-visibility'
     /**
      * Same-origin route the Host half registers through `connection.fetch`.
      * Resolved against the page base so a reverse-proxy prefix is preserved.
      */
-    exports.API = (() => {
+    const API = (() => {
       if (typeof document === 'undefined') return '/api/dsh-model-visibility'
       try {
         return new URL('api/dsh-model-visibility', document.baseURI).pathname
@@ -898,11 +908,17 @@ window.__ModuleLoader__.load({
       }
     })()
 
+
+    exports.NS = NS
+    exports.ENTRY = ENTRY
+    exports.FIELD = FIELD
+    exports.SECTION_ID = SECTION_ID
+    exports.API = API
   })
 
   // -------------------------------------------------------- css
   define("css", function (require, module, exports) {
-    exports.CSS = `
+    const CSS = `
     .mvp_page{box-sizing:border-box;width:100%;height:100%;min-height:0;flex-direction:column;display:flex;overflow-y:auto;padding-bottom:24px}
     .mvp_head{flex:none;flex-direction:column;gap:6px;padding:4px 0 14px;display:flex}
     .mvp_title{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
@@ -1151,11 +1167,13 @@ window.__ModuleLoader__.load({
 
     `
 
+
+    exports.CSS = CSS
   })
 
   // -------------------------------------------------------- dict
   define("dict", function (require, module, exports) {
-    exports.DICT = {
+    const DICT = {
       zh: {
         'nav': '模型显示',
         'page.title': '模型显示',
@@ -1582,30 +1600,32 @@ window.__ModuleLoader__.load({
         'provider.account': 'DeepSeek Account',
       },
     }
+
+    exports.DICT = DICT
   })
 
   // -------------------------------------------------------- format
   define("format", function (require, module, exports) {
     const { FIELD } = require("constants")
 
-    exports.keyOf = function keyOf(provider, model) {
+    function keyOf(provider, model) {
       return provider + '/' + model
     }
 
-    exports.hiddenSetOf = function hiddenSetOf(snapshot) {
+    function hiddenSetOf(snapshot) {
       const value = snapshot && snapshot.value
       const list = value && Array.isArray(value[FIELD]) ? value[FIELD] : []
       return new Set(list)
     }
 
-    exports.providerLabel = function providerLabel(group, t) {
+    function providerLabel(group, t) {
       return group.id === 'deepseek-account' ? t('provider.account') : group.name
     }
 
-    exports.COLLAPSE_KEY = 'dsh-model-visibility:collapsed-groups:v1'
+    const COLLAPSE_KEY = 'dsh-model-visibility:collapsed-groups:v1'
 
     /** Group ids whose model lists the page keeps collapsed. */
-    exports.readCollapsedGroups = function readCollapsedGroups() {
+    function readCollapsedGroups() {
       try {
         const raw = window.localStorage.getItem(COLLAPSE_KEY)
         if (raw === null) return new Set()
@@ -1616,7 +1636,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    exports.persistCollapsedGroups = function persistCollapsedGroups(collapsed) {
+    function persistCollapsedGroups(collapsed) {
       try {
         window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify(Array.from(collapsed)))
       } catch (_error) {
@@ -1625,14 +1645,14 @@ window.__ModuleLoader__.load({
       }
     }
 
-    exports.countModels = function countModels(groups) {
+    function countModels(groups) {
       let total = 0
       for (const group of groups || []) total += (group.models || []).length
       return total
     }
 
     /** Human context size: 1048576 → "1M", 128000 → "128K". */
-    exports.formatContext = function formatContext(tokens) {
+    function formatContext(tokens) {
       if (!Number.isFinite(tokens) || tokens <= 0) return null
       if (tokens >= 1_000_000) return Math.round(tokens / 100_000) / 10 + 'M'
       if (tokens >= 1_000) return Math.round(tokens / 100) / 10 + 'K'
@@ -1640,7 +1660,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Effort display names in catalog order. */
-    exports.effortNames = function effortNames(reasoning) {
+    function effortNames(reasoning) {
       const efforts = reasoning && Array.isArray(reasoning.efforts) ? reasoning.efforts : []
       const names = []
       for (const effort of efforts) {
@@ -1652,7 +1672,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Display name of the default effort, or null when none is published. */
-    exports.defaultEffortName = function defaultEffortName(reasoning) {
+    function defaultEffortName(reasoning) {
       if (!reasoning || typeof reasoning.defaultEffort !== 'string') return null
       const efforts = Array.isArray(reasoning.efforts) ? reasoning.efforts : []
       const found = efforts.find((effort) => effort !== null && effort.id === reasoning.defaultEffort)
@@ -1662,85 +1682,110 @@ window.__ModuleLoader__.load({
     }
 
     /** Localized name of one input modality. */
-    exports.modalityLabel = function modalityLabel(id, t) {
+    function modalityLabel(id, t) {
       const key = 'modality.' + id
       const label = t(key)
       return label === key ? id : label
     }
 
     /** Localized provenance label ("adapter", "relay model list", …). */
-    exports.sourceLabel = function sourceLabel(source, t) {
+    function sourceLabel(source, t) {
       const key = 'source.' + (source || 'unknown')
       const label = t(key)
       return label === key ? t('source.unknown') : label
     }
 
     /** Per-field provenance recorded by the Host. */
-    exports.sourceOf = function sourceOf(model, field) {
+    function sourceOf(model, field) {
       const sources = model && model.sources
       return sources && typeof sources[field] === 'string' ? sources[field] : 'unknown'
     }
 
     /** Catalog and name heuristics are completed values, not declarations. */
-    exports.isInferredSource = function isInferredSource(source) {
+    function isInferredSource(source) {
       return source === 'catalog' || source === 'inferred'
     }
 
     /** Kind with a safe fallback for records from an older Host. */
-    exports.kindOf = function kindOf(model) {
+    function kindOf(model) {
       return model && typeof model.kind === 'string' && model.kind !== '' ? model.kind : 'chat'
     }
 
     /** Filter bucket: chat / image / video / other. */
-    exports.bucketOf = function bucketOf(kind) {
+    function bucketOf(kind) {
       if (kind === 'image') return 'image'
       if (kind === 'video') return 'video'
       if (kind === 'chat') return 'chat'
       return 'other'
     }
 
-    exports.isGenerationKind = function isGenerationKind(kind) {
+    function isGenerationKind(kind) {
       return kind === 'image' || kind === 'video' || kind === 'audio'
     }
 
     /** Resolution tier advertised in the model id ("-4k", "2K"). */
-    exports.resolutionOf = function resolutionOf(model) {
+    function resolutionOf(model) {
       const text = String((model && model.id) || '')
       const match = /(?:^|[-_/])(4k|2k|8k|uhd|hd)(?:$|[-_/])/i.exec(text)
       return match === null ? null : match[1].toUpperCase()
     }
 
     /** "文本 / 图像" for one modality array. */
-    exports.modalityNames = function modalityNames(modalities, t) {
+    function modalityNames(modalities, t) {
       return (Array.isArray(modalities) ? modalities : []).map((id) => modalityLabel(id, t)).join(' / ')
     }
 
     /** Input modalities the manual editor can declare, in display order. */
-    exports.OVERRIDE_MODALITIES = ['text', 'image', 'audio', 'video', 'file']
+    const OVERRIDE_MODALITIES = ['text', 'image', 'audio', 'video', 'file']
 
     /** Effort levels the manual editor can declare, in display order. */
-    exports.OVERRIDE_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+    const OVERRIDE_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
     /** Localized name of one effort id. */
-    exports.effortLabel = function effortLabel(id, t) {
+    function effortLabel(id, t) {
       const key = 'effort.' + id
       const label = t(key)
       return label === key ? id : label
     }
 
     /** Identity of a manual override entry; same shape as the row key. */
-    exports.overrideKeyOf = function overrideKeyOf(entry) {
+    function overrideKeyOf(entry) {
       return entry ? keyOf(entry.provider, entry.model) : null
     }
 
     /** Model fields whose provenance can be manual. */
-    exports.manualFieldsOf = function manualFieldsOf(model) {
+    function manualFieldsOf(model) {
       const sources = model && model.sources ? model.sources : {}
       return ['kind', 'reasoning', 'context', 'modalities'].filter(
         (field) => sources[field] === 'manual',
       )
     }
 
+
+    exports.keyOf = keyOf
+    exports.hiddenSetOf = hiddenSetOf
+    exports.providerLabel = providerLabel
+    exports.COLLAPSE_KEY = COLLAPSE_KEY
+    exports.readCollapsedGroups = readCollapsedGroups
+    exports.persistCollapsedGroups = persistCollapsedGroups
+    exports.countModels = countModels
+    exports.formatContext = formatContext
+    exports.effortNames = effortNames
+    exports.defaultEffortName = defaultEffortName
+    exports.modalityLabel = modalityLabel
+    exports.sourceLabel = sourceLabel
+    exports.sourceOf = sourceOf
+    exports.isInferredSource = isInferredSource
+    exports.kindOf = kindOf
+    exports.bucketOf = bucketOf
+    exports.isGenerationKind = isGenerationKind
+    exports.resolutionOf = resolutionOf
+    exports.modalityNames = modalityNames
+    exports.OVERRIDE_MODALITIES = OVERRIDE_MODALITIES
+    exports.OVERRIDE_EFFORTS = OVERRIDE_EFFORTS
+    exports.effortLabel = effortLabel
+    exports.overrideKeyOf = overrideKeyOf
+    exports.manualFieldsOf = manualFieldsOf
   })
 
   // -------------------------------------------------------- hooks
@@ -2078,13 +2123,13 @@ window.__ModuleLoader__.load({
      */
 
     /** Number of one bucket's token sum, guarding partial buckets. */
-    exports.bucketTotalOf = function bucketTotalOf(buckets) {
+    function bucketTotalOf(buckets) {
       if (!Array.isArray(buckets)) return 0
       return buckets.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0)
     }
 
     /** 1234567 → "1.2M"; 4096 → "4.1K"; 0/undefined → "0". */
-    exports.formatTokens = function formatTokens(value) {
+    function formatTokens(value) {
       const tokens = Number.isFinite(value) ? value : 0
       if (tokens >= 1_000_000) {
         const millions = Math.round((tokens / 100_000)) / 10
@@ -2098,14 +2143,14 @@ window.__ModuleLoader__.load({
     }
 
     /** Local-calendar `YYYY-MM-DD` stamp used by the ledger's day buckets. */
-    exports.dayKeyOf = function dayKeyOf(time) {
+    function dayKeyOf(time) {
       const date = new Date(Number.isFinite(time) ? time : Date.now())
       if (Number.isNaN(date.getTime())) return ''
       return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
     }
 
     /** First day (Monday) of the local ISO week of `time`. */
-    exports.weekKeyOf = function weekKeyOf(time) {
+    function weekKeyOf(time) {
       const date = new Date(Number.isFinite(time) ? time : Date.now())
       const weekday = (date.getDay() + 6) % 7
       date.setDate(date.getDate() - weekday)
@@ -2113,7 +2158,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Local calendar month prefix of `time`. */
-    exports.monthPrefixOf = function monthPrefixOf(time) {
+    function monthPrefixOf(time) {
       return dayKeyOf(time).slice(0, 7)
     }
 
@@ -2124,7 +2169,7 @@ window.__ModuleLoader__.load({
      * simpler pass (visibility only). Inputs are the loaded groups plus the five
      * filter axes; output keeps the group objects in order with only kept models.
      */
-    exports.computeFilteredGroups = function computeFilteredGroups(groups, { filter = 'all', query = '', multimodalOnly = false, reasoningOnly = false, minContext = 0 } = {}) {
+    function computeFilteredGroups(groups, { filter = 'all', query = '', multimodalOnly = false, reasoningOnly = false, minContext = 0 } = {}) {
       const normalized = String(query ?? '').trim().toLowerCase()
       const filtered = []
       for (const group of groups ?? []) {
@@ -2159,14 +2204,14 @@ window.__ModuleLoader__.load({
     }
 
     /** Counts per kind bucket for the whole list. */
-    exports.countKinds = function countKinds(models) {
+    function countKinds(models) {
       const counts = { chat: 0, image: 0, video: 0, other: 0 }
       for (const model of models ?? []) counts[bucket(model)] += 1
       return counts
     }
 
     /** Checker-model candidates from a loaded catalog state. */
-    exports.checkerRoutesOf = function checkerRoutesOf(groups) {
+    function checkerRoutesOf(groups) {
       const routes = []
       for (const group of groups ?? []) {
         if (group === null || typeof group !== 'object') continue
@@ -2177,7 +2222,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Compact label + tooltip for one provider probe diagnostic. */
-    exports.probeOf = function probeOf(state, group, t) {
+    function probeOf(state, group, t) {
       const list = Array.isArray(state.providers) ? state.providers : []
       const diagnostic = list.find((item) => item && item.id === group.id)
       if (diagnostic === undefined) return null
@@ -2207,6 +2252,16 @@ window.__ModuleLoader__.load({
       return { label: t('group.probeSkipped'), title: details }
     }
 
+
+    exports.bucketTotalOf = bucketTotalOf
+    exports.formatTokens = formatTokens
+    exports.dayKeyOf = dayKeyOf
+    exports.weekKeyOf = weekKeyOf
+    exports.monthPrefixOf = monthPrefixOf
+    exports.computeFilteredGroups = computeFilteredGroups
+    exports.countKinds = countKinds
+    exports.checkerRoutesOf = checkerRoutesOf
+    exports.probeOf = probeOf
   })
 
   // -------------------------------------------------------- settings-section
@@ -3040,7 +3095,7 @@ window.__ModuleLoader__.load({
       anchor.remove()
     }
 
-    exports.UsageToolbar = function UsageToolbar({ usage, t, features }) {
+    function UsageToolbar({ usage, t, features }) {
       const state = useSource(usage)
       const supported = features.length === 0 || features.includes('usage')
       const ranges = state.snapshot?.ranges
@@ -3114,6 +3169,8 @@ window.__ModuleLoader__.load({
       )
     }
 
+
+    exports.UsageToolbar = UsageToolbar
   })
 
   // -------------------------------------------------------- entry

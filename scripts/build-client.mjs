@@ -48,9 +48,10 @@ function assertSupported(line, file) {
 
 function transform(source, file) {
   const out = []
+  const deferred = []
   for (const line of source.split('\n')) {
     assertSupported(line, file)
-    const relative = /^\s?import\s+\{([^}]*)\}\s+from\s+'\.\/([^']+\.mjs)'.*$/.exec(line)
+    const relative = /^\s?import \{([^}]*)\}\s+from\s+'\.\/([^']+\.mjs)'.*$/.exec(line)
     if (relative !== null) {
       const names = relative[1]
         .split(',')
@@ -60,12 +61,21 @@ function transform(source, file) {
       out.push(`const { ${names.join(', ')} } = require(${JSON.stringify(required)})`)
       continue
     }
-    if (/^\s*export\s+const\s+/.test(line)) {
-      out.push(line.replace(/^(\s*)export\s+const\s+(\w+)\s*=/, `$1exports.$2 =`))
+    // Keep the module-scope binding visible and defer the export assignment.
+    // Turning `export function NAME` into `exports.NAME = function NAME` makes
+    // NAME unresolvable from sibling code inside the same module (a named
+    // function expression only binds within its own scope) — the bug class
+    // that blanked the settings page (modalityLabel / COLLAPSE_KEY).
+    const exportConst = /^(\s*)export\s+const\s+([A-Za-z_$][\w$]*)\s*=/.exec(line)
+    if (exportConst !== null) {
+      deferred.push(exportConst[2])
+      out.push(line.replace(/^(\s*)export\s+const\s+/, '$1const '))
       continue
     }
-    if (/^\s*export\s+(function|class)\s+\w+/.test(line)) {
-      out.push(line.replace(/^(\s*)export\s+(function|class)\s+(\w+)/, `$1exports.$3 = $2 $3`))
+    const exportFn = /^(\s*)export\s+(function|class)\s+([A-Za-z_$][\w$]*)/.exec(line)
+    if (exportFn !== null) {
+      deferred.push(exportFn[3])
+      out.push(line.replace(/^(\s*)export\s+/, '$1'))
       continue
     }
     const exportList = /^(\s*)export\s*\{([^}]*)\}\s*;?\s*$/.exec(line)
@@ -78,6 +88,10 @@ function transform(source, file) {
       continue
     }
     out.push(line)
+  }
+  if (deferred.length > 0) {
+    out.push('')
+    for (const name of deferred) out.push(`exports.${name} = ${name}`)
   }
   return out.join('\n')
 }
