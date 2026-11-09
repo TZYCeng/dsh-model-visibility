@@ -487,6 +487,7 @@ tarball: https://github.com/TZYCeng/dsh-model-visibility/releases/latest/downloa
 - 1.10.2：把变换改成「let the module-scope binding stay visible and defer the export assignment」（保留模块内名字可达、exports 指派延后），并补了渲染守门测试。发版记录见下。
 - 1.10.0 已发布（2026-11-08）：
 - 1.10.1 已发布（2026-11-08）：修复 1.10.0 的 `canVerify` 未定义导致设置页整块空白；npm shasum 见 registry（`npm view @tzyc/dsh-model-visibility@1.10.1 dist.shasum`），GitHub Release `v1.10.1` 双 tarball 就位，`releases/latest/download` 指向 1.10.1。
+- 1.10.2 已发布（2026-11-09）：修设置页空白的真正根因——build-client 的 `export function/class/const` 变换改回「模块内绑定延后 exports 指派」，并加了「bundle 不允许 `exports.NAME = function/class`」守门测试；npm 39 文件 / 696.6 kB，GitHub Release `v1.10.2` 双 tarball，`releases/latest/download` 指向 1.10.2。
   - npm 2026-11-08T14:34Z，shasum `813d413bb59e927f6fc4d92a58fc727f89d52ec0`，39 个文件 / 695.4 kB，`latest` = 1.10.0；包含 `client-src/` 15 个模块与 4 个新 lib（usage-ledger / check-catalog / learned-catalog / export-csv）；包内 `client.js` 头两行是构建脚注即正确 builder。
   - GitHub Release `v1.10.0`（tag = `6ca3990`）带 `dsh-model-visibility-1.10.0.tgz` 与不带版本号的 `dsh-model-visibility.tgz`，`releases/latest/download` 指向最新包成立。
   - 发布过程中唯一额外 sweet：`package.json` 的 `files` 补进 `client-src`（否则 tarball 缺源码）。
