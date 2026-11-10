@@ -517,6 +517,41 @@ test('extra ids in a reply are ignored without a second call', async () => {
   )
 })
 
+test('dispose aborts a public fetch and prevents a later restart', async () => {
+  const learned = createLearnedCatalog({ file: path.join(tempHome(), 'learned.json') })
+  let fetchStarted
+  const started = new Promise((resolve) => {
+    fetchStarted = resolve
+  })
+  let fetches = 0
+  const verifier = createCapabilityVerifier({
+    llm: {
+      listProviders: () => [{ id: 'relay' }],
+      listModels: async () => [{ id: 'model-a' }, { id: 'checker-x' }],
+    },
+    learned,
+    logger: { warn() {} },
+    fetch: async (_url, { signal }) => {
+      fetches += 1
+      fetchStarted()
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })
+    },
+  })
+  const sweep = verifier.start({ checker: { provider: 'relay', model: 'checker-x' }, writeBack: false })
+  await started
+  const before = Date.now()
+  await verifier.dispose()
+  assert.ok(Date.now() - before < 1000, 'dispose must not wait for mirror timeouts')
+  assert.equal((await sweep).phase, 'cancelled')
+  assert.equal(fetches, 4, 'dispose must not start the remaining Hugging Face mirrors')
+  assert.equal(verifier.isRunning(), false)
+  assert.equal(learned.meta().models, 0)
+  await verifier.start({ checker: { provider: 'relay', model: 'checker-x' } })
+  assert.equal(verifier.isRunning(), false)
+})
+
 test('a real sweep over live-shaped ids learns from the catalogs alone', async () => {
   // Mirrors what the machine actually serves: some ids in models.dev, some not.
   const ids = ['gpt-4o', 'glm-5.3', 'some-private-relay-model', 'checker-x']

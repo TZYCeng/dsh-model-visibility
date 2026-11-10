@@ -1,437 +1,238 @@
 <div align="center">
 
-# 模型显示 · dsh-model-visibility
+# 模型显示
 
-**在 DeepSeek Harness 里，把「模型菜单」变成一张看得懂、改得动、发得出图的清单。**
+**让 DeepSeek Harness 的模型菜单更干净，让每个模型的能力更清楚。**
 
-每个模型一个开关 · 每个模型标注真实能力 · 想改就改，想发图就发图
+显示或隐藏模型 · 辨认真实能力 · 手动修正声明 · 让多模态模型真正能发图
 
-[![license](https://img.shields.io/badge/license-MIT-3da639?style=flat-square)](LICENSE)
-[![dsh bundle](https://img.shields.io/badge/DeepSeek%20Harness-bundle-4d6bfe?style=flat-square)](package.json)
-[![tests](https://img.shields.io/badge/tests-180%20passing-3da639?style=flat-square)](test)
-[![version](https://img.shields.io/badge/version-1.12.1-4d6bfe?style=flat-square)](https://github.com/TZYCeng/dsh-model-visibility/releases)
-[![marketplace](https://img.shields.io/badge/awesome--dsh--plugin-listed-8a2be2?style=flat-square)](https://awesome-dsh-plugin.com/p/TZYCeng/dsh-model-visibility/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-3da639?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.12.3-4d6bfe?style=flat-square)](package.json)
+[![Tests](https://img.shields.io/badge/tests-186_passing-3da639?style=flat-square)](test)
+
+[安装](#安装) · [使用指南](#使用指南) · [能力来源](#能力来源与可信度) · [联网校验](#联网校验) · [故障排查](#故障排查) · [开发文档](HANDOVER.md)
 
 </div>
 
-> **In English:** a DeepSeek Harness bundle that adds a *Settings → Model visibility* page. Every model of every provider gets a switch (off models vanish from the composer's model menu), and every remaining model is labelled with what it can actually do — reasoning support and the reasoning-effort levels the adapter publishes, context window, input modalities, and whether it is a chat, image, video, embedding, rerank, audio, classifier or translation model. The list can be searched by name or ID, filtered by kind, by capability (multimodal, reasoning) and by minimum context window, and provider groups can be collapsed. Labels merge the sources in priority order (manual override, settings document, adapter, the relay's own `GET /models`, a learned local snapshot seeded online, vendor corrections), the page names the source on hover; the page names the source on hover, with solid borders for declared values and dashed for inferred ones. Any model can be edited by hand — kind, context window, modalities, effort levels — and those edits can be written back into the model provider's own settings. A switch, on by default, makes relay routes whose models declare text-only input accept images in memory, without editing any configuration file. A token-usage strip (today / week / month / total) with two one-click CSV exports lives at the top of the page, and an online verification panel re-checks every routable model's capabilities. The rest of this README is in Chinese.
-
-<p align="center">
-  <img src="docs/settings-page.png" width="49%" alt="设置 → 模型显示：分组开关、筛选工具栏、能力图例与图像放行开关">
-  <img src="docs/capability-tags.png" width="49%" alt="模型行：类型色条、推理档位、上下文窗口、模态标签与「编辑能力」入口">
-</p>
-
-<p align="center"><sub>左：设置 → 模型显示（分组、统计、筛选、图例、图像放行开关）　右：模型行（类型、能力标签、编辑入口）</sub></p>
-
-**目录** · [为什么](#为什么需要它) · [功能](#功能) · [安装](#安装) · [界面](#界面速览) · [能力来源](#能力标注从哪里来) · [手动覆盖](#手动覆盖能力) · [官方校正](#官方校正) · [图像放行](#让输入框真的能发图) · [探测](#中转站探测) · [路由](#路由) · [结构](#结构) · [测试](#测试) · [限制](#已知限制)
-
 ---
 
-## 为什么需要它
+## 它解决什么问题
 
-DSH 官方的 `session.modelCatalog` 只把模型 id / 名称 / 推理档位投影给浏览器，**没有**上下文窗口、输入模态和输出类型。而自定义中转站通常这样配置：
+DSH 的标准模型目录主要提供模型 ID、名称与推理档位。对于自定义中转站，未填写的 `input` 经常回退为 `defaultInput: [text]`，于是可能出现：
 
-```yaml
-yujianwudi:
-  api: openai-completions
-  baseURL: https://example.net/v1
-  defaultInput: [text]
-  models:
-    - id: grok-4.7
-      input: []          # 不是“纯文本”，只是“没声明”
-```
+- 模型菜单混有生图、生视频、嵌入等不需要的条目；
+- 实际支持图片的模型被标成纯文本，发送图片时被拒绝；
+- 上下文窗口、输入模态和推理档位难以辨认；
+- 不同中转站对同一个模型的声明不完整，甚至互相矛盾。
 
-于是 registry 把 `defaultInput: [text]` 当成事实，Grok / Claude / GPT / Gemini 全部显示成「纯文本」，发图被拒；菜单里还塞满了用不到的嵌入、生图、生视频模型。
+这个插件把模型清单变成一个**可筛选、可解释、可修正的管理页面**，同时保留官方模型选择器及其推理档位控件。
 
-这个插件做三件事：
+## 界面
 
-1. **收起来** —— 不用的模型关掉，连同空掉的分组一起从对话菜单消失；
-2. **说清楚** —— 给每个模型标注它真正的模态、上下文、推理档位与类型，并写明每个标签的来源；
-3. **改得动** —— 自动识别不到时手动指定，必要时写回模型提供商配置；判定能发图的模型，输入框真的能发图。
+![模型显示设置页：模型分组、能力筛选、用量统计与图像放行](docs/overview.png)
 
-## 功能
+*设置 → 模型显示。上图为真实使用环境，模型数量与用量来自用户配置。*
 
-| 能力 | 说明 |
+## 功能一览
+
+| 功能 | 说明 |
 | --- | --- |
-| **逐模型开关** | 关闭的模型立即从模型菜单消失；当前会话正在用的模型即使被关也保留（收起态按钮靠它显示模型名） |
-| **分组批量操作** | 每组标题右侧「全组隐藏 / 全组显示」，工具栏「全部显示」一次清空隐藏；筛选状态下只作用于当前筛选结果 |
-| **分组折叠** | 点分组标题左侧箭头折叠该组，只留标题与统计；工具栏「折叠全部分组 / 展开全部分组」一次切换；状态存在浏览器 `localStorage`，不改任何模型开关 |
-| **能力标签** | `支持推理` / 不支持 / 未知 + 适配器公布的全部思考强度档位；`上下文 1M`；`多模态` / `纯文本` / 未知；类型色条与类型标签区分 `对话 / 生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译` |
-| **来源分层** | 实线 = 已声明（手动 / 设置文档 / 适配器 / 中转站），虚线 = 补全或推断（学习快照 / 模型名），悬停显示具体来源 |
-| **筛选** | 名称 / ID 搜索；类型快捷筛选 `全部 / 对话 / 生图 / 生视频 / 其它`（带数量）；能力筛选 `多模态`、`支持推理`；最小上下文 `128K / 256K / 512K / 1M`；多个条件同时生效 |
-| **手动覆盖能力** | 每行的「编辑能力」可指定类型、上下文、输入模态、思考强度（含默认档 / 不支持推理），来源标为 `手动`；清空保存即恢复自动识别 |
-| **写回提供商** | 编辑器里勾「同时写入模型提供商设置」，把 `input` / `contextWindow` / `reasoningEfforts` 写进 `llm-pi-ai` 的该模型条目，让输入框、适配器与其他设置界面读到同一份事实 |
-| **官方校正** | 厂商文档能证明的错误行（如 `glm-5.3` 被目录标成多模态）显示 `官方校正` + 文档链接，并压过目录与中转站列表 |
-| **图像放行** | 默认开启：判定可输入图像的中转站对话模型，在请求侧补上 `image`，不用改任何配置文件；关闭即回到适配器声明 |
-| **token 用量** | 页面顶部常驻：今天 / 本周 / 本月 / 总计的输入与输出 token（缓存读写合计进输入）；一键导出用量 CSV 与模型清单 CSV |
-| **联网校验** | 选一个「校验员」模型：先拉公开目录（models.dev 两种端点 / OpenRouter / Hugging Face，含国内镜像回退）做基准，再分批核对其余模型的类型 / 上下文 / 模态 / 推理档位；**公开目录拿到的事实会真正并入结果**，校验员答不上时照样落库。结果写进本页与本地快照 `learned.json`（同名模型跨路由复用缓存），开关打开时同时写入提供商配置；并发线程可按次调整 |
-| **重新获取能力** | 工具栏「重新获取能力」作废旧缓存与进行中的扫描，重新询问适配器与所有中转站（比「刷新」更硬，只绕过 TTL 的「刷新」仍会合并进行中的读取） |
-| **ID 归一化** | `openai/gpt-4o`、`~deepseek-v3`、`glm-5.3:free`、`:free:batch` 这类前缀 / 叠加后缀先归一化再匹配目录，避免「同一个模型查不到」 |
-| **持久化** | 隐藏列表写进 profile 的 `cordis.patch.yml`，并镜像到 `$DSH_HOME/dsh-model-visibility/hidden.json`，插件重装 / profile 自愈后自动恢复；手动覆盖单独一份 `overrides.json` |
+| **逐模型开关** | 隐藏的模型立即从对话输入框的模型菜单消失；当前会话正在使用的模型仍保留，避免触发器丢失名称。 |
+| **分组管理** | 按 Provider 分组，支持整组显示/隐藏、折叠/展开；筛选时只处理筛选结果。 |
+| **搜索与筛选** | 按名称或 ID 搜索；按类型、多模态、推理能力和最小上下文窗口组合筛选。 |
+| **能力标签** | 展示模型类型、输入模态、上下文窗口、推理能力与档位；实线表示声明，虚线表示补全或推断。 |
+| **手动覆盖** | 为单个模型编辑类型、模态、上下文和推理档位；可只保存在本插件，也可写回 Provider 配置。 |
+| **图像放行** | 默认开启。对判定支持图像的中转站对话模型，在内存中补充 `image`，同时覆盖发送准入和请求序列化。 |
+| **联网校验** | 汇总公开目录，再由用户选择的校验员模型补充能力信息；支持分批、并发、取消和失败诊断。 |
+| **用量统计** | 显示今天、本周、本月与保留窗口内的合计 Token，支持用量和模型清单 CSV 导出。 |
+| **持久化恢复** | 隐藏列表、手动覆盖、学习快照与账本缓存分别保存在 `$DSH_HOME/dsh-model-visibility/`。 |
 
 ## 安装
 
-在市场页面一键安装，或任选一种方式：
+### 插件市场
+
+打开 [awesome-dsh-plugin 中的插件页](https://awesome-dsh-plugin.com/p/TZYCeng/dsh-model-visibility/)，按市场流程安装。
+
+### DSH `plugin_manager`
+
+```text
+install_bundle  target = @tzyc/dsh-model-visibility
+```
+
+也可安装最新 Release 包：
+
+```text
+https://github.com/TZYCeng/dsh-model-visibility/releases/latest/download/dsh-model-visibility.tgz
+```
+
+### 本地开发
 
 ```powershell
-# 1) 插件市场（推荐）
-#    https://awesome-dsh-plugin.com/p/TZYCeng/dsh-model-visibility/
-
-# 2) npm（plugin_manager）
-#    install_bundle  target = @tzyc/dsh-model-visibility
-
-# 3) GitHub Release tar 包
-#    install_bundle  target = https://github.com/TZYCeng/dsh-model-visibility/releases/latest/download/dsh-model-visibility.tgz
-
-# 4) 本地目录（开发）
-#    profile 里 link 这个目录，并先安装依赖：
+git clone https://github.com/TZYCeng/dsh-model-visibility.git
+cd dsh-model-visibility
 npm install
+npm test
+npm run build
 ```
 
-安装后刷新页面（或重启 DSH），即可在「设置 → 模型显示」看到页面。
+在 DSH profile 中链接此目录。安装或更新后刷新页面；Host 代码更新时需要重新加载 Host 或重启 DSH。
 
-> npm 上的 `dsh-model-visibility` 属于另一个同名项目，本插件发布在作用域 `@tzyc/dsh-model-visibility` 下。
+> npm 包名是 **`@tzyc/dsh-model-visibility`**。不带作用域的 `dsh-model-visibility` 是另一个项目。
 
-## 界面速览
+## 使用指南
 
-- **标题行**：`已显示 36 / 271 · 已关闭 235`，右侧是 `说明`、`刷新`、`重新获取能力`。
-  `说明` 折叠着标签含义、来源分层与类型配色——默认收起，把首屏留给模型。
-- **用量条**：`今天 / 本周 / 本月 / 总计` 四个数字（合计 token，悬停看输入/输出/缓存读写拆分），
-  右侧是 `用量 CSV` 与 `模型 CSV`。首次扫描期间数字来自已折叠的账本，扫描中显示「统计中…」并加快轮询。
-- **筛选栏**：搜索框、类型按钮（带数量）、`多模态` / `支持推理`、上下文下限，以及右端的
-  `全部显示` 与 `折叠全部`。
-- **图像放行**：一行开关加一句说明，不再是整块说明卡。
-- **分组**：整行标题可点（折叠/展开），显示 `已显示/总数`、类型计数，以及中转站诊断徽标
-  （只有真出问题时才是告警色）。全组开关是右侧的轻量按钮。
-- **模型行**：名称与 ID 同一行，下方是能力标签；行右侧是 `编辑` 与开关。
-- **页脚**：`探测：N 个中转站可读` 与 `学习快照 N 条`。
-- **联网校验**：底部一个可折叠面板，展开才有校验员选择与进度；失败的批次直接列出真实原因。
+### 清理模型菜单
 
-## 能力标注从哪里来
+1. 打开 **设置 → 模型显示**。
+2. 用搜索或类型筛选找到目标模型。
+3. 关闭单行开关，或使用「全组隐藏」批量处理。
+4. 回到对话输入框，确认模型菜单已更新。
 
-按下面的优先级合并，每一层只填前一层不知道的字段；最终记录带 `sources`，页面据此决定实线 / 虚线。
+「全部显示」会清空隐藏列表；「折叠全部」只改变页面的阅读状态，不改变模型可见性。折叠偏好保存在浏览器 `localStorage`，不会同步到 Host。
 
-| 优先级 | 来源 | 什么时候可信 | 标记 |
-| --- | --- | --- | --- |
-| 0 | `manual` | 用户在设置页为该模型手动声明的类型 / 上下文 / 模态 / 思考强度（可同时写进 Provider 配置） | 实线 |
-| 1 | `config` | 设置文档里该模型显式写了 `input`、`contextWindow`、`maxTokens`，或 Provider 的 `defaultInput` 显式包含非文本模态 | 实线 |
-| 2 | `adapter` | 适配器不是从中转站配置（学习快照），或该模型不在 Provider 的 `models` 列表里 | 实线 |
-| 3 | `provider` | 中转站的 `GET {baseURL}/models` 返回了 `architecture.input_modalities` / `input_modalities` / `capabilities` / `type` / `supported_endpoint_types` | 实线 |
-| 4 | `snapshot` | 学习快照 `learned.json` 里有同名模型（联网校验的结果，含公开目录与校验员来源） | 虚线 |
-| 5 | `inferred` | 模型名带明确家族特征（`claude` / `gpt-4o+` / `gemini` / `grok-4+` / `vl` / `vision` / `image` / `video` / `embed` …） | 虚线 |
-| 校正 | `official` | 厂商文档明确指出该行写错（`lib/capability-corrections.js`） | 实线 |
-| — | `unknown` | 以上都没有：显示未知，**不会**把 `defaultInput: [text]` 当成纯文本 | 灰色 |
+### 修正能力声明
 
-`official` 不参与常规优先级：合并且完成后，如果厂商文档指出该行错误，且当前值来自 `provider` / `catalog` / `inferred` / `unknown`，就替换成 `official`；来自 `config`（用户显式写的 `input`）或内置适配器声明的值保持不变。中转站列表经常直接抄目录，所以也允许被校正。
+点击模型行的「编辑」，可设置：
 
-`manual` 高于所有来源：手动声明什么，页面与请求侧就按什么执行。
+- 类型：对话、生图、生视频、嵌入、重排、音频、审核、翻译；
+- 输入模态：文本、图像、音频、视频、文件；
+- 上下文窗口；
+- 推理档位及默认档，或明确声明不支持推理。
 
-## 手动覆盖能力
+留空并保存等价于删除本地覆盖，恢复自动识别。
 
-适合「中转站刚上的新模型」：`GET /models` 只有 id，内置目录还没有这一行，设置文档里也没有 `reasoningEfforts`，页面只能显示未知。此时点模型行右侧的「编辑能力」：
+勾选「同时写入模型提供商设置」后，`input`、`contextWindow`、`reasoningEfforts` 会通过 `settings.mutate` 写入现有模型条目。成功写回的字段会从本地覆盖移除，避免同一事实保存两份。
 
-- **类型**：对话 / 生图 / 生视频 / 嵌入 / 重排 / 音频 / 审核 / 翻译；
-- **上下文窗口**：填 token 数，留空表示自动；
-- **输入模态**：文本 / 图像 / 音频 / 视频 / 文件，可多选；
-- **思考强度**：`off / minimal / low / medium / high / xhigh / max` 多选，可指定默认档；也可勾「不支持推理」。
+> 「恢复自动」不会撤销已经写进 Provider 配置的值。要撤销写回，请到模型提供商设置中修改对应字段。
 
-保存后页面立即按手动值显示，来源标签为 `手动`，请求侧的图像准入用同一份声明。表单全部留空保存等价于删除覆盖，恢复自动识别。
+### 让多模态模型接收图片
 
-覆盖存在 `$DSH_HOME/dsh-model-visibility/overrides.json`（不写 profile 补丁，插件重装不会丢），也可以手改，Host 按文件 mtime 自动重读：
+保持「让输入框按能力标注放行图像」开启即可。插件只包装符合 pi-ai 形状的适配器，且只处理中转站对话模型的 `image` 输入：
 
-```jsonc
-{
-  "version": 1,
-  "overrides": [{
-    "provider": "chatgpt",
-    "model": "gpt-6.1-terra",
-    "input": ["text", "image"],
-    "contextWindow": 400000,
-    "efforts": [
-      { "id": "low", "name": "Low" },
-      { "id": "high", "name": "High" }
-    ],
-    "defaultEffort": "high"
-  }]
-}
-```
+- 显式 Provider 声明优先；
+- 不修改路由配置文件；
+- 关闭开关或卸载插件后恢复；
+- 不会让音频、视频或文件绕过 DSH 的准入限制。
 
-### 同时写入模型提供商设置
+### 刷新与重新获取能力
 
-勾选后，Host 把能一一对应的字段写进 `llm-pi-ai` 的 Provider 配置里这个模型的条目：
+- **刷新**：绕过能力快照与中转站探测的 TTL，但会复用正在进行的读取。
+- **重新获取能力**：使能力、探测、覆盖和图像准入缓存失效，丢弃旧的进行中结果，再重新读取；不会改变隐藏开关。
 
-| 覆盖字段 | Provider 配置 |
+适配器没有公布的推理档位无法靠刷新凭空产生。可先手动补充，或联网校验后写回 Provider，再重新加载 Host。
+
+## 能力来源与可信度
+
+每个字段独立合并，不是整条记录只选一个来源。
+
+| 优先级 | 来源 | 页面含义 |
+| --- | --- | --- |
+| 1 | `manual` | 用户手动声明；始终优先。 |
+| 2 | `config` | Provider 或模型条目中显式配置的能力。 |
+| 3 | `adapter` | 内置适配器或非配置列表模型的适配器声明。 |
+| 4 | `provider` | 中转站 `/models` 或 `/api/pricing` 返回的能力。 |
+| 5 | `snapshot` | 联网校验保存的学习快照；以虚线显示。 |
+| 6 | `inferred` | 根据明确的模型家族名称推断；以虚线显示。 |
+| — | `unknown` | 没有足够证据，保持未知。 |
+
+`official` 是独立的厂商文档校正层：可修正中转站、快照或名称推断中的错误，但不压过用户的显式配置和内置适配器声明；`manual` 始终最高。
+
+**重要边界：** `input: []` 表示未声明，不等于纯文本；`defaultInput: [text]` 也不会被当成模型真实能力的证明。
+
+## 联网校验
+
+![联网校验面板：公开目录、校验员模型、并发与写回设置](docs/online-verification.png)
+
+### 工作流程
+
+1. 无需密钥地读取公开目录：
+   - `models.dev/models.json`
+   - `models.dev/api.json`
+   - OpenRouter `/api/v1/models`
+   - Hugging Face `/api/models`，支持国内镜像回退
+2. 按归一化模型 ID 合并公开事实。
+3. 选择一个可路由的「校验员」模型，分批回答其余模型的能力。
+4. 保存结果到 `learned.json`，同名模型可跨路由复用。
+5. 开启「同时写入提供商配置」时，将可映射字段写回对应 Provider。
+
+每批最多 6 个模型，默认 2 路并发，可在面板中调整为 1–8 路。校验请求的 Token 消耗计入用量账本。
+
+### 这不是实际请求测试
+
+「校验员」主要依据模型 ID 和自身知识回答，**不等于插件真的向目标模型发送图片或测量上下文长度**。公开目录也是上游声明，不是本机实测。
+
+因此：
+
+- 把学习快照视为**可修正的参考信息**，不要视为不可变事实；
+- 开启写回前，先检查重要模型的结果；
+- 对关键模型，仍应手动发送一次图片或查看厂商文档；
+- 较旧的校验批次只能补充空缺，不能覆盖较新的能力声明。
+
+### 失败处理
+
+- 输出预算为 8192 Token，默认固定低思考档位，减少思考内容挤占 JSON 正文；
+- JSON 结构、缺失 ID 和多余 ID 分开处理，必要时定向重试一次；
+- 失败批次会二分重试，尽量保留其他模型的结果；
+- 公开目录即使在校验员无答案时，也能独立落库；
+- 取消会等待旧 worker 退出，避免两轮任务同时写状态；
+- 插件卸载会取消并等待校验任务，不会在后台继续落库。
+
+## Token 用量与 CSV
+
+插件读取 `$DSH_HOME/sessions/**` 中的会话日志，按天和路由折叠输入、输出、缓存读写 Token。
+
+- 当前月份按事件日期统计；
+- 较早历史按会话创建日期粗略归集；
+- 缓存保留最近约 **14 个月**，所以「总计」不是无保留的全历史财务账单；
+- 修改过的日志目前会重新解码该文件，未变化的文件复用缓存；
+- 校验自身的消耗也计入总量。
+
+CSV 会转义分隔符、引号与换行，并防护表格公式注入。
+
+## 数据与隐私
+
+| 数据 | 位置 |
 | --- | --- |
-| `input` | 模型的 `input` 数组 |
-| `contextWindow` | 模型的 `contextWindow` |
-| 思考强度 | 模型的 `reasoningEfforts`（`off` 写成 `null`，其余档位以自身 id 作为发送值）；勾「不支持推理」写成 `reasoningEfforts: false` |
+| 隐藏列表 | DSH 设置 + `$DSH_HOME/dsh-model-visibility/hidden.json` |
+| 手动覆盖 | `overrides.json` |
+| 学习快照 | `learned.json` |
+| 用量缓存 | `usage-ledger.json` |
+| 折叠、说明和校验员选择 | 浏览器 `localStorage` |
 
-写入走设置服务的 `mutate` 路径操作，只改现有 `models` 数组里的那一项，不替换整份列表。成功写入的字段会从 `overrides.json` 移除（同一事实只存一份）；写不进去时不报错中断，编辑器提示原因（没有显式模型列表、模型不在列表里、设置文档只读…），本地覆盖仍然生效。
+- 凭据只在 Host 内解析，用于请求对应 Provider；不写入插件文件、不返回浏览器、不记录到诊断。
+- 中转站探测仅允许 HTTPS；HTTP 只放行 localhost、127.0.0.1 和 ::1。
+- 请求不跟随重定向，避免把认证头带到其他域。
+- 中转站响应限制 4 MiB，公开目录限制 16 MiB，按实际字节流读取，超限即取消。
+- 多份数据文件是全局的，不按 DSH profile 隔离；不建议多个 Host 实例同时写同一份文件。
 
-「恢复自动」只删除本插件的覆盖，**不会**清掉已写入 Provider 配置的值；要撤销写入，请到「设置 → 模型提供商」清空对应字段。
+关闭中转站探测：将插件配置设为 `probe: false`，或设置环境变量 `MODEL_VISIBILITY_PROBE=0`。
 
-## 官方校正
+## 故障排查
 
-`lib/capability-corrections.js` 是一张很小的、只收厂商文档能证明的修正表。首条是 `glm-5.3`：旧快照把它标成 `text+image`，但智谱文档写明 GLM-5.3 只处理文本，原生多模态的是 GLM-5.3-Flash / FlashX。校正只锁精确 id，`glm-5.3-flash` 仍然是多模态。
-
-被校正的行为显示 `官方校正` 标签，悬停有说明与文档链接；它同时作用于页面和图像闸门，所以 `glm-5.3` 不会被放行图片。
-
-## 让输入框真的能发图
-
-**问题**：`llm-pi-ai` 的模型对象由 `entry.input ?? base.input ?? defaultInput` 构造。中转站模型通常写 `input: []`（“未声明”），于是落到 Provider 的 `defaultInput: [text]`；发送前的准入检查和 pi-ai 自己的序列化都会据此拒绝图像，即使中转站和页面都认为它支持图片。
-
-**做法**：Host 端只在 pi-ai 适配器实例上包装 `modelOf(snapshot, provider, model)`。当能力合并（与页面同一套证据）判定该模型可输入图像时，给返回的模型对象补上 `image`；其它适配器（DeepSeek Messages 等）不动。这一个点同时覆盖 `resolveModelInfo`（发送准入）和 `stream`（请求序列化），不会只修一半。
-
-- 对应 Host 配置 `applyInput`（默认开启，volatile），设置页顶部开关即时生效；
-- 显式写了 `input` 的 Provider 仍优先；只有插件判定可输入图像的中转站对话模型才会补 `image`；
-- 包装是内存态、可逆的：不写设置文档、不改路由配置，插件卸载时恢复。
-
-## 中转站探测
-
-Host 端通过 `settings.describe()` 读取配置了 `baseURL` 与 `apiKeyEnv` 的 Provider，然后：
-
-1. 用 `ctx.credentials.resolve(apiKeyEnv)` 在**每次探测时**解析密钥（不缓存、不写入、不返回给浏览器）；
-2. `GET {baseURL}/models`（base 不带 `/v1` 时再补一次 `/v1/models`），带 `Authorization: Bearer` 或 Anthropic 的 `x-api-key`；
-3. 同源尝试 `GET {origin}/api/pricing`（New API 的公开价格接口），用 `supported_endpoint_types` 判断生图 / 生视频 / 嵌入；
-4. 只保留能力事实（模态、上下文、最大输出、推理、类型），不保留响应正文；失败只记录诊断。
-
-**降级与诊断**：`/models` 401/403/超时/DNS 失败时，若 `/api/pricing` 还能列出模型，就退化为 `partial`——
-分组会显示「价格接口 N 个」，模型总数与类型仍然正确；两者都失败时状态为 `failed`，分组徽标显示
-「读取失败」，悬停可看到人类可读的原因（如「域名解析失败（DNS 查不到该主机）」「连接超时」），
-而不是裸的 `ENOTFOUND`。
-
-安全约束：**只向 `https://` 的 base URL 发请求（`http://` 仅放行 localhost / 127.0.0.1 / ::1）**，
-避免明文链路带走 API key；不跟随重定向（避免把 `Authorization` 带到别的域）、4 MB 响应上限、
-每请求 3.5 s 超时、Provider 并发探测、结果缓存 10 分钟。关闭探测：设置行写 `probe: false`，
-或环境变量 `MODEL_VISIBILITY_PROBE=0`。
-
-## 学习快照（联网校验）
-
-静态内置目录（models.dev 2026-10-07 快照）已删除：多数中转站不公布上下文 / 模态 / 推理档位，静态表会过时。替代品是**学习快照** `~/.dsh/dsh-model-visibility/learned.json`，数据来自两层：
-
-1. **公开目录基准**（无需密钥，按归一化 id 匹配，四源合并，**先命中者为准**）：
-   - `https://models.dev/models.json`——与 provider 无关的模型元数据（`modalities` / `limit` / `reasoning` / `attachment`），最贴合中转站的模型 id；
-   - `https://openrouter.ai/api/v1/models`——含 `architecture.input_modalities` 与 `context_length`；
-   - `https://huggingface.co/api/models`——开源权重与自建部署（vLLM / LM Studio / Ollama）几乎只出现在这里；
-     该域名在国内常不可达，会依次回退 `hf-mirror.com`、`hugging-face.cn`；
-   - `https://models.dev/api.json`——provider 限定目录，只用来补前三个源的空缺。
-2. **校验员模型**：在插件设置页选定一个提供商的模型作为「校验员」，其余模型按批（默认 6 个/批）经 `llm.prepareCall` 发给它，要求输出结构化 JSON 事实；`unknown` 一律允许，不猜。并发线程数可在面板里按次调整（1–8，默认 2）。
-
-**关键行为**：公开目录的事实会真正并入结果，而不只是给个来源标签。校验员答「不知道」、或整批失败时，
-只要公开目录里有这个模型，能力仍然会落库（来源标 `已校验`，虚线）。面板会逐条列出每个公开目录
-「读到了 / 为什么没读到 / 多少个模型」，并注明是否发生了镜像回退。
-
-结果落地：
-
-- 页面立即按新事实显示，来源标 `已校验`（虚线）；写回提供商配置后相关字段提升为 `config` 实线；
-- 「校验通过即写入提供商配置」（默认开）：可映射字段（`input` / `contextWindow` / `reasoningEfforts`）经 `settings.mutate` 写进每个服务该模型的提供商条目，与手动覆盖共用同一条写回路径；
-- 全部事实存进 `learned.json`，键为归一化模型 id（去聚合前缀 / `:free` 后缀）：同名模型在任何路由直接命中缓存；
-- 校验自身消耗的 token 记入用量账本。
-
-进度、取消与最终统计由 `GET/POST /api/dsh-model-visibility/verify` 提供，面板内轮询展示。
-
-### 校验批次的预算、格式与失败处理
-
-校验是「查表」不是「推理」，但有四个容易踩的坑，现在都在代码里处理了：
-
-- **输出预算**：每批请求 8192 输出 token（`CHECKER_MAX_TOKENS`）。旧版写死 2048，思考型校验员
-  （如带 `reasoningEfforts` 的 DeepSeek / Claude）会把额度全花在思考通道上，正文要么为空、要么被
-  截断，于是**每一批**都报「回复里没有 JSON」——实测一次 191 个模型、32 个批次全失败、烧掉 63K token。
-- **思考档位**：请求里固定 `reasoningEffort: 'low'`（`CHECKER_REASONING_EFFORT`），把思考通道压到最低，
-  避免它挤掉正文。两项都可通过 `createCapabilityVerifier({ checkerMaxTokens, checkerReasoningEffort })` 覆盖，
-  传 `checkerReasoningEffort: null` 可关闭锁定。
-- **截断即失败**：`finish.reason.kind === 'max-tokens'` 现在会被当作错误，并明确说明「回复在 N 个输出
-  token 处被截断（模型把预算花在思考上了）」，而不是笼统的「没有 JSON」。
-- **提示词 + 格式检测**：系统提示词直接给出**精确的 JSON 数组 schema**（每个键、每个取值、`null` 表示未知、
-  禁止 markdown 围栏与解释），回复再经过 `validateReplyShape` 严格校验：必须是数组、每条要有 `id`、
-  不能漏掉被问的 id、不能多出没问的 id。不合格会**定向重试一次**；仍然不合格但 JSON 可用时，保留已答部分
-  并记下违规原因，而不是整批丢弃。`{models:[…]}` / `{results:[…]}` 这种包裹形式视为合格，不浪费重试。
-- **失败切分重试**：一批解析失败会二分重试，直到定位到那一个回答不了的模型；其余模型的事实照样落库。
-- **取消与重启互斥**：取消只 abort，不等旧 worker 结束就不再接受新 sweep；重复 `start()` 会 join 旧 run，
-  不再出现两轮并发写同一个状态（曾出现 `done=36 / total=23` 和 6 路并发调用）。
-- **并发线程**：每轮可单独设置 1–8 路并发（默认 2，上限 `MAX_CONCURRENCY`）；中转站限流时调低。
-
-`learned.json` 也改成**每批一次**批量写入（旧实现每个模型读一次、写一次整份文件：200 个模型 =
-199 次全量读 + 199 次全量写）。
-
-## 路由
-
-```
-GET  /api/dsh-model-visibility/models[?fresh=1][&reload=1]
-GET  /api/dsh-model-visibility/overrides
-POST /api/dsh-model-visibility/overrides
-GET  /api/dsh-model-visibility/usage
-GET  /api/dsh-model-visibility/export?type=usage|models
-GET  /api/dsh-model-visibility/verify
-POST /api/dsh-model-visibility/verify
-```
-
-Host 遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInfo()`，叠加设置文档与中转站探测结果，返回：
-
-```jsonc
-{
-  "ok": true,
-  "value": {
-    "groups": [{
-      "id": "yujianwudi",
-      "name": "TianJi",
-      "models": [{
-        "id": "grok-4.7",
-        "name": "grok-4.7",
-        "kind": "chat",
-        "inputModalities": ["text", "image"],
-        "contextWindow": 500000,
-        "reasoning": { "efforts": [], "defaultEffort": "medium" },
-        "reasoningSupported": true,
-        "sources": { "kind": "catalog", "modalities": "catalog", "context": "catalog", "reasoning": "config" }
-      }]
-    }],
-    "failures": [],
-    "providers": [{ "id": "yujianwudi", "status": "ok", "models": 58, "capabilities": 14 }],
-    "learned": { "models": 42, "updatedAt": 1762000000000, "checker": { "provider": "relay", "model": "gpt-6" } }
-  }
-}
-```
-
-- `?fresh=1`：绕过两层缓存（能力快照 15 s、中转站探测 10 min），用于「刷新」与 `llm/adapters-updated`；仍会合并进行中的扫描。
-- `?reload=1`：用于「重新获取能力」，先让能力缓存、探测缓存、图像准入缓存与 in-flight 扫描全部作废，再重新读取；不改任何显示开关。浏览器端优先走该路由，Host 半太旧时会退回 `session.modelCatalog()` 并在页面顶部提示。
-- `GET /overrides` 返回 `{ ok, value: { overrides } }`；`POST /overrides` 接受一条覆盖，`{ "remove": true, "provider", "model" }` 删除一条；可带 `"applyToProvider": false` 只写本地（默认 `true`）。响应里的 `value.provider` 说明是否写进 Provider 配置（`{ written, fields, ns?, reason?, message? }`）。
-
-## 结构
-
-| 文件 | 作用 |
+| 现象 | 建议 |
 | --- | --- |
-| `package.json` | bundle 清单、`dsh.client` 声明、locale 与 icon 导出 |
-| `cordis.patch.yml` | 插入 Host 行 `model-visibility` |
-| `index.js` | Host：`hidden` 持久化 + 影子副本 + 能力路由 + 覆盖路由 + 缓存失效 |
-| `lib/model-info.js` | 能力合并：证据优先级、`describeCatalog`、15 s 缓存、图像准入判定 |
-| `lib/model-overrides.js` | 手动覆盖的读写与校验（`overrides.json`，按 mtime 重读） |
-| `lib/provider-write.js` | 把可对应字段写回 `llm-pi-ai` Provider 配置（`settings.mutate` 路径操作） |
-| `lib/learned-catalog.js` | 学习快照 `learned.json` 的读写与归一化 id 匹配 |
-| `lib/check-catalog.js` | 联网校验：公开目录四源解析（models.dev 三种端点 / OpenRouter / Hugging Face 含镜像回退）、强格式提示词与校验、校验员分批、并发线程、写回与进度状态 |
-| `lib/usage-ledger.js` | token 用量账本：会话日志 zstd 帧解码、按天 / 按模型折叠与增量扫描 |
-| `lib/export-csv.js` | 一键导出的两个 CSV 生成器（用量 / 模型清单） |
-| `lib/provider-probe.js` | 读取 Provider 配置、解析凭据、探测中转站、10 min 缓存与诊断 |
-| `lib/capability-catalog.js` | 模型类型与家族模态启发式（快照层之后的最后兜底） |
-| `lib/capability-corrections.js` | 厂商文档校正表（如 GLM-5.3 纯文本），带来源链接 |
-| `lib/image-input-gate.js` | 在 pi-ai 适配器上补图像输入能力（可逆） |
-| `client-src/*.mjs` | 浏览器端源码（纯函数模块可被 `node --test` 直测），`scripts/build-client.mjs` 机械拼装成单文件 bundle |
-| `client.js` | 构建产物（勿手改）：设置页、筛选、折叠、覆盖编辑器、能力标签、用量条、校验面板、模型目录 store 过滤 |
-| `locale/*.json` | 插件列表里的标题与描述 |
-| `test/*.test.mjs` | 180 个单元 / 集成 / 渲染冒烟测试（`test/setup.mjs` 把 `DSH_HOME` 指向临时目录，测试不读本机真实快照） |
-| `icon.svg` · `docs/` | 插件图标与截图 |
+| 页面退回基础模型目录 | Host 路由尚未加载或读取失败。重新加载 Host/重启 DSH 后，再点「重新获取能力」。 |
+| 模型仍显示纯文本 | 检查 Provider 是否显式配置了 `input: [text]`；必要时用「编辑能力」修正。 |
+| 页面显示多模态但仍不能发图 | 确认放行开关已开启、路由属于 pi-ai 中转站，并重新加载 Host；再用真实小图验证。 |
+| 推理档位为空 | 适配器未公布该信息。手动配置或校验后写回，再重新加载 Host。 |
+| 中转站显示读取失败 | 悬停分组徽标查看 DNS、超时、鉴权或 TLS 诊断；`/api/pricing` 返回 403/404 属常见降级。 |
+| 校验批次失败 | 查看面板的真实错误；换非思考型校验员、降低并发，或稍后重试。 |
+| 隐藏列表在重装后恢复 | 删除 `hidden.json` 可重置；该文件正是用于跨 profile 修复和插件重装恢复偏好。 |
 
-## 实现要点
+更多已知约束：只处理 pi-ai 的图像准入；官方校正是手工维护的小表；冷门模型仍需手动补充；大规模会话日志的首次扫描可能耗时数秒至数十秒。
 
-<details>
-<summary><b>过滤模型（点开）</b></summary>
-
-- 不注册 `conversation.input.model` 座位：官方选择器仍是唯一占位者。过滤发生在会话目录的 store 上——`getSnapshot()` / `subscribe()` 被**就地**替换成过滤版本，因为官方座位可能在本插件加载前就捕获了同一个 store 对象，替换对象本身够不到它。
-- 目录来自共享的 `modelDirectories.directoryFor(sessionId)`；插件同时包装该方法，让之后新建的目录也走同一套 store 补丁。
-- 隐藏项用 `provider/model` 字符串作为不透明 key，Set 化后同时用于设置页与过滤。
-- 设置页读写走 `ctx.configForms.get('model-visibility')`，与 Host 设置文档保持同一 revision；写入失败会在页面上提示。
-
-</details>
-
-<details>
-<summary><b>能力合并（点开）</b></summary>
-
-- `describeResolvedModel` 只把 `resolveModelInfo()` 的结果变成纯对象；真正的合并发生在 `mergeCapabilities`（纯函数，单测直接覆盖）。
-- `profile.models` 里为空数组的 `input` 视为「未声明」，不是「仅文本」；只有显式非空 `input`，或 `defaultInput` 明确包含非文本模态时，才记为 `config`。
-- 上下文同理：中转站的 `defaultContextWindow: 262144` 是 DSH 默认值，不当事实使用。
-- 模型类型优先取中转站的 `type` / `supported_endpoint_types`，其次学习快照 `type`，最后用模型名关键词；生成类模型走 `generationTags`，不显示推理档位与文本标签。
-- 所有字段可选：不知道就显示未知，不猜。
-- 厂商校正只在 `snapshot` / `inferred` / `unknown` / `provider` 上生效；被校正的模型带 `correction` 记录，页面渲染 `官方校正`。
-
-</details>
-
-<details>
-<summary><b>请求侧图像准入（点开）</b></summary>
-
-- `createModelInfoService` 的 `imageInputAllowed(provider, model)` 与页面共用 `mergeCapabilities`，所以标签和准入不会各说各话；判定结果缓存 30 s，`invalidate()` 时清空。
-- `installImageInputGate` 只识别同时具备 `modelOf` / `profileOf` / `current` 的 pi-ai 适配器，包装其 `modelOf` 并保留原对象；适配器重建时由 `llm/adapters-updated` 调用 `refresh()`。
-- 只有 Provider 有设置档（即中转站路由）时才参与对齐；内置适配器继续用自己的声明。
-
-</details>
-
-<details>
-<summary><b>缓存与失效（点开）</b></summary>
-
-- 能力快照 TTL 15 s，`?fresh=1` 绕过；并发页面读共享同一个 in-flight Promise。
-- 中转站探测 TTL 10 min，`?fresh=1` 也强制重探。
-- `llm/adapters-updated`、`credentials/record-updated`、`credentials/reference-updated`：能力缓存与探测缓存一起失效。
-- `settings/document-updated`：能力缓存失效，但探测缓存只在 Provider 路由指纹（id / baseURL / apiKeyEnv / 模型 id 集合）真的变化时才失效——隐藏一个模型不会触发网络探测。
-
-</details>
-
-## token 用量账本
-
-- 数据源：`$DSH_HOME/sessions/**` 的会话日志（逐行 zstd 帧；`assistant/message` / `assistant/attempt` 携带 provider 回报的 `usage` 与路由归属）。
-- 折叠语义与官方 token-meter 的 `tokenUsage` 投影逐位一致（同 (turn, step) 的修订替换、`llm/retry-started` 让重试加计；已在参考日志上对账验证）。
-- 扫描增量：文件 (mtime, size) 未变即复用 `usage-ledger.json` 缓存；首次全量在后台（几百 MB 约几十秒），之后近 0 成本。
-- 当前月的记录按事件日精确到天；更早的按会话创建日粗算（悬停有说明），模型归属始终精确。
-- 校验功能的消耗按同口径入账。
-
-## 持久化
-
-`cordis.patch.yml` 是「用户覆盖层」，DSH 会整层重建它：
-
-- profile 自愈（`sanitizeProfile`）会把整份 patch 改名成 `.bak-<ts>` 后从空文件重来；
-- 插件重装 / 升级会重置该行的 `config`；
-- 设置写入时若新值等于继承值（例如隐藏列表为空），DSH 会直接删掉这一行。
-
-任何一种发生，`hidden` 都会退回默认值 `[]`。所以 Host 端做两件事：
-
-1. **镜像**：每次 `hidden` 变化（`loader/volatile-update` / `settings/document-updated`）都原子写入 `$DSH_HOME/dsh-model-visibility/hidden.json`；插件加载和卸载时各同步一次。
-2. **恢复**：`hidden` 的 schema 默认值在模块加载时从该文件读取，所以 patch 层被清空后，插件重新加载得到的是上次的列表而不是空列表。
-
-文件缺失或损坏按空列表处理；要重置删掉即可。文件是全局的（不按 profile 区分）。
-
-手动覆盖是另一份独立文件 `$DSH_HOME/dsh-model-visibility/overrides.json`（`{ version: 1, overrides: [...] }`），同样不经过 profile 补丁。
-
-## 测试
+## 开发与测试
 
 ```powershell
-npm test
+npm test          # 186 个自动化测试
+npm run build     # client-src/*.mjs → client.js
+npm pack --dry-run
 ```
 
-180 个用例。覆盖：证据优先级、默认文本不被当成事实、三种中转站 dialect 的解析、凭据缺失与 401、`/v1/models` 回退、pricing 回退与传输错误可读化、缓存 TTL / `fresh` / `reload`、模型类型与家族模态、目录别名匹配、推理档位清洗与 Provider 档位白名单、官方校正、手动覆盖的校验与持久化（含损坏文件与外部改动）、Provider 回写（档位映射、按模型下标写入、各种拒绝原因、写后字段剥离）、请求侧图像准入与适配器闸门的可逆性、CSV 导出（真实账本形状、转义、公式注入）、校验批次的输出预算与截断诊断 / 失败切分重试 / 取消重启互斥，以及 Host 接线（能力路由 + 校正 + `applyInput` 开关 + 硬重载提升 `reload` 能力位 + 覆盖读写路由 + 回写后网关立即按新配置放行）。
+浏览器源码位于 `client-src/`，`client.js` 是构建产物，不要直接手改。Host 与核心逻辑位于 `index.js` 和 `lib/`。
 
-`test/client-render.test.mjs` 额外把真实 `client.js` 渲染一遍并点击每个控件：单测曾 115/115 全绿，而设置页每个模型开关都在抛 `ReferenceError: FIELD is not defined`（1.10.0 拆模块时丢的 import），因为旧测试只验证「模块能被 require」，从没渲染过组件。
-
-GUI 冒烟（改完代码后）：
-
-1. 改 `client-src/*.mjs` → `npm run build` → `Ctrl+R`，确认标签、筛选、虚线来源、类型颜色与左侧色条。
-2. 折叠分组，刷新后仍在；工具栏一次切换全部分组，不影响开关。
-3. 改 `index.js` / `lib` → 重启 DSH（或等 profile 重组）。
-4. 重载后确认页面底部有「中转站探测：…」与「学习快照：…」，Grok / Claude / GPT / Gemini 显示真实上下文与多模态；`glm-5.3` 显示 `纯文本` + `官方校正`。
-5. 「重新获取能力」可用，点一次后列表重新加载。
-6. 打开输入框模型菜单：被关的模型不出现，当前模型仍显示。
-7. 给标注 `多模态` 的中转站模型发图：直接成功；关掉开关后恢复「模型不支持图像输入」。
-8. 点「编辑能力」保存后标签变 `手动`，刷新仍在；清空保存恢复自动。
-9. 勾「同时写入模型提供商设置」，确认提示已写入，Provider 设置里能看到 `input` / `contextWindow` / `reasoningEfforts`。
-10. 顶部用量条显示今天 / 本周 / 本月 / 总计（首次扫描期间显示「统计中…」）；两个导出按钮各得一份 CSV。
-11. 展开校验面板，选定校验员并开始：进度逐批推进，结束后相关能力标签变为「已校验」来源；关掉写回开关时 Provider 配置保持不变。
-
-## 已知限制
-
-- **学习快照要喂养**：没跑过校验的新模型靠探测或模型名推断；公开目录覆盖不到冷门路由模型时可手改 `learned.json` 或再校验一次。
-- **官方校正是手工维护的小表**：只收厂商文档能证明的错误行；校验员答错时它是最后防线。
-- **中转站不一定公布能力**：多数 `/v1/models` 只有 id；New API 的 `/api/pricing` 经常被关闭（403）。
-- **模型名推断保守**：不在目录、名字也没特征的自定义模型显示未知，不猜。
-- **DSH 的模态契约只有 text / image**：视频 / 音频输入无法进入官方请求准入；请求侧对齐也只处理 `image`。
-- **请求侧对齐只覆盖 pi-ai 中转站**：内置适配器与其它协议按自己的声明工作。
-- **适配器声明优先**：Provider 明确写了 `input: [text]` 时页面尊重该声明，想改就以 Provider 配置为准。
-- **「重新获取能力」造不出适配器没公布的档位**：pi-ai 适配器会缓存自己的模型快照；配置没写 `reasoningEfforts` 且学习快照没有档位时仍为空，可先「联网校验」再写回，或改配置后重启。
-- 上下文按十进制缩写（262144 → `262.1K`），精确值在悬停里。
-- 目录是实时注册表快照，动态免费模型源刷新时总数可能与输入框旧缓存略有出入，点「刷新」对齐。
-
-## 隐私
-
-- 探测只向设置文档里该 Provider 的 `baseURL` 同源地址发请求，不跟随重定向。
-- 密钥只在 Host 内存里用于构造一次请求头，不写日志、不进路由响应、不进诊断。
-- 页面只拿到能力事实和来源标签。
+架构、接口契约、修改指引、验证与发布清单见 **[HANDOVER.md](HANDOVER.md)**。
 
 ## License
 
-MIT
+[MIT](LICENSE)

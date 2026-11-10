@@ -193,6 +193,26 @@ test('plugin-attributed usage lands in the same day buckets', () => {
   assert.equal(snap.byModel['checker/gpt-6'][0], 1000)
 })
 
+test('dispose joins the scan and prevents later persistence', async () => {
+  const home = tempDir()
+  const sessions = path.join(home, 'sessions', 'proj', 'session-a')
+  fs.mkdirSync(sessions, { recursive: true })
+  fs.writeFileSync(
+    path.join(sessions, 'session.v4.jsonl.zstd'),
+    frame(messageEvent({ time: Date.now(), turn: 0, step: 0, input: 10, output: 5 })),
+  )
+  const file = path.join(home, 'dsh-model-visibility', 'usage-ledger.json')
+  const ledger = createUsageLedger({ home, file, sessionsRoot: path.join(home, 'sessions') })
+  const scan = ledger.rescan()
+  await ledger.dispose()
+  await scan
+  assert.equal(ledger.isScanning(), false)
+  assert.equal(fs.existsSync(file), false)
+  ledger.notePluginUsage({ usage: { inputTokens: 10, outputTokens: 1 } })
+  await ledger.rescan()
+  assert.equal(fs.existsSync(file), false)
+})
+
 test('weekStartKey and monthKeyOf follow the local calendar', () => {
   // 2026-11-08 is a Sunday; the ISO week containing it starts Monday 2026-11-02.
   const stamp = new Date(2026, 10, 8).getTime()

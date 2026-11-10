@@ -51,6 +51,31 @@ test('upsert merges field by field and keeps the freshest timestamp', () => {
   assert.deepEqual(fact.origins.sort(), ['checker', 'public'])
 })
 
+test('an older verification fills gaps without replacing newer facts', () => {
+  const file = path.join(tempHome(), 'dsh-model-visibility', 'learned.json')
+  const store = createLearnedCatalog({ file })
+  store.upsertEntries(
+    [{ id: 'model-a', contextWindow: 200000, input: ['text', 'image'] }],
+    { origins: ['checker'], verifiedAt: 200 },
+  )
+  store.upsertEntries(
+    [{ id: 'model-a', contextWindow: 100000, input: ['text'], reasoning: true }],
+    { origins: ['public'], verifiedAt: 100 },
+  )
+
+  assert.deepEqual(store.get('model-a'), {
+    id: 'model-a',
+    contextWindow: 200000,
+    input: ['text', 'image'],
+    reasoning: true,
+    verifiedAt: 200,
+    origins: ['checker', 'public'],
+  })
+  const persisted = createLearnedCatalog({ file }).get('model-a')
+  assert.equal(persisted.contextWindow, 200000)
+  assert.deepEqual(persisted.input, ['text', 'image'])
+})
+
 test('an entry-level origin wins over the call-level stamp', () => {
   // The sweep flushes a whole batch in one call, so the call-level origin is a
   // default for entries that do not name their own. Before this, the batch

@@ -287,6 +287,10 @@ export function apply(ctx, config) {
     // incrementally in a background pass, the check sweep records its own
     // spend into the same buckets.
     const usageLedger = createUsageLedger({ logger })
+    scope.effect(
+      () => () => usageLedger.dispose(),
+      'model-visibility: usage ledger',
+    )
     let lastRescanAt = -Infinity
     const nowMs = () => Date.now()
     const maybeRescan = () => {
@@ -312,6 +316,10 @@ export function apply(ctx, config) {
         imageInput.refresh()
       },
     })
+    scope.effect(
+      () => () => verifier.dispose(),
+      'model-visibility: capability verifier',
+    )
     /** Answer with JSON; the route is diagnostics-friendly on purpose. */
     const json = (value, status = 200) =>
       new Response(JSON.stringify(value), {
