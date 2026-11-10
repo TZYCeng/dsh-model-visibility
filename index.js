@@ -312,7 +312,6 @@ export function apply(ctx, config) {
         imageInput.refresh()
       },
     })
-
     /** Answer with JSON; the route is diagnostics-friendly on purpose. */
     const json = (value, status = 200) =>
       new Response(JSON.stringify(value), {
@@ -596,9 +595,12 @@ export function apply(ctx, config) {
             }
             // The sweep runs in the background: the response only reports that
             // it was accepted, and polling GET observes the progress state.
+            // `concurrency` is a per-run choice (how many checker calls may be
+            // in flight), so a fast relay can use more threads than the default.
+            const concurrency = Number.isFinite(body?.concurrency) ? body.concurrency : undefined
             if (!verifier.isRunning()) {
               verifier
-                .start({ checker: { provider, model }, writeBack: body?.writeBack !== false })
+                .start({ checker: { provider, model }, writeBack: body?.writeBack !== false, concurrency })
                 .then(() => {
                   // Learned facts (and possibly provider settings) changed.
                   service.invalidate()

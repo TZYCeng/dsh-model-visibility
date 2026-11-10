@@ -104,8 +104,30 @@ test('DICT keeps zh and en in lock-step and translates the new panels', () => {
   assert.ok(zh.includes('usage.title'))
   assert.ok(zh.includes('checker.writeBack'))
   assert.ok(zh.includes('source.snapshot'))
-  assert.notEqual(DICT.zh['usage.range'], DICT.en['usage.range'])
+  assert.notEqual(DICT.zh['usage.detail'], DICT.en['usage.detail'])
   assert.ok(CSS.includes('mvp_usage') && CSS.includes('mvp_checker'))
+})
+
+test('every dictionary placeholder is spelled the same in zh and en', () => {
+  const placeholders = (value) =>
+    new Set([...String(value).matchAll(/\{(\w+)\}/g)].map((match) => match[1]))
+  const drift = []
+  for (const key of Object.keys(DICT.zh)) {
+    const left = placeholders(DICT.zh[key])
+    const right = placeholders(DICT.en[key])
+    for (const name of left) if (!right.has(name)) drift.push(`${key}: zh-only {${name}}`)
+    for (const name of right) if (!left.has(name)) drift.push(`${key}: en-only {${name}}`)
+  }
+  assert.deepEqual(drift, [])
+})
+
+test('no dictionary entry ships a literal unresolved placeholder in a no-param call', () => {
+  // `checker.running` used to be called without `tokens`, so the UI showed a
+  // literal "{tokens}". Pin the keys whose call sites are easy to get wrong.
+  for (const key of ['checker.running', 'checker.finished', 'checker.progress']) {
+    assert.match(DICT.zh[key], /\{tokens\}/, `${key} should ask for {tokens}`)
+    assert.match(DICT.en[key], /\{tokens\}/, `${key} should ask for {tokens}`)
+  }
 })
 
 test('the verify store starts and cancels through the same-origin route', async () => {

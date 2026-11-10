@@ -93,9 +93,16 @@ export function sourceOf(model, field) {
   return sources && typeof sources[field] === 'string' ? sources[field] : 'unknown'
 }
 
-/** Catalog and name heuristics are completed values, not declarations. */
+/**
+ * Sources whose values are completed or inferred rather than declared.
+ *
+ * `snapshot` is the learned store: facts a checker model or a public catalog
+ * reported. Only the adapter, the settings document, the relay's own listing
+ * and a vendor correction count as declarations, so a verified row must stay
+ * dashed — otherwise an LLM guess would look as trustworthy as a declaration.
+ */
 export function isInferredSource(source) {
-  return source === 'catalog' || source === 'inferred'
+  return source === 'snapshot' || source === 'inferred'
 }
 
 /** Kind with a safe fallback for records from an older Host. */

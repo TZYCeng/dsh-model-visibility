@@ -2,9 +2,20 @@
  * Learned-snapshot matching, name heuristics and evidence precedence.
  *
  * These tests are pure: no DSH runtime, no network, no settings document.
+ *
+ * DSH_HOME must point at a scratch directory BEFORE the modules load: the
+ * catalog layer falls back to `$DSH_HOME/dsh-model-visibility/learned.json` for
+ * callers that do not inject a store, and reading the machine's real snapshot
+ * made these assertions depend on whatever the user had verified.
  */
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
+
+const SANDBOX_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'mv-capability-'))
+process.env.DSH_HOME = SANDBOX_HOME
 
 import {
   inferInputModalities,
@@ -16,6 +27,15 @@ import { modelIdVariants, normalizeModelId } from '../lib/model-id.js'
 import { createLearnedCatalog } from '../lib/learned-catalog.js'
 import { lookupCorrection } from '../lib/capability-corrections.js'
 import { indexDiscovered, mergeCapabilities } from '../lib/model-info.js'
+
+/** The learned file the module-level fallback would read, for the assertions. */
+const FALLBACK_FILE = path.join(SANDBOX_HOME, 'dsh-model-visibility', 'learned.json')
+
+test('the pure merge never reads the machine’s real learned snapshot', () => {
+  // Guard the sandbox itself: if this file exists, the isolation is broken and
+  // the assertions below would be measuring the user's data.
+  assert.equal(fs.existsSync(FALLBACK_FILE), false)
+})
 
 test('normalizeModelId strips aggregator prefixes and request suffixes', () => {
   assert.equal(normalizeModelId('openai/gpt-image-2'), 'gpt-image-2')

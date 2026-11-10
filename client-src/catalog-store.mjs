@@ -286,6 +286,7 @@ export function createUsageApi() {
   let state = { status: 'idle', snapshot: null, error: null }
   let inflight = null
   let timer = null
+  let timerMs = null
 
   const publish = (next) => {
     state = next
@@ -317,16 +318,33 @@ export function createUsageApi() {
     return run
   }
 
-  /** One poll now and another every POLL_MS while someone subscribes. */
+  /**
+   * Poll cadence follows the ledger's own progress: a cold scan of the session
+   * tree takes seconds, so the strip asks again quickly until it settles
+   * instead of showing em dashes for half a minute.
+   */
+  const LIVE_POLL_MS = 3_000
   const POLL_MS = 30_000
-  const startTimer = () => {
-    if (timer !== null) return
-    timer = setInterval(() => read(), POLL_MS)
+  const rearm = () => {
+    // Same rule as the verify store: no observer, no armed timer.
+    if (listeners.size === 0) {
+      stopTimer()
+      return
+    }
+    const wantMs = state.snapshot?.computing === true ? LIVE_POLL_MS : POLL_MS
+    if (timer !== null && timerMs === wantMs) return
+    if (timer !== null) clearInterval(timer)
+    timerMs = wantMs
+    timer = setInterval(() => {
+      void read().then(rearm, rearm)
+    }, wantMs)
+    if (typeof timer === 'object' && timer !== null && typeof timer.unref === 'function') timer.unref()
   }
   const stopTimer = () => {
     if (timer !== null) {
       clearInterval(timer)
       timer = null
+      timerMs = null
     }
   }
 
@@ -334,7 +352,11 @@ export function createUsageApi() {
     subscribe(fn) {
       const first = listeners.size === 0
       listeners.add(fn)
-      if (first) startTimer()
+      // Read once immediately: waiting a full poll interval is why the strip
+      // looked empty on every first visit.
+      if (first) {
+        void read().then(rearm, rearm)
+      }
       return () => {
         listeners.delete(fn)
         if (listeners.size === 0) stopTimer()
@@ -344,12 +366,21 @@ export function createUsageApi() {
       return state
     },
     load() {
-      return read()
+      return read().then(
+        (value) => {
+          rearm()
+          return value
+        },
+        (error) => {
+          rearm()
+          throw error
+        },
+      )
     },
     refresh() {
       // A POST rescan is never needed: the Host rescan throttle refreshes on
       // reads anyway. A plain read is enough here.
-      return read()
+      return this.load()
     },
   }
 }
@@ -364,6 +395,8 @@ export function createVerifyApi() {
   let state = { status: 'idle', snapshot: null, error: null }
   let inflight = null
   let timer = null
+  /** Cadence the armed timer currently runs at, so rearm can compare. */
+  let timerMs = null
 
   const publish = (next) => {
     state = next
@@ -425,16 +458,30 @@ export function createVerifyApi() {
 
   const SWEEP_POLL_MS = 2_000
   const IDLE_POLL_MS = 60_000
-  const startTimer = () => {
-    if (timer !== null) return
+  /** Re-arm the timer at the cadence the *current* snapshot needs. */
+  const rearm = () => {
+    // Never arm a timer nobody will observe: a bare `load()` (a test, an
+    // explicit refresh) must not leave an interval holding the page alive.
+    if (listeners.size === 0) {
+      stopTimer()
+      return
+    }
+    const wantFast = state.snapshot?.state?.running === true
+    const wantMs = wantFast ? SWEEP_POLL_MS : IDLE_POLL_MS
+    if (timer !== null && timerMs === wantMs) return
+    if (timer !== null) clearInterval(timer)
+    timerMs = wantMs
     timer = setInterval(() => {
-      void read()
-    }, state.snapshot?.state?.running === true ? SWEEP_POLL_MS : IDLE_POLL_MS)
+      void read().then(rearm, rearm)
+    }, wantMs)
+    // A polling strip must not keep a non-browser process alive.
+    if (typeof timer === 'object' && timer !== null && typeof timer.unref === 'function') timer.unref()
   }
   const stopTimer = () => {
     if (timer !== null) {
       clearInterval(timer)
       timer = null
+      timerMs = null
     }
   }
 
@@ -443,8 +490,8 @@ export function createVerifyApi() {
       const first = listeners.size === 0
       listeners.add(fn)
       if (first) {
-        void read()
-        startTimer()
+        void read().then(rearm, rearm)
+        rearm()
       }
       return () => {
         listeners.delete(fn)
@@ -455,13 +502,40 @@ export function createVerifyApi() {
       return state
     },
     load() {
-      return read()
+      return read().then(
+        (value) => {
+          rearm()
+          return value
+        },
+        (error) => {
+          rearm()
+          throw error
+        },
+      )
     },
     start(payload) {
-      return post(payload)
+      return post(payload).then(
+        (value) => {
+          rearm()
+          return value
+        },
+        (error) => {
+          rearm()
+          throw error
+        },
+      )
     },
     cancel() {
-      return post({ cancel: true })
+      return post({ cancel: true }).then(
+        (value) => {
+          rearm()
+          return value
+        },
+        (error) => {
+          rearm()
+          throw error
+        },
+      )
     },
   }
 }

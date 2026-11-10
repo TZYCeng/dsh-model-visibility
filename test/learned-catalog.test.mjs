@@ -51,6 +51,24 @@ test('upsert merges field by field and keeps the freshest timestamp', () => {
   assert.deepEqual(fact.origins.sort(), ['checker', 'public'])
 })
 
+test('an entry-level origin wins over the call-level stamp', () => {
+  // The sweep flushes a whole batch in one call, so the call-level origin is a
+  // default for entries that do not name their own. Before this, the batch
+  // stamp overwrote the public/checker distinction the caller had just worked
+  // out, and every public-only fact was recorded as a checker answer.
+  const store = createLearnedCatalog({ file: path.join(tempHome(), 'dsh-model-visibility', 'learned.json') })
+  store.upsertEntries([{ id: 'from-public', contextWindow: 1000, origins: ['public'] }], {
+    verifiedAt: 1,
+    origins: ['checker'],
+  })
+  store.upsertEntries([{ id: 'from-checker', contextWindow: 2000 }], {
+    verifiedAt: 2,
+    origins: ['checker'],
+  })
+  assert.deepEqual(store.get('from-public').origins, ['public'])
+  assert.deepEqual(store.get('from-checker').origins, ['checker'])
+})
+
 test('an entry with no usable field is ignored', () => {
   const store = createLearnedCatalog({ file: path.join(tempHome(), 'dsh-model-visibility', 'learned.json') })
   store.upsertEntries([

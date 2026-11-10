@@ -8,8 +8,8 @@
 
 [![license](https://img.shields.io/badge/license-MIT-3da639?style=flat-square)](LICENSE)
 [![dsh bundle](https://img.shields.io/badge/DeepSeek%20Harness-bundle-4d6bfe?style=flat-square)](package.json)
-[![tests](https://img.shields.io/badge/tests-114%20passing-3da639?style=flat-square)](test)
-[![version](https://img.shields.io/badge/version-1.10.3-4d6bfe?style=flat-square)](https://github.com/TZYCeng/dsh-model-visibility/releases)
+[![tests](https://img.shields.io/badge/tests-180%20passing-3da639?style=flat-square)](test)
+[![version](https://img.shields.io/badge/version-1.12.1-4d6bfe?style=flat-square)](https://github.com/TZYCeng/dsh-model-visibility/releases)
 [![marketplace](https://img.shields.io/badge/awesome--dsh--plugin-listed-8a2be2?style=flat-square)](https://awesome-dsh-plugin.com/p/TZYCeng/dsh-model-visibility/)
 
 </div>
@@ -64,7 +64,7 @@ yujianwudi:
 | **官方校正** | 厂商文档能证明的错误行（如 `glm-5.3` 被目录标成多模态）显示 `官方校正` + 文档链接，并压过目录与中转站列表 |
 | **图像放行** | 默认开启：判定可输入图像的中转站对话模型，在请求侧补上 `image`，不用改任何配置文件；关闭即回到适配器声明 |
 | **token 用量** | 页面顶部常驻：今天 / 本周 / 本月 / 总计的输入与输出 token（缓存读写合计进输入）；一键导出用量 CSV 与模型清单 CSV |
-| **联网校验** | 选一个「校验员」模型：先拉 models.dev / OpenRouter 公开目录做基准，再分批核对其余模型的类型 / 上下文 / 模态 / 推理档位；结果写进本页与本地快照 `learned.json`（同名模型跨路由复用缓存），开关打开时同时写入提供商配置 |
+| **联网校验** | 选一个「校验员」模型：先拉公开目录（models.dev 两种端点 / OpenRouter / Hugging Face，含国内镜像回退）做基准，再分批核对其余模型的类型 / 上下文 / 模态 / 推理档位；**公开目录拿到的事实会真正并入结果**，校验员答不上时照样落库。结果写进本页与本地快照 `learned.json`（同名模型跨路由复用缓存），开关打开时同时写入提供商配置；并发线程可按次调整 |
 | **重新获取能力** | 工具栏「重新获取能力」作废旧缓存与进行中的扫描，重新询问适配器与所有中转站（比「刷新」更硬，只绕过 TTL 的「刷新」仍会合并进行中的读取） |
 | **ID 归一化** | `openai/gpt-4o`、`~deepseek-v3`、`glm-5.3:free`、`:free:batch` 这类前缀 / 叠加后缀先归一化再匹配目录，避免「同一个模型查不到」 |
 | **持久化** | 隐藏列表写进 profile 的 `cordis.patch.yml`，并镜像到 `$DSH_HOME/dsh-model-visibility/hidden.json`，插件重装 / profile 自愈后自动恢复；手动覆盖单独一份 `overrides.json` |
@@ -94,12 +94,18 @@ npm install
 
 ## 界面速览
 
-- **顶部统计**：`已显示 86 / 301 个模型 · 已关闭 215 个`，后面跟着 `全部显示`、`折叠全部分组`、`刷新`、`重新获取能力`。
-- **筛选栏**：搜索框（名称或 ID）、类型按钮（带数量）、能力开关、最小上下文下拉。
-- **图像放行开关**：`让输入框按能力标注放行图像`，说明写在旁边，实时生效。
-- **图例**：解释标签含义（推理 / 上下文 / 多模态）、类型配色，以及「手动」标签的优先级。
-- **分组**：标题显示 `已显示/总数`、`对话 n · 生图 n · 生视频 n · 其它 n`、以及该中转站读到了多少模型 / 多少能力字段；右侧是整组开关。
-- **模型行**：左侧色条表示类型，行内是能力标签，「编辑能力」打开覆盖表单，最右是开关。
+- **标题行**：`已显示 36 / 271 · 已关闭 235`，右侧是 `说明`、`刷新`、`重新获取能力`。
+  `说明` 折叠着标签含义、来源分层与类型配色——默认收起，把首屏留给模型。
+- **用量条**：`今天 / 本周 / 本月 / 总计` 四个数字（合计 token，悬停看输入/输出/缓存读写拆分），
+  右侧是 `用量 CSV` 与 `模型 CSV`。首次扫描期间数字来自已折叠的账本，扫描中显示「统计中…」并加快轮询。
+- **筛选栏**：搜索框、类型按钮（带数量）、`多模态` / `支持推理`、上下文下限，以及右端的
+  `全部显示` 与 `折叠全部`。
+- **图像放行**：一行开关加一句说明，不再是整块说明卡。
+- **分组**：整行标题可点（折叠/展开），显示 `已显示/总数`、类型计数，以及中转站诊断徽标
+  （只有真出问题时才是告警色）。全组开关是右侧的轻量按钮。
+- **模型行**：名称与 ID 同一行，下方是能力标签；行右侧是 `编辑` 与开关。
+- **页脚**：`探测：N 个中转站可读` 与 `学习快照 N 条`。
+- **联网校验**：底部一个可折叠面板，展开才有校验员选择与进度；失败的批次直接列出真实原因。
 
 ## 能力标注从哪里来
 
@@ -189,14 +195,31 @@ Host 端通过 `settings.describe()` 读取配置了 `baseURL` 与 `apiKeyEnv` �
 3. 同源尝试 `GET {origin}/api/pricing`（New API 的公开价格接口），用 `supported_endpoint_types` 判断生图 / 生视频 / 嵌入；
 4. 只保留能力事实（模态、上下文、最大输出、推理、类型），不保留响应正文；失败只记录诊断。
 
-安全约束：不跟随重定向（避免把 `Authorization` 带到别的域）、4 MB 响应上限、每请求 3.5 s 超时、Provider 并发探测、结果缓存 10 分钟。关闭探测：设置行写 `probe: false`，或环境变量 `MODEL_VISIBILITY_PROBE=0`。
+**降级与诊断**：`/models` 401/403/超时/DNS 失败时，若 `/api/pricing` 还能列出模型，就退化为 `partial`——
+分组会显示「价格接口 N 个」，模型总数与类型仍然正确；两者都失败时状态为 `failed`，分组徽标显示
+「读取失败」，悬停可看到人类可读的原因（如「域名解析失败（DNS 查不到该主机）」「连接超时」），
+而不是裸的 `ENOTFOUND`。
+
+安全约束：**只向 `https://` 的 base URL 发请求（`http://` 仅放行 localhost / 127.0.0.1 / ::1）**，
+避免明文链路带走 API key；不跟随重定向（避免把 `Authorization` 带到别的域）、4 MB 响应上限、
+每请求 3.5 s 超时、Provider 并发探测、结果缓存 10 分钟。关闭探测：设置行写 `probe: false`，
+或环境变量 `MODEL_VISIBILITY_PROBE=0`。
 
 ## 学习快照（联网校验）
 
 静态内置目录（models.dev 2026-10-07 快照）已删除：多数中转站不公布上下文 / 模态 / 推理档位，静态表会过时。替代品是**学习快照** `~/.dsh/dsh-model-visibility/learned.json`，数据来自两层：
 
-1. **公开目录基准**：`https://models.dev/api.json` 与 `https://openrouter.ai/api/v1/models`（无需密钥），按归一化 id 匹配；
-2. **校验员模型**：在插件设置页选定一个提供商的模型作为「校验员」，其余模型按批（默认 6 个/批、并发 2）经 `llm.prepareCall` 发给它，要求输出结构化 JSON 事实；`unknown` 一律允许，不猜。
+1. **公开目录基准**（无需密钥，按归一化 id 匹配，四源合并，**先命中者为准**）：
+   - `https://models.dev/models.json`——与 provider 无关的模型元数据（`modalities` / `limit` / `reasoning` / `attachment`），最贴合中转站的模型 id；
+   - `https://openrouter.ai/api/v1/models`——含 `architecture.input_modalities` 与 `context_length`；
+   - `https://huggingface.co/api/models`——开源权重与自建部署（vLLM / LM Studio / Ollama）几乎只出现在这里；
+     该域名在国内常不可达，会依次回退 `hf-mirror.com`、`hugging-face.cn`；
+   - `https://models.dev/api.json`——provider 限定目录，只用来补前三个源的空缺。
+2. **校验员模型**：在插件设置页选定一个提供商的模型作为「校验员」，其余模型按批（默认 6 个/批）经 `llm.prepareCall` 发给它，要求输出结构化 JSON 事实；`unknown` 一律允许，不猜。并发线程数可在面板里按次调整（1–8，默认 2）。
+
+**关键行为**：公开目录的事实会真正并入结果，而不只是给个来源标签。校验员答「不知道」、或整批失败时，
+只要公开目录里有这个模型，能力仍然会落库（来源标 `已校验`，虚线）。面板会逐条列出每个公开目录
+「读到了 / 为什么没读到 / 多少个模型」，并注明是否发生了镜像回退。
 
 结果落地：
 
@@ -206,6 +229,30 @@ Host 端通过 `settings.describe()` 读取配置了 `baseURL` 与 `apiKeyEnv` �
 - 校验自身消耗的 token 记入用量账本。
 
 进度、取消与最终统计由 `GET/POST /api/dsh-model-visibility/verify` 提供，面板内轮询展示。
+
+### 校验批次的预算、格式与失败处理
+
+校验是「查表」不是「推理」，但有四个容易踩的坑，现在都在代码里处理了：
+
+- **输出预算**：每批请求 8192 输出 token（`CHECKER_MAX_TOKENS`）。旧版写死 2048，思考型校验员
+  （如带 `reasoningEfforts` 的 DeepSeek / Claude）会把额度全花在思考通道上，正文要么为空、要么被
+  截断，于是**每一批**都报「回复里没有 JSON」——实测一次 191 个模型、32 个批次全失败、烧掉 63K token。
+- **思考档位**：请求里固定 `reasoningEffort: 'low'`（`CHECKER_REASONING_EFFORT`），把思考通道压到最低，
+  避免它挤掉正文。两项都可通过 `createCapabilityVerifier({ checkerMaxTokens, checkerReasoningEffort })` 覆盖，
+  传 `checkerReasoningEffort: null` 可关闭锁定。
+- **截断即失败**：`finish.reason.kind === 'max-tokens'` 现在会被当作错误，并明确说明「回复在 N 个输出
+  token 处被截断（模型把预算花在思考上了）」，而不是笼统的「没有 JSON」。
+- **提示词 + 格式检测**：系统提示词直接给出**精确的 JSON 数组 schema**（每个键、每个取值、`null` 表示未知、
+  禁止 markdown 围栏与解释），回复再经过 `validateReplyShape` 严格校验：必须是数组、每条要有 `id`、
+  不能漏掉被问的 id、不能多出没问的 id。不合格会**定向重试一次**；仍然不合格但 JSON 可用时，保留已答部分
+  并记下违规原因，而不是整批丢弃。`{models:[…]}` / `{results:[…]}` 这种包裹形式视为合格，不浪费重试。
+- **失败切分重试**：一批解析失败会二分重试，直到定位到那一个回答不了的模型；其余模型的事实照样落库。
+- **取消与重启互斥**：取消只 abort，不等旧 worker 结束就不再接受新 sweep；重复 `start()` 会 join 旧 run，
+  不再出现两轮并发写同一个状态（曾出现 `done=36 / total=23` 和 6 路并发调用）。
+- **并发线程**：每轮可单独设置 1–8 路并发（默认 2，上限 `MAX_CONCURRENCY`）；中转站限流时调低。
+
+`learned.json` 也改成**每批一次**批量写入（旧实现每个模型读一次、写一次整份文件：200 个模型 =
+199 次全量读 + 199 次全量写）。
 
 ## 路由
 
@@ -261,7 +308,7 @@ Host 遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInfo()
 | `lib/model-overrides.js` | 手动覆盖的读写与校验（`overrides.json`，按 mtime 重读） |
 | `lib/provider-write.js` | 把可对应字段写回 `llm-pi-ai` Provider 配置（`settings.mutate` 路径操作） |
 | `lib/learned-catalog.js` | 学习快照 `learned.json` 的读写与归一化 id 匹配 |
-| `lib/check-catalog.js` | 联网校验：公开目录双源解析、校验员分批、写回与进度状态 |
+| `lib/check-catalog.js` | 联网校验：公开目录四源解析（models.dev 三种端点 / OpenRouter / Hugging Face 含镜像回退）、强格式提示词与校验、校验员分批、并发线程、写回与进度状态 |
 | `lib/usage-ledger.js` | token 用量账本：会话日志 zstd 帧解码、按天 / 按模型折叠与增量扫描 |
 | `lib/export-csv.js` | 一键导出的两个 CSV 生成器（用量 / 模型清单） |
 | `lib/provider-probe.js` | 读取 Provider 配置、解析凭据、探测中转站、10 min 缓存与诊断 |
@@ -271,7 +318,7 @@ Host 遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInfo()
 | `client-src/*.mjs` | 浏览器端源码（纯函数模块可被 `node --test` 直测），`scripts/build-client.mjs` 机械拼装成单文件 bundle |
 | `client.js` | 构建产物（勿手改）：设置页、筛选、折叠、覆盖编辑器、能力标签、用量条、校验面板、模型目录 store 过滤 |
 | `locale/*.json` | 插件列表里的标题与描述 |
-| `test/*.test.mjs` | 72 个单元 / 集成测试 |
+| `test/*.test.mjs` | 180 个单元 / 集成 / 渲染冒烟测试（`test/setup.mjs` 把 `DSH_HOME` 指向临时目录，测试不读本机真实快照） |
 | `icon.svg` · `docs/` | 插件图标与截图 |
 
 ## 实现要点
@@ -348,7 +395,9 @@ Host 遍历 `ctx.llm.listProviders()` → `listModels()` → `resolveModelInfo()
 npm test
 ```
 
-112 个用例。覆盖：证据优先级、默认文本不被当成事实、三种中转站 dialect 的解析、凭据缺失与 401、`/v1/models` 回退、缓存 TTL / `fresh` / `reload`、模型类型与家族模态、目录别名匹配、推理档位清洗、官方校正、手动覆盖的校验与持久化（含损坏文件与外部改动）、Provider 回写（档位映射、按模型下标写入、各种拒绝原因、写后字段剥离）、请求侧图像准入与适配器闸门的可逆性，以及 Host 接线（能力路由 + 校正 + `applyInput` 开关 + 硬重载提升 `reload` 能力位 + 覆盖读写路由 + 回写后网关立即按新配置放行）。
+180 个用例。覆盖：证据优先级、默认文本不被当成事实、三种中转站 dialect 的解析、凭据缺失与 401、`/v1/models` 回退、pricing 回退与传输错误可读化、缓存 TTL / `fresh` / `reload`、模型类型与家族模态、目录别名匹配、推理档位清洗与 Provider 档位白名单、官方校正、手动覆盖的校验与持久化（含损坏文件与外部改动）、Provider 回写（档位映射、按模型下标写入、各种拒绝原因、写后字段剥离）、请求侧图像准入与适配器闸门的可逆性、CSV 导出（真实账本形状、转义、公式注入）、校验批次的输出预算与截断诊断 / 失败切分重试 / 取消重启互斥，以及 Host 接线（能力路由 + 校正 + `applyInput` 开关 + 硬重载提升 `reload` 能力位 + 覆盖读写路由 + 回写后网关立即按新配置放行）。
+
+`test/client-render.test.mjs` 额外把真实 `client.js` 渲染一遍并点击每个控件：单测曾 115/115 全绿，而设置页每个模型开关都在抛 `ReferenceError: FIELD is not defined`（1.10.0 拆模块时丢的 import），因为旧测试只验证「模块能被 require」，从没渲染过组件。
 
 GUI 冒烟（改完代码后）：
 

@@ -312,6 +312,7 @@ window.__ModuleLoader__.load({
       let state = { status: 'idle', snapshot: null, error: null }
       let inflight = null
       let timer = null
+      let timerMs = null
 
       const publish = (next) => {
         state = next
@@ -343,16 +344,33 @@ window.__ModuleLoader__.load({
         return run
       }
 
-      /** One poll now and another every POLL_MS while someone subscribes. */
+      /**
+       * Poll cadence follows the ledger's own progress: a cold scan of the session
+       * tree takes seconds, so the strip asks again quickly until it settles
+       * instead of showing em dashes for half a minute.
+       */
+      const LIVE_POLL_MS = 3_000
       const POLL_MS = 30_000
-      const startTimer = () => {
-        if (timer !== null) return
-        timer = setInterval(() => read(), POLL_MS)
+      const rearm = () => {
+        // Same rule as the verify store: no observer, no armed timer.
+        if (listeners.size === 0) {
+          stopTimer()
+          return
+        }
+        const wantMs = state.snapshot?.computing === true ? LIVE_POLL_MS : POLL_MS
+        if (timer !== null && timerMs === wantMs) return
+        if (timer !== null) clearInterval(timer)
+        timerMs = wantMs
+        timer = setInterval(() => {
+          void read().then(rearm, rearm)
+        }, wantMs)
+        if (typeof timer === 'object' && timer !== null && typeof timer.unref === 'function') timer.unref()
       }
       const stopTimer = () => {
         if (timer !== null) {
           clearInterval(timer)
           timer = null
+          timerMs = null
         }
       }
 
@@ -360,7 +378,11 @@ window.__ModuleLoader__.load({
         subscribe(fn) {
           const first = listeners.size === 0
           listeners.add(fn)
-          if (first) startTimer()
+          // Read once immediately: waiting a full poll interval is why the strip
+          // looked empty on every first visit.
+          if (first) {
+            void read().then(rearm, rearm)
+          }
           return () => {
             listeners.delete(fn)
             if (listeners.size === 0) stopTimer()
@@ -370,12 +392,21 @@ window.__ModuleLoader__.load({
           return state
         },
         load() {
-          return read()
+          return read().then(
+            (value) => {
+              rearm()
+              return value
+            },
+            (error) => {
+              rearm()
+              throw error
+            },
+          )
         },
         refresh() {
           // A POST rescan is never needed: the Host rescan throttle refreshes on
           // reads anyway. A plain read is enough here.
-          return read()
+          return this.load()
         },
       }
     }
@@ -390,6 +421,8 @@ window.__ModuleLoader__.load({
       let state = { status: 'idle', snapshot: null, error: null }
       let inflight = null
       let timer = null
+      /** Cadence the armed timer currently runs at, so rearm can compare. */
+      let timerMs = null
 
       const publish = (next) => {
         state = next
@@ -451,16 +484,30 @@ window.__ModuleLoader__.load({
 
       const SWEEP_POLL_MS = 2_000
       const IDLE_POLL_MS = 60_000
-      const startTimer = () => {
-        if (timer !== null) return
+      /** Re-arm the timer at the cadence the *current* snapshot needs. */
+      const rearm = () => {
+        // Never arm a timer nobody will observe: a bare `load()` (a test, an
+        // explicit refresh) must not leave an interval holding the page alive.
+        if (listeners.size === 0) {
+          stopTimer()
+          return
+        }
+        const wantFast = state.snapshot?.state?.running === true
+        const wantMs = wantFast ? SWEEP_POLL_MS : IDLE_POLL_MS
+        if (timer !== null && timerMs === wantMs) return
+        if (timer !== null) clearInterval(timer)
+        timerMs = wantMs
         timer = setInterval(() => {
-          void read()
-        }, state.snapshot?.state?.running === true ? SWEEP_POLL_MS : IDLE_POLL_MS)
+          void read().then(rearm, rearm)
+        }, wantMs)
+        // A polling strip must not keep a non-browser process alive.
+        if (typeof timer === 'object' && timer !== null && typeof timer.unref === 'function') timer.unref()
       }
       const stopTimer = () => {
         if (timer !== null) {
           clearInterval(timer)
           timer = null
+          timerMs = null
         }
       }
 
@@ -469,8 +516,8 @@ window.__ModuleLoader__.load({
           const first = listeners.size === 0
           listeners.add(fn)
           if (first) {
-            void read()
-            startTimer()
+            void read().then(rearm, rearm)
+            rearm()
           }
           return () => {
             listeners.delete(fn)
@@ -481,13 +528,40 @@ window.__ModuleLoader__.load({
           return state
         },
         load() {
-          return read()
+          return read().then(
+            (value) => {
+              rearm()
+              return value
+            },
+            (error) => {
+              rearm()
+              throw error
+            },
+          )
         },
         start(payload) {
-          return post(payload)
+          return post(payload).then(
+            (value) => {
+              rearm()
+              return value
+            },
+            (error) => {
+              rearm()
+              throw error
+            },
+          )
         },
         cancel() {
-          return post({ cancel: true })
+          return post({ cancel: true }).then(
+            (value) => {
+              rearm()
+              return value
+            },
+            (error) => {
+              rearm()
+              throw error
+            },
+          )
         },
       }
     }
@@ -504,12 +578,13 @@ window.__ModuleLoader__.load({
     /**
      * The online capability verification panel.
      *
-     * The user picks a checker route (provider + model) and a write-back switch,
-     * runs the sweep, and the panel polls the Host for progress and the checker's
-     * token spend. The last route choice is kept in browser storage only: the
-     * Host persists run facts, not UI selections.
+     * Collapsed to a single summary line: this is a maintenance action, not the
+     * point of the page. Expanding it reveals the checker picker, the write-back
+     * switch and — the part that matters when a sweep fails — the per-batch errors
+     * with their real messages instead of a bare count.
      *
-     * @module client-src/checker-view
+     * The last route choice is kept in browser storage only: the Host persists run
+     * facts, not UI selections.
      */
 
     const React = require('react')
@@ -519,6 +594,10 @@ window.__ModuleLoader__.load({
     const { useSource } = require("hooks")
 
     const PICK_KEY = 'dsh-model-visibility:checker-pick:v1'
+    /** How many failure lines to show before summarising the rest. */
+    const MAX_ERROR_LINES = 6
+    /** Concurrency choices offered in the panel; mirrors lib/check-catalog MAX_CONCURRENCY. */
+    const CONCURRENCY_CHOICES = [1, 2, 3, 4, 6, 8]
 
     function readPick() {
       try {
@@ -528,10 +607,14 @@ window.__ModuleLoader__.load({
               provider: typeof parsed.provider === 'string' ? parsed.provider : '',
               model: typeof parsed.model === 'string' ? parsed.model : '',
               writeBack: parsed.writeBack !== false,
+              concurrency:
+                Number.isFinite(parsed.concurrency) && parsed.concurrency > 0
+                  ? Math.min(8, Math.max(1, Math.trunc(parsed.concurrency)))
+                  : 2,
             }
-          : { provider: '', model: '', writeBack: true }
+          : { provider: '', model: '', writeBack: true, concurrency: 2 }
       } catch (_error) {
-        return { provider: '', model: '', writeBack: true }
+        return { provider: '', model: '', writeBack: true, concurrency: 2 }
       }
     }
 
@@ -562,10 +645,12 @@ window.__ModuleLoader__.load({
         .find((group) => group.id === pick.provider)?.models ?? []
 
       if (!canUse) {
-        return h('div', { className: 'mvp_fallback' }, t('checker.hostStale'))
+        return h('div', { className: 'mvp_banner' }, t('checker.hostStale'))
       }
 
-      const tokensSpent = progress ? formatTokens((progress.tokenUsage?.[0] ?? 0) + (progress.tokenUsage?.[1] ?? 0)) : null
+      const tokensSpent = progress
+        ? formatTokens((progress.tokenUsage?.[0] ?? 0) + (progress.tokenUsage?.[1] ?? 0))
+        : null
 
       const commit = (next) => {
         setPick(next)
@@ -575,11 +660,11 @@ window.__ModuleLoader__.load({
       const run = () => {
         setMessage(null)
         verify
-          .start({ provider: pick.provider, model: pick.model, writeBack: pick.writeBack })
-          .then((result) => {
-            if (result !== undefined && result.ok === false) {
-              setMessage(result.message ?? t('checker.failed'))
-            }
+          .start({
+            provider: pick.provider,
+            model: pick.model,
+            writeBack: pick.writeBack,
+            concurrency: pick.concurrency,
           })
           .catch((error) => setMessage(String(error?.message ?? error)))
       }
@@ -587,6 +672,24 @@ window.__ModuleLoader__.load({
       const cancel = () => {
         verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
       }
+
+      const summary = running
+        ? t('checker.running', {
+            phase: t('checker.phase.' + (progress?.phase ?? 'verifying')),
+            done: progress?.done ?? 0,
+            total: progress?.total ?? 0,
+            tokens: tokensSpent,
+          })
+        : finished
+          ? t('checker.finished', {
+              done: progress?.done ?? 0,
+              total: progress?.total ?? 0,
+              tokens: tokensSpent,
+            })
+          : t('checker.idle')
+
+      const errors = Array.isArray(progress?.errors) ? progress.errors : []
+      const visibleErrors = errors.slice(0, MAX_ERROR_LINES)
 
       return h(
         'div',
@@ -599,26 +702,16 @@ window.__ModuleLoader__.load({
             'aria-expanded': open,
             onClick: () => setOpen(!open),
           },
+          h('span', { className: 'mvp_chevron' }, open ? '▾' : '▸'),
           h('span', { className: 'mvp_checkerTitle' }, t('checker.title')),
-          h(
-            'span',
-            { className: 'mvp_checkerSummary' },
-            running
-              ? t('checker.running', {
-                  done: progress?.done ?? 0,
-                  total: progress?.total ?? 0,
-                  phase: t(`checker.phase.${progress?.phase ?? 'checker'}`),
-                })
-              : finished
-                ? t('checker.finished', { done: progress?.done ?? 0, total: progress?.total ?? 0, tokens: tokensSpent })
-                : t('checker.idle'),
-          ),
+          h('span', { className: 'mvp_checkerSummary' }, summary),
+          errors.length > 0 ? h('span', { className: 'mvp_badge' }, t('checker.errorBadge', { count: errors.length })) : null,
         ),
         open
           ? h(
               'div',
               { className: 'mvp_checkerBody' },
-              h('div', { className: 'mvp_checkerHint' }, t('checker.description')),
+              h('p', { className: 'mvp_checkerHint' }, t('checker.description')),
               h(
                 'div',
                 { className: 'mvp_checkerForm' },
@@ -657,67 +750,141 @@ window.__ModuleLoader__.load({
                     ),
                   ),
                 ),
-              ),
-              h(
-                'div',
-                { className: 'mvp_checkerActions' },
                 h(
-                  'button',
-                  {
-                    type: 'button',
-                    role: 'switch',
-                    className: 'mvp_switch',
-                    'aria-checked': pick.writeBack,
-                    title: t('checker.writeBackTitle'),
-                    disabled: running,
-                    onClick: () => commit({ ...pick, writeBack: !pick.writeBack }),
-                  },
-                  h('span', { className: 'mvp_thumb' }),
+                  'label',
+                  { className: 'mvp_field', title: t('checker.concurrencyTitle') },
+                  h('span', { className: 'mvp_fieldLabel' }, t('checker.concurrency')),
+                  h(
+                    'select',
+                    {
+                      className: 'mvp_select',
+                      value: String(pick.concurrency),
+                      'aria-label': t('checker.concurrency'),
+                      disabled: running,
+                      onChange: (event) =>
+                        commit({ ...pick, concurrency: Number(event.target.value) }),
+                    },
+                    CONCURRENCY_CHOICES.map((value) =>
+                      h('option', { key: value, value: String(value) }, t('checker.concurrencyValue', { count: value })),
+                    ),
+                  ),
                 ),
                 h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'mvp_button',
-                    title: t('checker.writeBackTitle'),
-                    onClick: () => commit({ ...pick, writeBack: !pick.writeBack }),
-                  },
-                  t('checker.writeBack'),
+                  'label',
+                  { className: 'mvp_check', title: t('checker.writeBackTitle') },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: pick.writeBack,
+                    disabled: running,
+                    onChange: (event) => commit({ ...pick, writeBack: event.target.checked }),
+                  }),
+                  h('span', null, t('checker.writeBack')),
                 ),
                 h(
                   'button',
                   {
                     type: 'button',
                     className: running ? 'mvp_button' : 'mvp_button mvp_button--accent',
-                    disabled: running ? false : pick.provider === '' || pick.model === '',
+                    disabled: !running && (pick.provider === '' || pick.model === ''),
                     title: running ? t('checker.cancelTitle') : t('checker.startTitle'),
                     onClick: running ? cancel : run,
                   },
                   running ? t('checker.cancel') : t('checker.start'),
                 ),
               ),
-              progress !== null && (running || finished)
+              running || finished
                 ? h(
                     'div',
                     { className: 'mvp_checkerProgress' },
-                    t('checker.progress', {
-                      done: progress?.done ?? 0,
-                      total: progress?.total ?? 0,
-                      tokens: tokensSpent,
-                    }),
+                    h('div', {
+                      className: 'mvp_progressBar',
+                      role: 'progressbar',
+                      'aria-valuemin': 0,
+                      'aria-valuemax': progress?.total ?? 0,
+                      'aria-valuenow': progress?.done ?? 0,
+                    }, h('span', {
+                      className: 'mvp_progressFill',
+                      style: {
+                        width:
+                          (progress?.total ?? 0) > 0
+                            ? Math.min(100, Math.round(((progress?.done ?? 0) / progress.total) * 100)) + '%'
+                            : '0%',
+                      },
+                    })),
+                    h(
+                      'span',
+                      { className: 'mvp_checkerProgressText' },
+                      t('checker.progress', {
+                        done: progress?.done ?? 0,
+                        total: progress?.total ?? 0,
+                        tokens: tokensSpent,
+                      }),
+                    ),
+                    h(
+                      'span',
+                      { className: 'mvp_checkerProgressText' },
+                      t('checker.threads', { count: progress?.concurrency ?? pick.concurrency }),
+                    ),
                   )
                 : null,
-              (progress?.errors?.length ?? 0) > 0
+              // Which public catalogs were read, and which were not. Without this
+              // "the catalogs returned nothing" and "the catalogs errored" look
+              // identical, which is exactly how a broken fetch stayed invisible.
+              (progress?.sources?.length ?? 0) > 0
                 ? h(
                     'div',
-                    {
-                      className: 'mvp_usageHint mvp_usageHint--warn',
-                      title: progress.errors.join('\n'),
-                    },
-                    t('checker.errors', { count: progress.errors.length }),
+                    { className: 'mvp_sources' },
+                    h('div', { className: 'mvp_sourcesTitle' }, t('checker.sourcesTitle')),
+                    h(
+                      'ul',
+                      { className: 'mvp_sourceList' },
+                      progress.sources.map((source, index) =>
+                        h(
+                          'li',
+                          { key: index, className: source.status === 'ok' ? 'mvp_source--ok' : 'mvp_source--bad' },
+                          h('span', { className: 'mvp_sourceName' }, String(source.name)),
+                          h('span', { className: 'mvp_sourceState' }, t('checker.source.' + String(source.status))),
+                          source.models > 0
+                            ? h('span', { className: 'mvp_sourceCount' }, t('checker.sourceModels', { count: source.models }))
+                            : null,
+                          source.message
+                            ? h('span', { className: 'mvp_sourceMsg' }, String(source.message))
+                            : null,
+                        ),
+                      ),
+                    ),
                   )
                 : null,
-              message !== null ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn' }, message) : null,
+              (progress?.publicOnly ?? 0) > 0
+                ? h(
+                    'div',
+                    { className: 'mvp_usageHint' },
+                    t('checker.publicOnly', { count: progress.publicOnly }),
+                  )
+                : null,
+              errors.length > 0
+                ? h(
+                    'div',
+                    { className: 'mvp_checkerErrors' },
+                    h('div', { className: 'mvp_checkerErrorsTitle' }, t('checker.errorTitle')),
+                    h(
+                      'ul',
+                      { className: 'mvp_errorList' },
+                      visibleErrors.map((entry, index) =>
+                        h('li', { key: index }, typeof entry === 'string' ? entry : String(entry)),
+                      ),
+                    ),
+                    errors.length > visibleErrors.length
+                      ? h(
+                          'div',
+                          { className: 'mvp_usageHint' },
+                          t('checker.errorMore', { count: errors.length - visibleErrors.length }),
+                        )
+                      : null,
+                  )
+                : null,
+              message !== null ? h('div', { className: 'mvp_banner mvp_banner--error' }, message) : null,
+              state.error !== null ? h('div', { className: 'mvp_banner mvp_banner--error' }, state.error) : null,
             )
           : null,
       )
@@ -922,47 +1089,116 @@ window.__ModuleLoader__.load({
   // -------------------------------------------------------- css
   define("css", function (require, module, exports) {
     const CSS = `
+    /* ---------------------------------------------------------------- shell */
     .mvp_page{box-sizing:border-box;width:100%;height:100%;min-height:0;flex-direction:column;display:flex;overflow-y:auto;padding-bottom:24px}
-    .mvp_head{flex:none;flex-direction:column;gap:6px;padding:4px 0 14px;display:flex}
+
+    /* --------------------------------------------------------------- header */
+    .mvp_head{flex:none;align-items:center;gap:12px;padding:2px 0 10px;display:flex;flex-wrap:wrap}
+    .mvp_headMain{flex:1;min-width:0;align-items:baseline;gap:10px;display:flex;flex-wrap:wrap}
     .mvp_title{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
-    .mvp_desc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px}
-    .mvp_toolbar{border-bottom:.5px solid var(--dsw-alias-border-l2);flex:none;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;display:flex}
-    .mvp_summary{color:var(--dsw-alias-label-secondary);flex:1;min-width:0;font-size:12px;line-height:18px}
-    .mvp_actions{flex:none;align-items:center;justify-content:flex-end;gap:8px;display:flex;flex-wrap:wrap}
-    .mvp_button{box-sizing:border-box;height:28px;color:var(--dsw-alias-label-primary);cursor:pointer;background:0 0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 10px;font-family:inherit;font-size:12px;line-height:18px}
+    .mvp_summary{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;white-space:nowrap}
+    .mvp_summary--dim{color:var(--dsw-alias-label-tertiary)}
+    .mvp_headActions{flex:none;align-items:center;gap:6px;display:flex;flex-wrap:wrap}
+    .mvp_about{border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);margin-bottom:10px;padding:8px 12px;background:transparent;background:color-mix(in srgb, var(--dsw-alias-label-primary) 2%, transparent)}
+    .mvp_aboutP{color:var(--dsw-alias-label-secondary);margin:0 0 6px;font-size:12px;line-height:18px}
+    .mvp_aboutP:last-child{margin-bottom:0}
+
+    /* -------------------------------------------------------------- buttons */
+    .mvp_button{box-sizing:border-box;height:26px;color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap;background:0 0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 9px;font-family:inherit;font-size:12px;line-height:18px}
+    .mvp_button--quiet{color:var(--dsw-alias-label-secondary);border-color:transparent}
+    .mvp_button--quiet:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2)}
     .mvp_button--accent{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent)}
     .mvp_button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
     .mvp_button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-    .mvp_button:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
+    .mvp_button:disabled{color:var(--dsw-alias-label-tertiary);cursor:default;opacity:.6}
+
+    /* ---------------------------------------------------------------- usage */
+    .mvp_usage{flex:none;color:var(--dsw-alias-label-secondary);align-items:center;gap:14px;border-bottom:.5px solid var(--dsw-alias-border-l1);padding:6px 0 10px;font-size:12px;line-height:18px;display:flex;flex-wrap:wrap}
+    .mvp_usage--off{color:var(--dsw-alias-label-tertiary)}
+    .mvp_usageLabel{color:var(--dsw-alias-label-tertiary);align-items:baseline;gap:6px;flex:none;display:inline-flex}
+    .mvp_usageComputing{color:var(--dsw-alias-brand-primary);font-size:11px}
+    .mvp_usageRanges{flex:1;min-width:0;align-items:baseline;gap:16px;display:flex;flex-wrap:wrap}
+    .mvp_stat{align-items:baseline;gap:5px;display:inline-flex;white-space:nowrap}
+    .mvp_statLabel{color:var(--dsw-alias-label-tertiary);font-size:11px}
+    .mvp_statValue{color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;font-size:13px;font-weight:500}
+    .mvp_stat--total .mvp_statValue{color:var(--dsw-alias-brand-primary)}
+    .mvp_usageActions{flex:none;align-items:center;gap:4px;display:flex}
+    .mvp_usageHint{width:100%;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .mvp_usageHint--warn{color:var(--dsw-alias-state-error-primary)}
+
+    /* --------------------------------------------------------------- filters */
+    .mvp_filters{flex:none;align-items:center;gap:8px;border-bottom:.5px solid var(--dsw-alias-border-l2);padding:8px 0;display:flex;flex-wrap:wrap}
+    .mvp_searchInput{box-sizing:border-box;flex:1 1 180px;min-width:150px;max-width:320px;height:26px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px}
+    .mvp_searchInput:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}
+    .mvp_filterGroup{align-items:center;gap:4px;display:flex;flex-wrap:wrap}
+    .mvp_filterGroup--push{margin-left:auto}
+    .mvp_filter{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;white-space:nowrap;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 9px;font-family:inherit;font-size:11px;line-height:16px}
+    .mvp_filter[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, transparent)}
+    .mvp_filter:hover:not([aria-pressed="true"]){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-tertiary)}
+    .mvp_filter:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+    .mvp_contextSelect{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 6px;font-family:inherit;font-size:11px}
+
+    /* ------------------------------------------------------- applyInput row */
+    .mvp_applyRow{flex:none;align-items:center;gap:10px;border-bottom:.5px solid var(--dsw-alias-border-l1);padding:8px 0;display:flex}
+    .mvp_applyText{flex:1;min-width:0;align-items:baseline;gap:8px;display:flex;flex-wrap:wrap}
+    .mvp_applyTitle{color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px}
+    .mvp_applyHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+
+    /* --------------------------------------------------------------- banners */
+    .mvp_banner{flex:none;color:var(--dsw-alias-label-secondary);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);margin:8px 0;padding:6px 10px;font-size:12px;line-height:18px}
+    .mvp_banner--warn{color:var(--dsw-alias-state-warn-primary);border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 40%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 7%, transparent)}
+    .mvp_banner--error{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, transparent)}
+    .mvp_note{flex:none;color:var(--dsw-alias-label-tertiary);padding:6px 0;font-size:11px;line-height:16px}
+
+    /* ---------------------------------------------------------------- groups */
+    .mvp_groups{flex:none;flex-direction:column;display:flex}
     .mvp_group{flex:none;flex-direction:column;display:flex}
-    .mvp_groupHead{justify-content:space-between;align-items:center;gap:12px;padding:14px 0 6px;display:flex}
-    .mvp_groupTitle{color:var(--dsw-alias-label-primary);align-items:baseline;row-gap:2px;gap:8px;font-size:14px;font-weight:500;line-height:22px;display:flex;flex-wrap:wrap}
-    .mvp_groupName{min-width:0}
-    .mvp_collapse{box-sizing:border-box;flex:none;align-self:center;width:18px;height:18px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:0;font-family:inherit;font-size:11px;line-height:18px;display:inline-flex}
-    .mvp_collapse:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-    .mvp_collapse:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-    .mvp_groupCount{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}
-    .mvp_row{border-bottom:.5px solid var(--dsw-alias-border-l1);justify-content:space-between;align-items:center;gap:16px;padding:10px 0;display:flex}
-    .mvp_row--gen{background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
-    .mvp_row--kind-image{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-business-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 4%, transparent)}
-    .mvp_row--kind-video{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-success-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 4%, transparent)}
-    .mvp_row--kind-embedding{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-warn-primary) 70%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 4%, transparent)}
-    .mvp_row--kind-rerank{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-primary) 60%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 3%, transparent)}
-    .mvp_row--kind-audio{box-shadow:inset 2px 0 0 color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 70%, transparent);background:transparent;background:color-mix(in srgb, color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary)) 4%, transparent)}
-    .mvp_row--kind-classifier{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-secondary) 60%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-error-secondary) 3%, transparent)}
+    .mvp_groupHead{justify-content:space-between;align-items:center;gap:12px;border-bottom:.5px solid var(--dsw-alias-border-l2);padding:10px 0 6px;display:flex}
+    .mvp_groupTitle{flex:1;min-width:0;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;background:0 0;border:0;align-items:baseline;column-gap:8px;row-gap:2px;padding:0;font-family:inherit;font-size:13px;font-weight:500;line-height:20px;display:flex;flex-wrap:wrap}
+    .mvp_groupTitle:hover .mvp_groupName{color:var(--dsw-alias-brand-primary)}
+    .mvp_groupTitle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:4px}
+    .mvp_chevron{flex:none;align-self:center;width:12px;color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}
+    .mvp_groupName{min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+    .mvp_groupCount{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:400;font-variant-numeric:tabular-nums}
+    .mvp_groupCap{color:var(--dsw-alias-label-tertiary);align-items:baseline;gap:3px;font-size:11px;font-weight:400;display:inline-flex}
+    .mvp_sep{opacity:.5}
+    .mvp_kindCount{font-variant-numeric:tabular-nums}
+    .mvp_kindCount--image{color:var(--dsw-alias-state-business-primary)}
+    .mvp_kindCount--video{color:var(--dsw-alias-state-success-primary)}
+    .mvp_kindCount--other{color:var(--dsw-alias-state-warn-primary)}
+    .mvp_groupProbe{color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l2);border-radius:4px;max-width:100%;white-space:nowrap;text-overflow:ellipsis;padding:0 5px;font-size:10px;line-height:15px;overflow:hidden}
+    .mvp_groupProbe--warn{color:var(--dsw-alias-state-warn-primary);border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent)}
+
+    /* ------------------------------------------------------------------ rows */
+    .mvp_row{justify-content:space-between;align-items:center;gap:16px;border-bottom:.5px solid var(--dsw-alias-border-l1);padding:8px 0 8px 6px;display:flex}
+    .mvp_row--off{opacity:.62}
+    .mvp_row--gen{background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 3%, transparent)}
+    .mvp_row--kind-image{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-business-primary) 70%, transparent)}
+    .mvp_row--kind-video{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-success-primary) 70%, transparent)}
+    .mvp_row--kind-embedding{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-warn-primary) 70%, transparent)}
+    .mvp_row--kind-rerank{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-primary) 60%, transparent)}
+    .mvp_row--kind-audio{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--dsw-alias-state-error-primary))}
+    .mvp_row--kind-classifier{box-shadow:inset 2px 0 0 color-mix(in srgb, var(--dsw-alias-state-error-secondary) 60%, transparent)}
     .mvp_row--kind-translation{box-shadow:inset 2px 0 0 var(--dsw-alias-border-l2)}
-    .mvp_rowText{flex-direction:column;gap:2px;min-width:0;display:flex}
-    .mvp_rowTitle{color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
-    .mvp_rowMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px;overflow:hidden}
-    .mvp_error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;padding:6px 0}
-    .mvp_switch{position:relative;flex:none;box-sizing:border-box;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--dsw-alias-border-l2);cursor:pointer;transition:background-color .15s ease}
-    .mvp_switch[aria-checked="true"]{background:var(--dsw-alias-bg-base)}
+    .mvp_rowText{flex-direction:column;gap:3px;min-width:0;display:flex}
+    .mvp_rowHead{align-items:baseline;gap:8px;min-width:0;display:flex;flex-wrap:wrap}
+    .mvp_rowTitle{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}
+    .mvp_rowMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;min-width:0;max-width:100%;font-size:11px;line-height:18px;overflow:hidden}
+    .mvp_rowActions{flex:none;align-items:center;gap:6px;display:flex}
+    .mvp_editButton{height:24px;padding:0 8px;font-size:11px}
+
+    /* ---------------------------------------------------------------- switch */
+    .mvp_switch{position:relative;flex:none;box-sizing:border-box;width:34px;height:19px;padding:0;border:0;border-radius:999px;background:var(--dsw-alias-border-l2);cursor:pointer;transition:background-color .15s ease}
+    .mvp_switch[aria-checked="true"]{background:var(--dsw-alias-brand-primary)}
     .mvp_switch:disabled{opacity:.45;cursor:default}
     .mvp_switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-    .mvp_thumb{position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-secondary);transition:transform .15s ease,background-color .15s ease}
-    .mvp_switch[aria-checked="true"] .mvp_thumb{background:var(--dsw-alias-label-primary);transform:translateX(16px)}
-    .mvp_tags{flex-wrap:wrap;align-items:center;gap:4px;margin-top:4px;display:flex}
-    .mvp_tag{box-sizing:border-box;max-width:100%;height:18px;color:var(--dsw-alias-label-secondary);white-space:nowrap;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:4px;align-items:center;padding:0 6px;font-size:11px;line-height:16px;display:inline-flex;overflow:hidden;text-overflow:ellipsis}
+    .mvp_thumb{position:absolute;top:3px;left:3px;width:13px;height:13px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s ease}
+    .mvp_switch[aria-checked="true"] .mvp_thumb{transform:translateX(15px)}
+    .mvp_switch[aria-checked="false"] .mvp_thumb{background:var(--dsw-alias-label-secondary)}
+
+    /* ------------------------------------------------------------------ tags */
+    .mvp_tags{flex-wrap:wrap;align-items:center;gap:4px;display:flex}
+    .mvp_tag{box-sizing:border-box;max-width:100%;height:17px;color:var(--dsw-alias-label-secondary);white-space:nowrap;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:4px;align-items:center;padding:0 5px;font-size:10px;line-height:15px;display:inline-flex;overflow:hidden;text-overflow:ellipsis}
     .mvp_tag--accent{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent)}
     .mvp_tag--vision{color:var(--dsw-alias-state-business-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent)}
     .mvp_tag--kind{font-weight:500}
@@ -976,198 +1212,61 @@ window.__ModuleLoader__.load({
     .mvp_tag--kind-unknown{color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-border-l2)}
     .mvp_tag--inferred{border-style:dashed}
     .mvp_tag--muted{color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l1)}
-    .mvp_groupCap{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:400;line-height:16px}
-    .mvp_kindCount--image{color:var(--dsw-alias-state-business-primary)}
-    .mvp_kindCount--video{color:var(--dsw-alias-state-success-primary)}
-    .mvp_kindCount--other{color:var(--dsw-alias-state-warn-primary)}
-    .mvp_applyRow{flex:none;align-items:flex-start;gap:10px;margin:8px 0 2px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:8px 10px;display:flex;background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent)}
-    .mvp_applyText{flex-direction:column;gap:2px;min-width:0;display:flex}
-    .mvp_applyTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px}
-    .mvp_applyHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
-    .mvp_applyRow .mvp_switch{margin-top:1px}
-    .mvp_groupProbe{color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l2);border-radius:4px;max-width:100%;white-space:nowrap;text-overflow:ellipsis;padding:0 5px;font-size:10px;line-height:15px;overflow:hidden}
-    .mvp_filters{align-items:center;gap:6px;padding:8px 0 2px;display:flex;flex-wrap:wrap}
-    .mvp_filterLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
-    .mvp_search{align-items:center;gap:6px;display:flex;min-width:220px;flex:1 1 220px}
-    .mvp_searchInput{box-sizing:border-box;width:100%;height:28px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px;line-height:18px}
-    .mvp_searchInput:focus-visible,.mvp_contextSelect:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-    .mvp_context{align-items:center;gap:6px;display:flex}
-    .mvp_contextSelect{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 6px;font-family:inherit;font-size:11px;line-height:18px}
-    .mvp_filter{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 9px;font-family:inherit;font-size:11px;line-height:18px}
-    .mvp_filter:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-    .mvp_filter[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
-    .mvp_filter:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-    .mvp_note{color:var(--dsw-alias-label-tertiary);flex:none;padding:6px 0 0;font-size:10px;line-height:15px}
-    .mvp_legend{color:var(--dsw-alias-label-tertiary);flex:none;padding:8px 0 2px;font-size:11px;line-height:16px}
-    .mvp_fallback{color:var(--dsw-alias-label-secondary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);border-radius:var(--dsw-radius-sm,6px);padding:6px 8px;font-size:11px;line-height:16px;margin-top:8px}
-    .mvp_rowActions{flex:none;align-items:center;gap:8px;display:flex}
-    .mvp_editButton{height:24px;padding:0 8px;font-size:11px;line-height:18px}
-    .mvp_editButton[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent)}
-    .mvp_editor{box-sizing:border-box;border:.5px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);border-radius:var(--dsw-radius-sm,6px);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 4%, transparent);margin:2px 0 12px;padding:10px 12px;flex-direction:column;gap:10px;display:flex}
-    .mvp_editorHead{flex-direction:column;gap:2px;display:flex}
-    .mvp_editorTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;line-height:18px}
+
+    /* --------------------------------------------------------------- editor */
+    .mvp_editor{border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);margin:4px 0 8px;padding:10px 12px;background:transparent;background:color-mix(in srgb, var(--dsw-alias-label-primary) 2%, transparent)}
+    .mvp_editorHead{margin-bottom:8px}
+    .mvp_editorTitle{color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}
     .mvp_editorSub{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
-    .mvp_editorGrid{flex-wrap:wrap;align-items:flex-end;gap:10px 16px;display:flex}
-    .mvp_field{flex-direction:column;gap:4px;min-width:140px;display:flex}
+    .mvp_editorGrid{flex-wrap:wrap;align-items:flex-start;gap:8px 14px;display:flex}
+    .mvp_field{flex-direction:column;gap:3px;min-width:140px;display:flex}
     .mvp_field--wide{flex:1 1 100%}
-    .mvp_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
-    .mvp_select,.mvp_number{box-sizing:border-box;height:26px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 8px;font-family:inherit;font-size:12px;line-height:18px}
-    .mvp_number{width:180px}
-    .mvp_select:focus-visible,.mvp_number:focus-visible,.mvp_chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-    .mvp_chips{flex-wrap:wrap;align-items:center;gap:6px;display:flex}
-    .mvp_chip{box-sizing:border-box;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 10px;font-family:inherit;font-size:11px;line-height:18px}
-    .mvp_chip:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
-    .mvp_chip[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent)}
+    .mvp_fieldLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .mvp_select,.mvp_number{box-sizing:border-box;height:26px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);padding:0 6px;font-family:inherit;font-size:12px}
+    .mvp_chips{flex-wrap:wrap;gap:4px;display:flex}
+    .mvp_chip{box-sizing:border-box;height:23px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;padding:0 9px;font-family:inherit;font-size:11px}
+    .mvp_chip[aria-pressed="true"]{color:var(--dsw-alias-brand-primary);background:transparent;background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary) 50%, transparent)}
     .mvp_chip:disabled{opacity:.45;cursor:default}
-    .mvp_editorFooter{justify-content:space-between;align-items:center;gap:12px;display:flex;flex-wrap:wrap}
-    .mvp_editorNote{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:15px;flex:1 1 220px;min-width:0}
-    .mvp_check{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
-    .mvp_check input{accent-color:var(--dsw-alias-brand-primary, #4c8dff);margin:0}
-    .mvp_editorActions{flex:none;align-items:center;gap:6px;display:flex;flex-wrap:wrap}
-    /* ---------------------------------------------------- usage & checker */
+    .mvp_check{color:var(--dsw-alias-label-secondary);align-items:center;gap:6px;font-size:12px;line-height:18px;display:inline-flex;cursor:pointer}
+    .mvp_editorNote{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .mvp_editorError{color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:16px;margin-top:6px}
+    .mvp_editorFooter{justify-content:space-between;align-items:flex-end;gap:12px;margin-top:10px;display:flex;flex-wrap:wrap}
+    .mvp_editorActions{align-items:center;gap:6px;display:flex}
 
-    .mvp_usage {
-      margin: 0 0 12px;
-      padding: 10px 12px;
-      border: 1px solid var(--dsw-alias-border, transparent);
-      border-radius: 10px;
-      background: transparent;
-      background: color-mix(in srgb, currentColor 4%, transparent);
-    }
+    /* --------------------------------------------------------------- checker */
+    .mvp_checker{flex:none;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);margin-top:12px;overflow:hidden}
+    .mvp_checker--closed{background:transparent}
+    .mvp_checkerHead{box-sizing:border-box;width:100%;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;background:0 0;border:0;align-items:baseline;gap:8px;padding:7px 10px;font-family:inherit;font-size:12px;line-height:18px;display:flex;flex-wrap:wrap}
+    .mvp_checkerHead:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.08))}
+    .mvp_checkerHead:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
+    .mvp_checkerTitle{font-weight:500;flex:none}
+    .mvp_checkerSummary{color:var(--dsw-alias-label-tertiary);flex:1;min-width:0;font-size:11px}
+    .mvp_badge{flex:none;color:var(--dsw-alias-state-warn-primary);border:.5px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent);border-radius:999px;padding:0 6px;font-size:10px;line-height:15px}
+    .mvp_checkerBody{border-top:.5px solid var(--dsw-alias-border-l2);padding:10px}
+    .mvp_checkerHint{color:var(--dsw-alias-label-tertiary);margin:0 0 8px;font-size:11px;line-height:16px}
+    .mvp_checkerForm{align-items:flex-end;gap:10px;display:flex;flex-wrap:wrap}
+    .mvp_checkerProgress{align-items:center;gap:10px;margin-top:10px;display:flex;flex-wrap:wrap}
+    .mvp_progressBar{flex:1 1 160px;min-width:120px;height:4px;border-radius:999px;background:var(--dsw-alias-border-l2);overflow:hidden}
+    .mvp_progressFill{height:100%;background:var(--dsw-alias-brand-primary);transition:width .2s ease;display:block}
+    .mvp_checkerProgressText{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .mvp_checkerErrors{margin-top:10px}
+    .mvp_checkerErrorsTitle{color:var(--dsw-alias-state-warn-primary);margin-bottom:4px;font-size:11px;line-height:16px}
+    .mvp_errorList{max-height:150px;color:var(--dsw-alias-label-secondary);margin:0;padding-left:18px;font-size:11px;line-height:16px;overflow-y:auto}
+    .mvp_errorList li{margin-bottom:3px;word-break:break-word}
+    .mvp_sources{margin-top:10px}
+    .mvp_sourcesTitle{color:var(--dsw-alias-label-tertiary);margin-bottom:4px;font-size:11px;line-height:16px}
+    .mvp_sourceList{max-height:150px;margin:0;padding:0;list-style:none;font-size:11px;line-height:16px;overflow-y:auto}
+    .mvp_sourceList li{flex-wrap:wrap;align-items:baseline;gap:6px;padding:2px 0;display:flex}
+    .mvp_sourceName{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}
+    .mvp_sourceState{flex:none;border-radius:4px;padding:0 4px;font-size:10px;line-height:14px;border:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary)}
+    .mvp_source--ok .mvp_sourceState{color:var(--dsw-alias-state-success-primary);border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 45%, transparent)}
+    .mvp_source--bad .mvp_sourceState{color:var(--dsw-alias-state-warn-primary);border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent)}
+    .mvp_sourceCount{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+    .mvp_sourceMsg{flex:1 1 100%;color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:15px}
 
-    .mvp_usage--off {
-      opacity: 0.75;
-    }
-
-    .mvp_usageHead {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .mvp_usageTitle {
-      font-weight: 600;
-      font-size: 12px;
-    }
-
-    .mvp_usageComputing {
-      color: var(--dsw-alias-text-tertiary, currentColor);
-      font-size: 11px;
-    }
-
-    .mvp_usageActions {
-      display: flex;
-      gap: 8px;
-      margin-left: auto;
-    }
-
-    .mvp_usageRanges {
-      display: flex;
-      gap: 18px;
-      flex-wrap: wrap;
-      margin-top: 8px;
-    }
-
-    .mvp_stat {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .mvp_statLabel {
-      font-size: 11px;
-      color: var(--dsw-alias-text-tertiary, currentColor);
-    }
-
-    .mvp_statValue {
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .mvp_stat--total .mvp_statValue {
-      font-weight: 600;
-    }
-
-    .mvp_usageHint {
-      margin-top: 8px;
-      font-size: 11px;
-      color: var(--dsw-alias-text-tertiary, currentColor);
-    }
-
-    .mvp_usageHint--warn {
-      color: var(--dsw-alias-danger, #d0605e);
-    }
-
-    .mvp_checker {
-      margin: 0 0 12px;
-      padding: 10px 12px;
-      border: 1px solid var(--dsw-alias-border, transparent);
-      border-radius: 10px;
-    }
-
-    .mvp_checkerHead {
-      display: flex;
-      width: 100%;
-      align-items: center;
-      gap: 10px;
-      padding: 0;
-      border: 0;
-      background: transparent;
-      color: inherit;
-      text-align: left;
-      cursor: pointer;
-    }
-
-    .mvp_checkerTitle {
-      font-weight: 600;
-      font-size: 12px;
-    }
-
-    .mvp_checkerSummary {
-      margin-left: auto;
-      font-size: 11px;
-      color: var(--dsw-alias-text-tertiary, currentColor);
-    }
-
-    .mvp_checker--closed.mvp_checker {
-      padding: 8px 12px;
-    }
-
-    .mvp_checkerBody {
-      margin-top: 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-
-    .mvp_checkerHint {
-      font-size: 11px;
-      color: var(--dsw-alias-text-tertiary, currentColor);
-    }
-
-    .mvp_checkerForm {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      max-width: 560px;
-    }
-
-    .mvp_checkerActions {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .mvp_checkerSwitchText {
-      font-size: 12px;
-    }
-
-    .mvp_checkerProgress {
-      font-size: 11px;
-      font-variant-numeric: tabular-nums;
-      color: var(--dsw-alias-text-secondary, currentColor);
-    }
-
+    /* ---------------------------------------------------------------- footer */
+    .mvp_footer{flex:none;align-items:center;gap:14px;color:var(--dsw-alias-label-tertiary);border-top:.5px solid var(--dsw-alias-border-l1);margin-top:12px;padding-top:8px;font-size:11px;line-height:16px;display:flex;flex-wrap:wrap}
+    .mvp_footerItem{min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
     `
 
 
@@ -1181,10 +1280,12 @@ window.__ModuleLoader__.load({
         'nav': '模型显示',
         'page.title': '模型显示',
         'page.description':
-          '关闭的模型不会出现在聊天输入框的模型下拉列表中；这里的改动立即生效，之后仍可随时重新打开。每个模型标注真实能力：适配器声明优先，其次读中转站的模型列表，再用内置目录补全；生图、生视频等生成类模型单独标记。',
-        'page.summary': '已显示 {visible} / {total} 个模型',
-        'page.hiddenSummary': '已关闭 {count} 个',
-        'page.kindSummary': '{count} 个生图/生视频模型',
+          '关闭的模型不会出现在聊天输入框的模型下拉列表中；这里的改动立即生效，之后仍可随时重新打开。每个模型标注真实能力：适配器声明优先，其次读中转站模型列表，最后用校验结果或模型名补全。',
+        'page.about': '说明',
+        'page.aboutTitle': '展开标签含义、来源与颜色说明',
+        'page.summary': '已显示 {visible} / {total}',
+        'page.hiddenSummary': '已关闭 {count}',
+        'page.kindSummary': '生图/生视频 {count}',
         'page.loading': '正在加载模型列表…',
         'page.empty': '暂无可用模型。',
         'page.filterEmpty': '当前筛选下没有模型。',
@@ -1192,31 +1293,33 @@ window.__ModuleLoader__.load({
         'page.saveFailed': '保存失败，请重试。',
         'page.refresh': '刷新',
         'page.refreshing': '刷新中…',
+        'page.refreshTitle': '重新读取适配器与中转站的能力信息（沿用缓存，10 分钟内的探测不会重发请求）',
         'page.reload': '重新获取能力',
         'page.reloading': '正在获取…',
         'page.reloadTitle':
           '清空本插件的能力缓存和正在进行的读取，重新询问适配器与所有中转站；不会改动任何模型开关。适配器没有公布的思考强度仍不会凭空出现。',
         'page.reloadUnavailable': 'Host 半不支持强制重新获取；重启 DSH 后可用。',
-        'page.collapseGroups': '折叠全部分组',
-        'page.expandGroups': '展开全部分组',
+        'page.collapseGroups': '折叠全部',
+        'page.expandGroups': '展开全部',
         'page.collapseGroupsTitle': '只保留分组标题，方便跳到其他分组',
         'page.expandGroupsTitle': '展开所有被折叠的分组',
         'page.showAll': '全部显示',
         'page.legend':
-          '标签说明：推理 = 可调推理等级；上下文 = 输入窗口；多模态 = 可输入图像。实线标签来自适配器、中转站或厂商文档，虚线标签来自内置目录或模型名推断。生图 / 生视频 / 嵌入等模型只标类型，不显示思考强度与文本标签。',
+          '标签：推理 = 可调推理等级；上下文 = 输入窗口；多模态 = 可输入图像。实线来自适配器、中转站或厂商文档，虚线来自联网校验或模型名推断。生图 / 生视频 / 嵌入等只标类型，不显示思考强度与文本标签。',
         'page.metaFallback':
           '模型能力信息暂不可用：上下文与模态显示为未知，推理档位仍来自官方目录。',
         'page.hostStale':
           'Host 半仍是旧版本：颜色与开关已更新，但「放行图像」和官方校正要等 DSH 重启（或 profile 重组）后才会生效。',
-        'page.providerFailures': '部分提供方暂时读不到模型：{names}',
-        'page.probeSummary': '中转站探测：{ok} 个已读取模型列表，{caps} 个公布了能力字段',
-        'page.probeSummaryNone': '中转站探测：暂无可读取的路由配置',
-        'page.catalogNote': '内置目录：pi-ai {version} 快照（{date}），共 {models} 个模型',
-        'page.learnedNote': '学习快照：联网校验（{date}），缓存 {models} 个模型的可验证事实',
-        'usage.title': 'token 用量',
+        'page.providerFailures': '部分提供方读不到模型：{names}',
+        'page.probeFailures': '中转站读取失败：{names}',
+        'page.probeSummary': '探测：{ok} 个中转站可读',
+        'page.probeSummaryTitle': '中转站探测结果；悬停分组上的标记可看具体诊断',
+        'page.probeSummaryNone': '探测：未配置可探测的路由',
+        'page.learnedNote': '学习快照 {models} 条（{date}）',
+        'usage.title': 'token',
         'usage.computing': '统计中…',
         'usage.none': '—',
-        'usage.range': '输入 {input} · 输出 {output}（合计 {total}）',
+        'usage.detail': '输入 {input} · 输出 {output} · 缓存读 {cacheRead} · 缓存写 {cacheWrite}',
         'usage.today': '今天',
         'usage.todayTitle': '本地自然日（今天 0 点起）',
         'usage.week': '本周',
@@ -1225,47 +1328,62 @@ window.__ModuleLoader__.load({
         'usage.monthTitle': '本月 1 日 0 点起',
         'usage.total': '总计',
         'usage.totalTitle': '全部历史（更早的按会话创建日粗算）',
-        'usage.exportUsage': '导出用量 CSV',
+        'usage.exportUsage': '用量 CSV',
         'usage.exportUsageTitle': '下载按天分桶、含每模型 token 分解的 CSV',
-        'usage.exportModels': '导出模型清单 CSV',
+        'usage.exportModels': '模型 CSV',
         'usage.exportModelsTitle': '下载全部提供商模型的可见性与能力表',
         'usage.hostStale': '宿主半尚未提供用量统计，重启 DSH 即可启用。',
-        'checker.title': '联网校验模型能力',
+        'checker.title': '联网校验',
         'checker.description':
-          '选定一个模型作为校验员：先把两个公开目录（models.dev / OpenRouter）拉下来做基准，再把其余模型分批交给它核对上下文窗口、输入模态、思考档位与类型；结果回填本页并（在开关打开时）写入对应提供商配置，同时存进本地快照 learned.json，之后同名模型直接复用缓存。校验请求会消耗所选模型的 API 额度，其 token 消耗会计入上方用量统计。',
+          '选定一个校验员模型：先拉 models.dev / OpenRouter / Hugging Face 三个公开目录做基准，再把其余模型分批交给它核对。公开目录已经知道的能力会直接采用，校验员答不上时也不例外。校验请求会消耗所选模型的额度，其 token 计入上方统计。提示：思考型模型会先花掉输出预算，若批次普遍失败，换一个非思考模型或降低其思考档位。',
         'checker.provider': '校验员提供商',
         'checker.model': '校验员模型',
         'checker.start': '开始校验',
         'checker.startTitle': '在宿主侧后台跑一轮全模型校验',
         'checker.cancel': '取消',
         'checker.cancelTitle': '中止正在进行的校验',
-        'checker.writeBack': '校验通过即写入提供商配置',
+        'checker.writeBack': '同时写入提供商配置',
         'checker.writeBackTitle':
-          '开启：判定到的 input / contextWindow / 推理档位直接写进各提供商该模型条目（learned.json 只留写不进去的字段）；关闭：只更新本页与快照，需要时再用「编辑能力」手动写入。',
+          '开启：判定到的 input / contextWindow / 推理档位直接写进各提供商该模型条目（learned.json 只留写不进去的字段）；关闭：只更新本页与快照。',
         'checker.idle': '未运行',
-        'checker.running': '进行中 {phase} · {done}/{total} · 已耗 {tokens}',
-        'checker.finished': '已完成 {done}/{total} · 校验耗 token {tokens}',
+        'checker.running': '进行中{phase} · {done}/{total} · 已耗 {tokens}',
+        'checker.finished': '已完成 {done}/{total} · 耗 {tokens}',
         'checker.progress': '{done}/{total} 已核对 · 校验本身消耗 {tokens} token',
-        'checker.errors': '{count} 个批次失败（悬停看详情）',
-        'checker.pickNeeded': '请先选择校验员提供商与模型。',
-        'checker.failed': '校验任务未能启动。',
+        'checker.errorBadge': '{count} 个批次失败',
+        'checker.errorTitle': '失败批次',
+        'checker.errorMore': '另有 {count} 条未显示',
+        'checker.concurrency': '并发线程',
+        'checker.concurrencyTitle': '同时发出的校验请求数。中转站限流时调低，网络快时调高（上限 8）。',
+        'checker.concurrencyValue': '{count} 路',
+        'checker.threads': '并发 {count} 路',
+        'checker.sourcesTitle': '公开目录',
+        'checker.source.ok': '已读取',
+        'checker.source.empty': '无匹配',
+        'checker.source.http': 'HTTP 错误',
+        'checker.source.failed': '请求失败',
+        'checker.source.bad-json': '非 JSON',
+        'checker.source.too-large': '响应过大',
+        'checker.source.pending': '等待中',
+        'checker.sourceModels': '{count} 条',
+        'checker.publicOnly': '其中 {count} 个模型的能力来自公开目录（校验员未作答）。',
         'checker.hostStale': '宿主半不支持联网校验，请重启 DSH 后使用。',
         'checker.phase.public': '（读取公开目录）',
         'checker.phase.checker': '（读取公开目录）',
         'checker.phase.verifying': '（分批校验）',
         'source.snapshot': '已校验',
         'page.applyInput': '让输入框按能力标注放行图像',
+        'page.applyInputShort': '多模态中转站模型自动补 image；关闭则只按 Provider 的 input 声明',
         'page.applyInputHint':
           '开启后，被标注为「多模态」的中转站对话模型会在发送请求时自动补上图像输入能力；关闭则完全按 Provider 配置里的 input 声明。只影响中转站（pi-ai）路由，不改任何配置文件；若某个上游实际拒绝图像，关闭此开关即可。',
         'page.kindLegend':
-          '颜色区分模型类型：生图 蓝 · 生视频 绿 · 嵌入 橙 · 音频 紫 · 重排 红 · 审核 玫红 · 翻译 灰。「官方校正」表示内置目录与厂商文档不一致时以文档为准。',
-        'page.filterLabel': '筛选',
-        'page.searchPlaceholder': '搜索模型名称或 ID',
-        'page.capabilityLabel': '能力',
+          '类型配色：生图 蓝 · 生视频 绿 · 嵌入 橙 · 音频 紫 · 重排 红 · 审核 玫红 · 翻译 灰。「官方校正」表示目录与厂商文档不一致时以文档为准。',
+        'page.searchPlaceholder': '搜索名称或 ID',
         'page.capability.multimodal': '多模态',
+        'page.capability.multimodalTitle': '只看可输入图像的模型',
         'page.capability.reasoning': '支持推理',
+        'page.capability.reasoningTitle': '只看公布了推理能力的模型',
         'page.contextLabel': '上下文至少',
-        'page.context.any': '不限',
+        'page.context.any': '上下文不限',
         'page.context.128k': '128K+',
         'page.context.256k': '256K+',
         'page.context.512k': '512K+',
@@ -1277,15 +1395,15 @@ window.__ModuleLoader__.load({
         'page.filter.other': '其它',
         'group.showAll': '全组显示',
         'group.hideAll': '全组隐藏',
-        'group.showFiltered': '显示筛选结果',
-        'group.hideFiltered': '隐藏筛选结果',
+        'group.showFiltered': '显示结果',
+        'group.hideFiltered': '隐藏结果',
         'group.collapseNamed': '折叠 {name} 分组',
         'group.expandNamed': '展开 {name} 分组',
-        'group.capabilities': '{chat} 对话 · {image} 生图 · {video} 生视频 · {other} 其它',
-        'group.probeOk': '中转站 {models} 个模型 · {caps} 个带能力字段',
-        'group.probeNoCaps': '中转站 {models} 个模型 · 未公布能力字段',
-        'group.probeFailed': '中转站读取失败',
-        'group.probeSkipped': '未探测中转站',
+        'group.probeOk': '{models} 个模型 · {caps} 带能力',
+        'group.probeNoCaps': '{models} 个模型 · 无能力字段',
+        'group.probePartial': '价格接口 {models} 个',
+        'group.probeFailed': '读取失败',
+        'group.probeSkipped': '未探测',
         'tag.reasoning': '支持推理',
         'tag.noReasoning': '不支持推理',
         'tag.reasoningUnknown': '推理未知',
@@ -1308,7 +1426,6 @@ window.__ModuleLoader__.load({
         'tag.kindVideoTitle': '视频生成模型（输出视频）；类型来源：{source}',
         'tag.correction': '官方校正',
         'tag.correctionTitle': '{note}\n来源：{source}',
-        'tag.resolution': '分辨率',
         'tag.resolutionTitle': '模型名标注了 {value} 输出档位',
         'tag.imageInput': '可改图',
         'tag.imageInputTitle': '支持图像输入（图生图 / 参考图）',
@@ -1391,10 +1508,12 @@ window.__ModuleLoader__.load({
         'nav': 'Model visibility',
         'page.title': 'Model visibility',
         'page.description':
-          'Models turned off here disappear from the chat composer model list. Changes apply immediately and can be turned back on at any time. Every model shows its real capabilities: adapter declarations first, then the relay model list, then a built-in catalog; image, video and other generation models are labelled separately.',
-        'page.summary': 'Showing {visible} of {total} models',
+          'Models turned off here disappear from the chat composer model list. Changes apply immediately and can be turned back on at any time. Every model shows its real capabilities: adapter declarations first, then the relay model list, then verification results or the model name.',
+        'page.about': 'About',
+        'page.aboutTitle': 'Show what the tags, sources and colours mean',
+        'page.summary': 'Showing {visible} of {total}',
         'page.hiddenSummary': '{count} hidden',
-        'page.kindSummary': '{count} image/video models',
+        'page.kindSummary': '{count} image/video',
         'page.loading': 'Loading model list…',
         'page.empty': 'No models available.',
         'page.filterEmpty': 'No models match this filter.',
@@ -1402,80 +1521,99 @@ window.__ModuleLoader__.load({
         'page.saveFailed': 'Could not save this change. Try again.',
         'page.refresh': 'Refresh',
         'page.refreshing': 'Refreshing…',
+        'page.refreshTitle': 'Read adapter and relay capabilities again (honours caches; a probe younger than 10 minutes is not repeated)',
         'page.reload': 'Re-fetch capabilities',
         'page.reloading': 'Re-fetching…',
         'page.reloadTitle':
           'Drops this plugin’s capability caches and any in-flight read, then asks the adapter and every relay again. Model switches are untouched; effort levels the adapter does not publish still cannot appear.',
         'page.reloadUnavailable': 'The Host half does not support a hard re-fetch; restart DSH to enable it.',
-        'page.collapseGroups': 'Collapse all groups',
-        'page.expandGroups': 'Expand all groups',
+        'page.collapseGroups': 'Collapse all',
+        'page.expandGroups': 'Expand all',
         'page.collapseGroupsTitle': 'Keep only group headers so other groups are easy to reach',
         'page.expandGroupsTitle': 'Expand every collapsed group',
         'page.showAll': 'Show all',
         'page.legend':
-          'Tags: Reasoning = adjustable levels; Context = input window; Multimodal = accepts images. Solid tags come from the adapter, the relay or vendor documentation; dashed tags come from the built-in catalog or the model name. Image, video, embedding and other generation models show only their kind, never effort or text tags.',
+          'Tags: Reasoning = adjustable levels; Context = input window; Multimodal = accepts images. Solid tags come from the adapter, the relay or vendor documentation; dashed tags come from online verification or the model name. Image, video, embedding and other models show only their kind.',
         'page.metaFallback':
           'Model capability details are unavailable right now: context and modalities show as unknown, while effort levels still come from the shipped catalog.',
         'page.hostStale':
           'The Host half is still the previous version: the colours and switch are live, but image admission and vendor corrections take effect after DSH restarts (or the profile recomposes).',
         'page.providerFailures': 'Some providers could not be read: {names}',
-        'page.probeSummary': 'Relay probe: {ok} model lists read, {caps} published capability fields',
-        'page.probeSummaryNone': 'Relay probe: no readable route configuration',
-        'page.catalogNote': 'Built-in catalog: pi-ai {version} snapshot ({date}), {models} models',
-        'page.learnedNote': 'Learned snapshot: online verification ({date}), {models} verified models',
-        'usage.title': 'Token usage',
+        'page.probeFailures': 'Relay read failed: {names}',
+        'page.probeSummary': 'Probe: {ok} relays readable',
+        'page.probeSummaryTitle': 'Relay probe result; hover a group badge for its diagnostics',
+        'page.probeSummaryNone': 'Probe: no route configured to probe',
+        'page.learnedNote': 'Learned {models} facts ({date})',
+        'usage.title': 'tokens',
         'usage.computing': 'scanning…',
         'usage.none': '—',
-        'usage.range': 'in {input} · out {output} ({total} total)',
+        'usage.detail': 'input {input} · output {output} · cache read {cacheRead} · cache write {cacheWrite}',
         'usage.today': 'Today',
-        'usage.todayTitle': 'Local calendar day',
-        'usage.week': 'This week',
-        'usage.weekTitle': 'Since Monday 00:00 local',
-        'usage.month': 'This month',
-        'usage.monthTitle': 'Since the 1st local',
+        'usage.week': 'Week',
+        'usage.month': 'Month',
         'usage.total': 'Total',
+        'usage.todayTitle': 'Local calendar day',
+        'usage.weekTitle': 'Since Monday 00:00 local',
+        'usage.monthTitle': 'Since the 1st local',
         'usage.totalTitle': 'All history (older months attributed by session start day)',
-        'usage.exportUsage': 'Export usage CSV',
+        'usage.exportUsage': 'Usage CSV',
         'usage.exportUsageTitle': 'Download a day-bucketed CSV with per-model breakdown',
-        'usage.exportModels': 'Export model list CSV',
+        'usage.exportModels': 'Models CSV',
         'usage.exportModelsTitle': 'Download visibility and capability table of every provider model',
         'usage.hostStale': 'The Host half does not provide usage stats yet; restart DSH to enable it.',
-        'checker.title': 'Verify model capabilities online',
+        'checker.title': 'Online verification',
         'checker.description':
-          'Pick one model as the checker: two public catalogs (models.dev / OpenRouter) are fetched first, then the remaining models are verified in batches — context window, input modalities, effort ladder and kind. Confirmed facts fill this page and, with the switch on, are written into the provider entries; they are also stored in the local learned.json snapshot so a same-named model on another route reuses the cache. Verification spends the checker route quota and its tokens count in the usage strip above.',
+          'Pick one model as the checker: three public catalogs (models.dev / OpenRouter / Hugging Face) are fetched first, then the remaining models are verified in batches. Whatever the catalogs already know is applied directly, even when the checker has no answer. A sweep spends the checker route quota and its tokens count in the strip above. Note: a thinking model spends the output budget before it answers, so if batches keep failing pick a non-thinking checker or lower its effort.',
         'checker.provider': 'Checker provider',
         'checker.model': 'Checker model',
-        'checker.start': 'Verify all',
+        'checker.start': 'Start',
         'checker.startTitle': 'Run a background verification sweep in the Host',
         'checker.cancel': 'Cancel',
         'checker.cancelTitle': 'Abort the running sweep',
-        'checker.writeBack': 'Write confirmed facts into provider settings',
+        'checker.writeBack': 'Also write into provider settings',
         'checker.writeBackTitle':
-          'On: the judged input / contextWindow / efforts are written into each provider entry (learned.json keeps only what cannot be mapped). Off: only this page and the snapshot update; use Edit capabilities to write manually.',
+          'On: the judged input / contextWindow / efforts are written into each provider entry (learned.json keeps only what cannot be mapped). Off: only this page and the snapshot update.',
         'checker.idle': 'not run yet',
-        'checker.running': 'running {phase} · {done}/{total} · {tokens} spent',
-        'checker.finished': 'finished {done}/{total} · checker spent {tokens} tokens',
+        'checker.running': 'running{phase} · {done}/{total} · {tokens} spent',
+        'checker.finished': 'finished {done}/{total} · {tokens} spent',
         'checker.progress': '{done}/{total} verified · checker spent {tokens} tokens',
-        'checker.errors': '{count} failed batches (hover for details)',
-        'checker.pickNeeded': 'Pick a checker provider and model first.',
-        'checker.failed': 'The verify sweep could not start.',
+        'checker.errorBadge': '{count} failed batches',
+        'checker.errorTitle': 'Failed batches',
+        'checker.errorMore': '{count} more not shown',
+        'checker.concurrency': 'Threads',
+        'checker.concurrencyTitle':
+          'How many checker requests may be in flight at once. Lower it if the relay rate-limits you, raise it on a fast link (max 8).',
+        'checker.concurrencyValue': '{count}',
+        'checker.threads': '{count} in parallel',
+        'checker.sourcesTitle': 'Public catalogs',
+        'checker.source.ok': 'read',
+        'checker.source.empty': 'no match',
+        'checker.source.http': 'HTTP error',
+        'checker.source.failed': 'request failed',
+        'checker.source.bad-json': 'not JSON',
+        'checker.source.too-large': 'response too large',
+        'checker.source.pending': 'pending',
+        'checker.sourceModels': '{count}',
+        'checker.publicOnly': '{count} models were resolved from a public catalog alone (the checker had no answer).',
         'checker.hostStale': 'The Host half does not support online verification yet; restart DSH.',
-        'checker.phase.public': '(fetching public catalogs)',
-        'checker.phase.checker': '(fetching public catalogs)',
-        'checker.phase.verifying': '(verifying in batches)',
+        'checker.phase.public': ' (fetching public catalogs)',
+        'checker.phase.checker': ' (fetching public catalogs)',
+        'checker.phase.verifying': ' (verifying in batches)',
         'source.snapshot': 'verified',
         'page.applyInput': 'Let the composer admit images shown as supported',
+        'page.applyInputShort':
+          'Adds image input to multimodal relay models; off means the Provider input declaration only',
         'page.applyInputHint':
           'When on, relay chat models labelled Multimodal advertise image input to the request path; when off, only the Provider input declaration counts. Relay (pi-ai) routes only — no configuration file is modified. Turn it off if a particular upstream still rejects images.',
         'page.kindLegend':
-          'Colours separate model kinds: image blue · video green · embedding orange · audio purple · rerank red · moderation rose · translation grey. “Official correction” means the vendor documentation overrides a wrong catalog row.',
-        'page.filterLabel': 'Filter',
-        'page.searchPlaceholder': 'Search model name or ID',
-        'page.capabilityLabel': 'Capabilities',
+          'Kind colours: image blue · video green · embedding orange · audio purple · rerank red · moderation rose · translation grey. “Official correction” means vendor documentation overrides a wrong catalog row.',
+        'page.searchPlaceholder': 'Search name or ID',
         'page.capability.multimodal': 'Multimodal',
+        'page.capability.multimodalTitle': 'Only models that accept image input',
         'page.capability.reasoning': 'Reasoning',
+        'page.capability.reasoningTitle': 'Only models that publish reasoning support',
         'page.contextLabel': 'Context at least',
-        'page.context.any': 'Any',
+        'page.context.any': 'Any context',
         'page.context.128k': '128K+',
         'page.context.256k': '256K+',
         'page.context.512k': '512K+',
@@ -1487,15 +1625,15 @@ window.__ModuleLoader__.load({
         'page.filter.other': 'Other',
         'group.showAll': 'Show all',
         'group.hideAll': 'Hide all',
-        'group.showFiltered': 'Show filtered',
-        'group.hideFiltered': 'Hide filtered',
+        'group.showFiltered': 'Show results',
+        'group.hideFiltered': 'Hide results',
         'group.collapseNamed': 'Collapse the {name} group',
         'group.expandNamed': 'Expand the {name} group',
-        'group.capabilities': '{chat} chat · {image} image · {video} video · {other} other',
-        'group.probeOk': 'relay: {models} models · {caps} with capability fields',
-        'group.probeNoCaps': 'relay: {models} models · no capability fields',
-        'group.probeFailed': 'relay read failed',
-        'group.probeSkipped': 'relay not probed',
+        'group.probeOk': '{models} models · {caps} with caps',
+        'group.probeNoCaps': '{models} models · no cap fields',
+        'group.probePartial': 'pricing {models} models',
+        'group.probeFailed': 'read failed',
+        'group.probeSkipped': 'not probed',
         'tag.reasoning': 'Reasoning',
         'tag.noReasoning': 'No reasoning',
         'tag.reasoningUnknown': 'Reasoning unknown',
@@ -1518,7 +1656,6 @@ window.__ModuleLoader__.load({
         'tag.kindVideoTitle': 'Video generation model (outputs video); kind source: {source}',
         'tag.correction': 'Official correction',
         'tag.correctionTitle': '{note}\nSource: {source}',
-        'tag.resolution': 'Resolution',
         'tag.resolutionTitle': 'The model name advertises a {value} output tier',
         'tag.imageInput': 'Image edit',
         'tag.imageInputTitle': 'Accepts image input (image-to-image / reference images)',
@@ -1704,9 +1841,16 @@ window.__ModuleLoader__.load({
       return sources && typeof sources[field] === 'string' ? sources[field] : 'unknown'
     }
 
-    /** Catalog and name heuristics are completed values, not declarations. */
+    /**
+     * Sources whose values are completed or inferred rather than declared.
+     *
+     * `snapshot` is the learned store: facts a checker model or a public catalog
+     * reported. Only the adapter, the settings document, the relay's own listing
+     * and a vendor correction count as declarations, so a verified row must stay
+     * dashed — otherwise an LLM guess would look as trustworthy as a declaration.
+     */
     function isInferredSource(source) {
-      return source === 'catalog' || source === 'inferred'
+      return source === 'snapshot' || source === 'inferred'
     }
 
     /** Kind with a safe fallback for records from an older Host. */
@@ -2125,6 +2269,8 @@ window.__ModuleLoader__.load({
      * @module client-src/pure
      */
 
+    const { bucketOf, kindOf } = require("format")
+
     /** Number of one bucket's token sum, guarding partial buckets. */
     function bucketTotalOf(buckets) {
       if (!Array.isArray(buckets)) return 0
@@ -2199,11 +2345,9 @@ window.__ModuleLoader__.load({
     }
 
     function bucket(model) {
-      const kind = model && typeof model.kind === 'string' && model.kind !== '' ? model.kind : 'chat'
-      if (kind === 'image') return 'image'
-      if (kind === 'video') return 'video'
-      if (kind === 'chat') return 'chat'
-      return 'other'
+      // One implementation lives in `format.mjs` as `bucketOf`; duplicating the
+      // four branches here meant the filter and the tag colours could drift apart.
+      return bucketOf(kindOf(model))
     }
 
     /** Counts per kind bucket for the whole list. */
@@ -2224,7 +2368,11 @@ window.__ModuleLoader__.load({
       return routes
     }
 
-    /** Compact label + tooltip for one provider probe diagnostic. */
+    /**
+     * Compact label + tooltip for one provider probe diagnostic.
+     * @returns `{ label, title, failed? }` or null; `failed` marks a route the page
+     *   should warn about instead of quietly annotating.
+     */
     function probeOf(state, group, t) {
       const list = Array.isArray(state.providers) ? state.providers : []
       const diagnostic = list.find((item) => item && item.id === group.id)
@@ -2232,6 +2380,8 @@ window.__ModuleLoader__.load({
       const details = [
         diagnostic.host ? 'host: ' + diagnostic.host : null,
         diagnostic.status ? 'status: ' + diagnostic.status : null,
+        diagnostic.models ? 'models: ' + diagnostic.models : null,
+        diagnostic.capabilities ? 'capabilities: ' + diagnostic.capabilities : null,
         diagnostic.message ? 'message: ' + diagnostic.message : null,
         diagnostic.pricing && diagnostic.pricing !== 'skipped' ? 'pricing: ' + diagnostic.pricing : null,
       ]
@@ -2249,8 +2399,19 @@ window.__ModuleLoader__.load({
           title: details,
         }
       }
+      // The listing failed but the pricing endpoint still enumerated the route.
+      if (diagnostic.status === 'partial') {
+        return {
+          label: t('group.probePartial', { models: diagnostic.models ?? 0 }),
+          title: details,
+        }
+      }
       if (diagnostic.status === 'failed' || diagnostic.status === 'unauthorized') {
-        return { label: t('group.probeFailed'), title: details }
+        return {
+          label: t('group.probeFailed'),
+          title: details,
+          failed: true,
+        }
       }
       return { label: t('group.probeSkipped'), title: details }
     }
@@ -2272,6 +2433,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
+    const { FIELD } = require("constants")
     const { keyOf, kindOf, isGenerationKind, providerLabel, countModels, readCollapsedGroups, persistCollapsedGroups, overrideKeyOf } = require("format")
     const { computeFilteredGroups, countKinds, probeOf } = require("pure")
     const { capabilityTags, tagClassOf } = require("tags")
@@ -2280,6 +2442,33 @@ window.__ModuleLoader__.load({
     const { UsageToolbar } = require("usage-view")
     const { VerifyPanel } = require("checker-view")
 
+    /** Browser-local key for the "about this page" disclosure. */
+    const ABOUT_KEY = 'dsh-model-visibility:about-open:v1'
+
+    function readAboutOpen() {
+      try {
+        return window.localStorage.getItem(ABOUT_KEY) === '1'
+      } catch (_error) {
+        return false
+      }
+    }
+
+    function persistAboutOpen(open) {
+      try {
+        window.localStorage.setItem(ABOUT_KEY, open ? '1' : '0')
+      } catch (_error) {
+        // Storage is optional for a preference like this.
+      }
+    }
+
+    /**
+     * The settings page.
+     *
+     * Layout, in the order a user needs it: a one-line summary with the two
+     * primary actions, the token strip, the filter bar, the models, then the
+     * diagnostics — and behind a disclosure the long explanation that used to
+     * occupy a third of the viewport before the first model row.
+     */
     function makeSection(form, catalog, overrides, usage, verify) {
       return function ModelVisibilitySection({ t }) {
         const { hidden, snapshot } = useHidden(form)
@@ -2290,6 +2479,7 @@ window.__ModuleLoader__.load({
         const [refreshing, setRefreshing] = React.useState(false)
         const [reloading, setReloading] = React.useState(false)
         const [collapsed, setCollapsed] = React.useState(readCollapsedGroups)
+        const [aboutOpen, setAboutOpen] = React.useState(readAboutOpen)
         const [editing, setEditing] = React.useState(null)
         const [providerNote, setProviderNote] = React.useState(null)
 
@@ -2339,16 +2529,18 @@ window.__ModuleLoader__.load({
           if (disabled) return
           setBusy(true)
           setError(null)
-          Promise.resolve(form.set(field, value)).then(
-            (accepted) => {
-              if (accepted === false) setError(t('page.saveFailed'))
-            },
-            () => {
-              setError(t('page.saveFailed'))
-            },
-          ).finally(() => {
-            setBusy(false)
-          })
+          Promise.resolve(form.set(field, value))
+            .then(
+              (accepted) => {
+                if (accepted === false) setError(t('page.saveFailed'))
+              },
+              () => {
+                setError(t('page.saveFailed'))
+              },
+            )
+            .finally(() => {
+              setBusy(false)
+            })
         }
 
         const commit = (next) => writeField(FIELD, Array.from(next))
@@ -2389,7 +2581,7 @@ window.__ModuleLoader__.load({
         // A hard reload may supersede a soft refresh that is still running;
         // catalog.load() gives it a new run and discards the older result.
         const reloadCatalog = () => {
-          if (busy || reloading) return
+          if (busy || reloading || refreshing) return
           runCatalogAction(() => catalog.reload(), setReloading)
         }
 
@@ -2412,24 +2604,31 @@ window.__ModuleLoader__.load({
           })
         }
 
+        const toggleAbout = () => {
+          setAboutOpen((previous) => {
+            persistAboutOpen(!previous)
+            return !previous
+          })
+        }
+
+        /* ------------------------------------------------------------- groups */
+
         const rows = []
         for (const group of filteredGroups) {
           const allGroupModels =
             (groups.find((candidate) => candidate.id === group.id) || group).models || []
           const models = group.models || []
-          const shown = allGroupModels.filter(
-            (model) => !hidden.has(keyOf(group.id, model.id)),
-          ).length
+          const shown = allGroupModels.filter((model) => !hidden.has(keyOf(group.id, model.id))).length
           const allShown = models.every((model) => !hidden.has(keyOf(group.id, model.id)))
           const kinds = countKinds(allGroupModels)
           const kindParts = []
-          if (kinds.chat > 0) kindParts.push(['chat', t('page.filter.chat') + ' ' + kinds.chat])
-          if (kinds.image > 0) kindParts.push(['image', t('page.filter.image') + ' ' + kinds.image])
-          if (kinds.video > 0) kindParts.push(['video', t('page.filter.video') + ' ' + kinds.video])
-          if (kinds.other > 0) kindParts.push(['other', t('page.filter.other') + ' ' + kinds.other])
+          if (kinds.chat > 0) kindParts.push('chat')
+          if (kinds.image > 0) kindParts.push('image')
+          if (kinds.video > 0) kindParts.push('video')
+          if (kinds.other > 0) kindParts.push('other')
           const kindNodes = []
-          for (const [index, [kindKey, label]] of kindParts.entries()) {
-            if (index > 0) kindNodes.push(' · ')
+          for (const [index, kindKey] of kindParts.entries()) {
+            if (index > 0) kindNodes.push(h('span', { key: 'sep-' + kindKey, className: 'mvp_sep' }, '·'))
             kindNodes.push(
               h(
                 'span',
@@ -2438,8 +2637,9 @@ window.__ModuleLoader__.load({
                   className:
                     'mvp_kindCount' +
                     (kindKey === 'chat' ? '' : ' mvp_kindCount--' + kindKey),
+                  title: t('page.filter.' + kindKey) + ' ' + kinds[kindKey],
                 },
-                label,
+                kinds[kindKey],
               ),
             )
           }
@@ -2457,34 +2657,37 @@ window.__ModuleLoader__.load({
                 'div',
                 { className: 'mvp_groupHead' },
                 h(
-                  'div',
-                  { className: 'mvp_groupTitle' },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'mvp_collapse',
-                      'aria-expanded': !collapsedNow,
-                      'aria-label': collapseLabel,
-                      title: collapseLabel,
-                      onClick: () => toggleGroupCollapsed(group.id),
-                    },
-                    collapsedNow ? '▸' : '▾',
-                  ),
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'mvp_groupTitle',
+                    'aria-expanded': !collapsedNow,
+                    'aria-label': collapseLabel,
+                    title: collapseLabel,
+                    onClick: () => toggleGroupCollapsed(group.id),
+                  },
+                  h('span', { className: 'mvp_chevron' }, collapsedNow ? '▸' : '▾'),
                   h('span', { className: 'mvp_groupName' }, groupName),
                   h('span', { className: 'mvp_groupCount' }, shown + '/' + allGroupModels.length),
                   kindParts.length > 0
                     ? h('span', { className: 'mvp_groupCap' }, kindNodes)
                     : null,
                   probe !== null
-                    ? h('span', { className: 'mvp_groupProbe', title: probe.title || undefined }, probe.label)
+                    ? h(
+                        'span',
+                        {
+                          className: 'mvp_groupProbe' + (probe.failed === true ? ' mvp_groupProbe--warn' : ''),
+                          title: probe.title || undefined,
+                        },
+                        probe.label,
+                      )
                     : null,
                 ),
                 h(
                   'button',
                   {
                     type: 'button',
-                    className: 'mvp_button',
+                    className: 'mvp_button mvp_button--quiet',
                     disabled: disabled,
                     onClick: () => setGroup(group, models, !allShown),
                   },
@@ -2516,15 +2719,20 @@ window.__ModuleLoader__.load({
                       className:
                         'mvp_row' +
                         (generation ? ' mvp_row--gen' : '') +
+                        (shownModel ? '' : ' mvp_row--off') +
                         kindTint,
                     },
                     h(
                       'div',
                       { className: 'mvp_rowText' },
-                      h('div', { className: 'mvp_rowTitle' }, model.name),
-                      model.id === model.name
-                        ? null
-                        : h('div', { className: 'mvp_rowMeta' }, model.id),
+                      h(
+                        'div',
+                        { className: 'mvp_rowHead' },
+                        h('span', { className: 'mvp_rowTitle' }, model.name),
+                        model.id === model.name
+                          ? null
+                          : h('span', { className: 'mvp_rowMeta' }, model.id),
+                      ),
                       h(
                         'div',
                         { className: 'mvp_tags' },
@@ -2549,7 +2757,7 @@ window.__ModuleLoader__.load({
                             'button',
                             {
                               type: 'button',
-                              className: 'mvp_button mvp_editButton',
+                              className: 'mvp_button mvp_button--quiet mvp_editButton',
                               'aria-pressed': editing === rowKey,
                               'aria-label': t('row.edit') + ': ' + model.name,
                               title: t('row.editTitle'),
@@ -2597,9 +2805,13 @@ window.__ModuleLoader__.load({
           )
         }
 
+        /* ------------------------------------------------------------- status */
+
         const loading = state.status === 'loading' || state.status === 'idle'
         const providerList = Array.isArray(state.providers) ? state.providers : []
-        const probeOk = providerList.filter((provider) => provider && provider.status === 'ok').length
+        const probeOk = providerList.filter(
+          (provider) => provider && (provider.status === 'ok' || provider.status === 'partial'),
+        ).length
         const probeCaps = providerList.reduce(
           (count, provider) => count + (Number(provider && provider.capabilities) || 0),
           0,
@@ -2610,10 +2822,7 @@ window.__ModuleLoader__.load({
               ? t('page.probeSummary', { ok: probeOk, caps: probeCaps })
               : t('page.probeSummaryNone')
             : null
-        // A page refresh can deliver this bundle while the Host half is still
-        // the previous version; the switch would look live but do nothing.
         const hostStale = state.source === 'host' && !hostFeatures.includes('applyInput')
-        // A hard reload is only meaningful when the Host half understands it.
         const canReload = state.source === 'host' && hostFeatures.includes('reload')
         const anyCollapsed = groups.some((group) => collapsed.has(group.id))
         const learnedDate =
@@ -2638,54 +2847,52 @@ window.__ModuleLoader__.load({
         ]
         const hasActiveFilters =
           filter !== 'all' || normalizedQuery !== '' || multimodalOnly || reasoningOnly || minContext > 0
+        // A relay that answered with a diagnostic is worth surfacing next to the
+        // group, but only failed routes belong in the page-level warning list.
+        const failedRoutes = providerList.filter(
+          (provider) => provider && (provider.status === 'failed' || provider.status === 'unauthorized'),
+        )
+        const summaryText =
+          total === 0
+            ? loading
+              ? t('page.loading')
+              : t('page.empty')
+            : t('page.summary', { visible: total - hiddenCount, total })
+
+        /* ------------------------------------------------------------- render */
 
         return h(
           'div',
           { className: 'mvp_page' },
-          h(UsageToolbar, { usage, t, features: state.source === 'host' ? hostFeatures : [] }),
+          // Title + summary + the two actions that are worth a permanent slot.
           h(
             'div',
             { className: 'mvp_head' },
-            h('h2', { className: 'mvp_title' }, t('page.title')),
-            h('p', { className: 'mvp_desc' }, t('page.description')),
-          ),
-          h(
-            'div',
-            { className: 'mvp_toolbar' },
             h(
               'div',
-              { className: 'mvp_summary' },
-              total === 0
-                ? loading
-                  ? t('page.loading')
-                  : t('page.empty')
-                : t('page.summary', { visible: total - hiddenCount, total }) +
-                  (hiddenCount > 0 ? ' · ' + t('page.hiddenSummary', { count: hiddenCount }) : '') +
-                  (generationCount > 0 ? ' · ' + t('page.kindSummary', { count: generationCount }) : ''),
+              { className: 'mvp_headMain' },
+              h('h2', { className: 'mvp_title' }, t('page.title')),
+              h('span', { className: 'mvp_summary' }, summaryText),
+              hiddenCount > 0
+                ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.hiddenSummary', { count: hiddenCount }))
+                : null,
+              generationCount > 0
+                ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.kindSummary', { count: generationCount }))
+                : null,
             ),
             h(
               'div',
-              { className: 'mvp_actions' },
+              { className: 'mvp_headActions' },
               h(
                 'button',
                 {
                   type: 'button',
-                  className: 'mvp_button',
-                  disabled: disabled || hiddenCount === 0,
-                  onClick: () => commit(new Set()),
+                  className: 'mvp_button mvp_button--quiet',
+                  'aria-pressed': aboutOpen,
+                  title: t('page.aboutTitle'),
+                  onClick: toggleAbout,
                 },
-                t('page.showAll'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'mvp_button',
-                  disabled: groups.length === 0,
-                  title: t(anyCollapsed ? 'page.expandGroupsTitle' : 'page.collapseGroupsTitle'),
-                  onClick: toggleAllCollapsed,
-                },
-                t(anyCollapsed ? 'page.expandGroups' : 'page.collapseGroups'),
+                t('page.about') + (aboutOpen ? ' ▴' : ' ▾'),
               ),
               h(
                 'button',
@@ -2693,6 +2900,7 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'mvp_button',
                   disabled: busy || refreshing || reloading,
+                  title: t('page.refreshTitle'),
                   onClick: refreshCatalog,
                 },
                 t(refreshing ? 'page.refreshing' : 'page.refresh'),
@@ -2710,63 +2918,77 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
+          aboutOpen
+            ? h(
+                'div',
+                { className: 'mvp_about' },
+                h('p', { className: 'mvp_aboutP' }, t('page.description')),
+                h('p', { className: 'mvp_aboutP' }, t('page.legend')),
+                h('p', { className: 'mvp_aboutP' }, t('page.kindLegend')),
+                h('p', { className: 'mvp_aboutP' }, t('page.manualNote')),
+              )
+            : null,
+          h(UsageToolbar, { usage, t, features: state.source === 'host' ? hostFeatures : [] }),
           h(
             'div',
             { className: 'mvp_filters' },
-            h('label', { className: 'mvp_search' },
-              h('span', { className: 'mvp_filterLabel' }, t('page.searchPlaceholder')),
-              h('input', {
-                className: 'mvp_searchInput',
-                type: 'search',
-                value: query,
-                placeholder: t('page.searchPlaceholder'),
-                'aria-label': t('page.searchPlaceholder'),
-                onInput: (event) => setQuery(event.target.value),
-              }),
+            h('input', {
+              className: 'mvp_searchInput',
+              type: 'search',
+              value: query,
+              placeholder: t('page.searchPlaceholder'),
+              'aria-label': t('page.searchPlaceholder'),
+              onInput: (event) => setQuery(event.target.value),
+            }),
+            h(
+              'div',
+              { className: 'mvp_filterGroup' },
+              filterOptions.map(([value, label, count]) =>
+                h(
+                  'button',
+                  {
+                    key: value,
+                    type: 'button',
+                    className: 'mvp_filter',
+                    'aria-pressed': filter === value,
+                    onClick: () => setFilter(value),
+                  },
+                  label + ' ' + count,
+                ),
+              ),
             ),
-            h('span', { className: 'mvp_filterLabel' }, t('page.filterLabel')),
-            filterOptions.map(([value, label, count]) =>
+            h(
+              'div',
+              { className: 'mvp_filterGroup' },
               h(
                 'button',
                 {
-                  key: value,
                   type: 'button',
                   className: 'mvp_filter',
-                  'aria-pressed': filter === value,
-                  onClick: () => setFilter(value),
+                  'aria-pressed': multimodalOnly,
+                  title: t('page.capability.multimodalTitle'),
+                  onClick: () => setMultimodalOnly(!multimodalOnly),
                 },
-                label + ' ' + count,
+                t('page.capability.multimodal'),
               ),
-            ),
-            h('span', { className: 'mvp_filterLabel' }, t('page.capabilityLabel')),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'mvp_filter',
-                'aria-pressed': multimodalOnly,
-                onClick: () => setMultimodalOnly(!multimodalOnly),
-              },
-              t('page.capability.multimodal'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'mvp_filter',
-                'aria-pressed': reasoningOnly,
-                onClick: () => setReasoningOnly(!reasoningOnly),
-              },
-              t('page.capability.reasoning'),
-            ),
-            h('label', { className: 'mvp_context' },
-              h('span', { className: 'mvp_filterLabel' }, t('page.contextLabel')),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mvp_filter',
+                  'aria-pressed': reasoningOnly,
+                  title: t('page.capability.reasoningTitle'),
+                  onClick: () => setReasoningOnly(!reasoningOnly),
+                },
+                t('page.capability.reasoning'),
+              ),
               h(
                 'select',
                 {
                   className: 'mvp_contextSelect',
                   value: String(minContext),
                   'aria-label': t('page.contextLabel'),
+                  title: t('page.contextLabel'),
                   onChange: (event) => setMinContext(Number(event.target.value)),
                 },
                 [
@@ -2776,6 +2998,31 @@ window.__ModuleLoader__.load({
                   [512000, 'page.context.512k'],
                   [1000000, 'page.context.1m'],
                 ].map(([value, label]) => h('option', { key: value, value: String(value) }, t(label))),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'mvp_filterGroup mvp_filterGroup--push' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mvp_button mvp_button--quiet',
+                  disabled: disabled || hiddenCount === 0,
+                  onClick: () => commit(new Set()),
+                },
+                t('page.showAll'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mvp_button mvp_button--quiet',
+                  disabled: groups.length === 0,
+                  title: t(anyCollapsed ? 'page.expandGroupsTitle' : 'page.collapseGroupsTitle'),
+                  onClick: toggleAllCollapsed,
+                },
+                t(anyCollapsed ? 'page.expandGroups' : 'page.collapseGroups'),
               ),
             ),
           ),
@@ -2790,6 +3037,7 @@ window.__ModuleLoader__.load({
                 className: 'mvp_switch',
                 'aria-checked': applyInput,
                 'aria-label': t('page.applyInput'),
+                'aria-describedby': 'mvp-apply-hint',
                 disabled: disabled,
                 onClick: () => commitApply(!applyInput),
               },
@@ -2798,29 +3046,33 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'mvp_applyText' },
-              h('div', { className: 'mvp_applyTitle' }, t('page.applyInput')),
-              h('div', { className: 'mvp_applyHint' }, t('page.applyInputHint')),
+              h('span', { className: 'mvp_applyTitle' }, t('page.applyInput')),
+              h('span', { className: 'mvp_applyHint', id: 'mvp-apply-hint' }, t('page.applyInputShort')),
             ),
           ),
-          h(
-            VerifyPanel,
-            { verify, catalog: state, t, canUse: canVerify },
-          ),
-          h('div', { className: 'mvp_legend' }, t('page.legend')),
-          h('div', { className: 'mvp_legend' }, t('page.kindLegend')),
-          h('div', { className: 'mvp_legend' }, t('page.manualNote')),
-          overrideState.available === false
-            ? h('div', { className: 'mvp_fallback' }, t('override.unavailable'))
+          failedRoutes.length > 0
+            ? h(
+                'div',
+                {
+                  className: 'mvp_banner mvp_banner--warn',
+                  title: failedRoutes
+                    .map((route) => (route.name || route.id) + ': ' + (route.message || route.status))
+                    .join('\n'),
+                },
+                t('page.probeFailures', {
+                  names: failedRoutes.map((route) => route.name || route.id).join(' · '),
+                }),
+              )
             : null,
+          hostStale ? h('div', { className: 'mvp_banner' }, t('page.hostStale')) : null,
           state.detailsError !== null && state.source === 'catalog'
-            ? h('div', { className: 'mvp_fallback' }, t('page.metaFallback'))
+            ? h('div', { className: 'mvp_banner' }, t('page.metaFallback'))
             : null,
-          hostStale ? h('div', { className: 'mvp_fallback' }, t('page.hostStale')) : null,
           state.failures.length > 0
             ? h(
                 'div',
                 {
-                  className: 'mvp_fallback',
+                  className: 'mvp_banner mvp_banner--warn',
                   title: state.failures
                     .map((failure) => (failure.name || failure.id) + ': ' + failure.message)
                     .join('\n'),
@@ -2832,20 +3084,34 @@ window.__ModuleLoader__.load({
                 }),
               )
             : null,
-          error !== null ? h('div', { className: 'mvp_error', role: 'alert' }, error) : null,
-          state.error !== null
-            ? h('div', { className: 'mvp_error', role: 'alert' }, t('page.error', { message: state.error }))
+          overrideState.available === false
+            ? h('div', { className: 'mvp_banner' }, t('override.unavailable'))
             : null,
-          rows.length > 0 ? rows : null,
+          error !== null ? h('div', { className: 'mvp_banner mvp_banner--error', role: 'alert' }, error) : null,
+          state.error !== null
+            ? h(
+                'div',
+                { className: 'mvp_banner mvp_banner--error', role: 'alert' },
+                t('page.error', { message: state.error }),
+              )
+            : null,
+          h('div', { className: 'mvp_groups' }, rows),
           total > 0 && hasActiveFilters && rows.length === 0
             ? h('div', { className: 'mvp_note' }, t('page.filterEmpty'))
             : null,
           rows.length === 0 && !loading && state.error === null && total === 0
-            ? h('div', { className: 'mvp_error' }, t('page.empty'))
+            ? h('div', { className: 'mvp_note' }, t('page.empty'))
             : null,
-          probeNote !== null ? h('div', { className: 'mvp_note' }, probeNote) : null,
+          h(
+            'div',
+            { className: 'mvp_footer' },
+            probeNote !== null
+              ? h('span', { className: 'mvp_footerItem', title: t('page.probeSummaryTitle') }, probeNote)
+              : null,
+            catalogNote !== null ? h('span', { className: 'mvp_footerItem' }, catalogNote) : null,
+          ),
           providerNote !== null ? h('div', { className: 'mvp_note' }, providerNote) : null,
-          catalogNote !== null ? h('div', { className: 'mvp_note' }, catalogNote) : null,
+          h(VerifyPanel, { verify, catalog: state, t, canUse: canVerify }),
         )
       }
     }
@@ -3060,13 +3326,11 @@ window.__ModuleLoader__.load({
   // -------------------------------------------------------- usage-view
   define("usage-view", function (require, module, exports) {
     /**
-     * Token-usage strip with the one-click exports.
+     * Token-usage strip with the two CSV exports.
      *
-     * The strip renders the ledger's today/week/month/total buckets and links the
-     * two CSV endpoints. It is an inner piece of the settings section: the section
-     * supplies the translator and the usage store instance.
-     *
-     * @module client-src/usage-view
+     * One line, four numbers, two icon-sized buttons: the strip is context, not
+     * the point of the page, so it must not push the model list down. Exact
+     * numbers live in the tooltip; the visible figure is the total.
      */
 
     const React = require('react')
@@ -3076,15 +3340,22 @@ window.__ModuleLoader__.load({
     const { formatTokens } = require("pure")
     const { useSource } = require("hooks")
 
-    /** Render one [in, out] window as "输入 x · 输出 y". */
-    function rangeText(range, t) {
-      if (!Array.isArray(range) || range.every((value) => value === 0)) return t('usage.none')
+    /** Total of one bucket tuple (input + output + cache read + cache write). */
+    function totalOf(range) {
+      if (!Array.isArray(range)) return 0
+      return range.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0)
+    }
+
+    /** Detail line for one window: input / output / cache split. */
+    function detailOf(range, t) {
+      if (!Array.isArray(range) || totalOf(range) === 0) return t('usage.none')
       const input = (range[0] ?? 0) + (range[2] ?? 0) + (range[3] ?? 0)
       const output = range[1] ?? 0
-      return t('usage.range', {
+      return t('usage.detail', {
         input: formatTokens(input),
         output: formatTokens(output),
-        total: formatTokens(input + output),
+        cacheRead: formatTokens(range[2] ?? 0),
+        cacheWrite: formatTokens(range[3] ?? 0),
       })
     }
 
@@ -3093,6 +3364,7 @@ window.__ModuleLoader__.load({
       const anchor = document.createElement('a')
       anchor.href = href
       anchor.rel = 'noopener'
+      anchor.download = ''
       document.body.appendChild(anchor)
       anchor.click()
       anchor.remove()
@@ -3103,71 +3375,69 @@ window.__ModuleLoader__.load({
       const supported = features.length === 0 || features.includes('usage')
       const ranges = state.snapshot?.ranges
       const computing = state.snapshot?.computing === true
+
+      if (!supported) {
+        return h('div', { className: 'mvp_usage mvp_usage--off' }, t('usage.hostStale'))
+      }
+
+      const windows = [
+        ['today', 'usage.today', 'usage.todayTitle'],
+        ['week', 'usage.week', 'usage.weekTitle'],
+        ['month', 'usage.month', 'usage.monthTitle'],
+        ['total', 'usage.total', 'usage.totalTitle'],
+      ]
+
       return h(
         'div',
-        { className: 'mvp_usage' + (supported ? '' : ' mvp_usage--off') },
+        { className: 'mvp_usage' },
         h(
-          'div',
-          { className: 'mvp_usageHead' },
-          h('span', { className: 'mvp_usageTitle' }, t('usage.title')),
+          'span',
+          { className: 'mvp_usageLabel' },
+          t('usage.title'),
           computing ? h('span', { className: 'mvp_usageComputing' }, t('usage.computing')) : null,
-          h(
-            'span',
-            { className: 'mvp_usageActions' },
+        ),
+        h(
+          'span',
+          { className: 'mvp_usageRanges' },
+          windows.map(([key, labelKey, titleKey]) =>
             h(
-              'button',
+              'span',
               {
-                type: 'button',
-                className: 'mvp_button',
-                title: t('usage.exportUsageTitle'),
-                onClick: () => download(`${API}/export?type=usage`),
+                key,
+                className: 'mvp_stat' + (key === 'total' ? ' mvp_stat--total' : ''),
+                title: t(titleKey) + '\n' + detailOf(ranges?.[key], t),
               },
-              t('usage.exportUsage'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'mvp_button',
-                title: t('usage.exportModelsTitle'),
-                onClick: () => download(`${API}/export?type=models`),
-              },
-              t('usage.exportModels'),
+              h('span', { className: 'mvp_statLabel' }, t(labelKey)),
+              h('span', { className: 'mvp_statValue' }, formatTokens(totalOf(ranges?.[key]))),
             ),
           ),
         ),
-        supported
-          ? h(
-              'div',
-              { className: 'mvp_usageRanges' },
-              h(
-                'span',
-                { className: 'mvp_stat', title: t('usage.todayTitle') },
-                h('span', { className: 'mvp_statLabel' }, t('usage.today')),
-                h('span', { className: 'mvp_statValue' }, rangeText(ranges?.today, t)),
-              ),
-              h(
-                'span',
-                { className: 'mvp_stat', title: t('usage.weekTitle') },
-                h('span', { className: 'mvp_statLabel' }, t('usage.week')),
-                h('span', { className: 'mvp_statValue' }, rangeText(ranges?.week, t)),
-              ),
-              h(
-                'span',
-                { className: 'mvp_stat', title: t('usage.monthTitle') },
-                h('span', { className: 'mvp_statLabel' }, t('usage.month')),
-                h('span', { className: 'mvp_statValue' }, rangeText(ranges?.month, t)),
-              ),
-              h(
-                'span',
-                { className: 'mvp_stat mvp_stat--total', title: t('usage.totalTitle') },
-                h('span', { className: 'mvp_statLabel' }, t('usage.total')),
-                h('span', { className: 'mvp_statValue' }, rangeText(ranges?.total, t)),
-              ),
-            )
-          : h('div', { className: 'mvp_usageHint' }, t('usage.hostStale')),
+        h(
+          'span',
+          { className: 'mvp_usageActions' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'mvp_button mvp_button--quiet',
+              title: t('usage.exportUsageTitle'),
+              onClick: () => download(`${API}/export?type=usage`),
+            },
+            t('usage.exportUsage'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'mvp_button mvp_button--quiet',
+              title: t('usage.exportModelsTitle'),
+              onClick: () => download(`${API}/export?type=models`),
+            },
+            t('usage.exportModels'),
+          ),
+        ),
         state.error !== null
-          ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn' }, state.error)
+          ? h('span', { className: 'mvp_usageHint mvp_usageHint--warn' }, state.error)
           : null,
       )
     }

@@ -4,6 +4,11 @@
  * Runs the real index.js against a fake ctx / llm / settings: the capability
  * route must expose the vendor correction, and the registered pi-ai adapter
  * must admit images only while `applyInput` is on.
+ *
+ * Every case starts from an empty shadow store. The override store reads
+ * `$DSH_HOME/dsh-model-visibility/overrides.json` by design (a hand edit must
+ * apply without a restart), so a case that saves an override would otherwise
+ * be visible to the next one.
  */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -15,6 +20,17 @@ import test from 'node:test'
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'model-visibility-test-'))
 import { apply } from '../index.js'
 import { createLearnedCatalog } from '../lib/learned-catalog.js'
+
+/** Remove the plugin's shadow files so each case starts from a clean slate. */
+function resetShadowStore() {
+  for (const name of ['overrides.json', 'hidden.json', 'learned.json']) {
+    try {
+      fs.rmSync(path.join(process.env.DSH_HOME, 'dsh-model-visibility', name), { force: true })
+    } catch (_error) {
+      // A missing file is exactly the state we want.
+    }
+  }
+}
 
 function createHarness() {
   const providers = {
@@ -131,6 +147,7 @@ function createHarness() {
 }
 
 test('the Host route exposes the vendor correction and the gate aligns images', async () => {
+  resetShadowStore()
   const harness = createHarness()
   const config = {
     hidden: { get: () => [] },
@@ -166,6 +183,7 @@ test('the Host route exposes the vendor correction and the gate aligns images', 
 })
 
 test('a hard reload drops the cache and advertises the reload feature', async () => {
+  resetShadowStore()
   const harness = createHarness()
   apply(harness.ctx, {
     hidden: { get: () => [] },
@@ -191,6 +209,7 @@ test('a hard reload drops the cache and advertises the reload feature', async ()
 })
 
 test('the override route persists manual capabilities and feeds the gate', async () => {
+  resetShadowStore()
   const harness = createHarness()
   apply(harness.ctx, {
     hidden: { get: () => [] },
@@ -241,6 +260,7 @@ test('the override route persists manual capabilities and feeds the gate', async
 })
 
 test('a manual override is written through to the provider settings', async () => {
+  resetShadowStore()
   const harness = createHarness()
   apply(harness.ctx, {
     hidden: { get: () => [] },
@@ -294,6 +314,7 @@ test('a manual override is written through to the provider settings', async () =
 })
 
 test('write-through keeps fields with no provider equivalent in the local override', async () => {
+  resetShadowStore()
   const harness = createHarness()
   apply(harness.ctx, {
     hidden: { get: () => [] },
@@ -337,6 +358,7 @@ test('write-through keeps fields with no provider equivalent in the local overri
 })
 
 test('applyToProvider:false keeps the override local', async () => {
+  resetShadowStore()
   const harness = createHarness()
   apply(harness.ctx, {
     hidden: { get: () => [] },

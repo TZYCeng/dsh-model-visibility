@@ -1,6 +1,6 @@
 {
   "name": "@tzyc/dsh-model-visibility",
-  "version": "1.10.3",
+  "version": "1.12.1",
   "publishConfig": {
     "access": "public"
   },
@@ -24,7 +24,7 @@
     "docs"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --import ./test/setup.mjs --test test/*.test.mjs",
     "build": "node scripts/build-client.mjs"
   },
   "dsh": {

@@ -1,11 +1,9 @@
 /**
- * Token-usage strip with the one-click exports.
+ * Token-usage strip with the two CSV exports.
  *
- * The strip renders the ledger's today/week/month/total buckets and links the
- * two CSV endpoints. It is an inner piece of the settings section: the section
- * supplies the translator and the usage store instance.
- *
- * @module client-src/usage-view
+ * One line, four numbers, two icon-sized buttons: the strip is context, not
+ * the point of the page, so it must not push the model list down. Exact
+ * numbers live in the tooltip; the visible figure is the total.
  */
 
 const React = require('react')
@@ -15,15 +13,22 @@ import { API } from './constants.mjs'
 import { formatTokens } from './pure.mjs'
 import { useSource } from './hooks.mjs'
 
-/** Render one [in, out] window as "输入 x · 输出 y". */
-function rangeText(range, t) {
-  if (!Array.isArray(range) || range.every((value) => value === 0)) return t('usage.none')
+/** Total of one bucket tuple (input + output + cache read + cache write). */
+function totalOf(range) {
+  if (!Array.isArray(range)) return 0
+  return range.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0)
+}
+
+/** Detail line for one window: input / output / cache split. */
+function detailOf(range, t) {
+  if (!Array.isArray(range) || totalOf(range) === 0) return t('usage.none')
   const input = (range[0] ?? 0) + (range[2] ?? 0) + (range[3] ?? 0)
   const output = range[1] ?? 0
-  return t('usage.range', {
+  return t('usage.detail', {
     input: formatTokens(input),
     output: formatTokens(output),
-    total: formatTokens(input + output),
+    cacheRead: formatTokens(range[2] ?? 0),
+    cacheWrite: formatTokens(range[3] ?? 0),
   })
 }
 
@@ -32,6 +37,7 @@ function download(href) {
   const anchor = document.createElement('a')
   anchor.href = href
   anchor.rel = 'noopener'
+  anchor.download = ''
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
@@ -42,71 +48,69 @@ export function UsageToolbar({ usage, t, features }) {
   const supported = features.length === 0 || features.includes('usage')
   const ranges = state.snapshot?.ranges
   const computing = state.snapshot?.computing === true
+
+  if (!supported) {
+    return h('div', { className: 'mvp_usage mvp_usage--off' }, t('usage.hostStale'))
+  }
+
+  const windows = [
+    ['today', 'usage.today', 'usage.todayTitle'],
+    ['week', 'usage.week', 'usage.weekTitle'],
+    ['month', 'usage.month', 'usage.monthTitle'],
+    ['total', 'usage.total', 'usage.totalTitle'],
+  ]
+
   return h(
     'div',
-    { className: 'mvp_usage' + (supported ? '' : ' mvp_usage--off') },
+    { className: 'mvp_usage' },
     h(
-      'div',
-      { className: 'mvp_usageHead' },
-      h('span', { className: 'mvp_usageTitle' }, t('usage.title')),
+      'span',
+      { className: 'mvp_usageLabel' },
+      t('usage.title'),
       computing ? h('span', { className: 'mvp_usageComputing' }, t('usage.computing')) : null,
-      h(
-        'span',
-        { className: 'mvp_usageActions' },
+    ),
+    h(
+      'span',
+      { className: 'mvp_usageRanges' },
+      windows.map(([key, labelKey, titleKey]) =>
         h(
-          'button',
+          'span',
           {
-            type: 'button',
-            className: 'mvp_button',
-            title: t('usage.exportUsageTitle'),
-            onClick: () => download(`${API}/export?type=usage`),
+            key,
+            className: 'mvp_stat' + (key === 'total' ? ' mvp_stat--total' : ''),
+            title: t(titleKey) + '\n' + detailOf(ranges?.[key], t),
           },
-          t('usage.exportUsage'),
-        ),
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'mvp_button',
-            title: t('usage.exportModelsTitle'),
-            onClick: () => download(`${API}/export?type=models`),
-          },
-          t('usage.exportModels'),
+          h('span', { className: 'mvp_statLabel' }, t(labelKey)),
+          h('span', { className: 'mvp_statValue' }, formatTokens(totalOf(ranges?.[key]))),
         ),
       ),
     ),
-    supported
-      ? h(
-          'div',
-          { className: 'mvp_usageRanges' },
-          h(
-            'span',
-            { className: 'mvp_stat', title: t('usage.todayTitle') },
-            h('span', { className: 'mvp_statLabel' }, t('usage.today')),
-            h('span', { className: 'mvp_statValue' }, rangeText(ranges?.today, t)),
-          ),
-          h(
-            'span',
-            { className: 'mvp_stat', title: t('usage.weekTitle') },
-            h('span', { className: 'mvp_statLabel' }, t('usage.week')),
-            h('span', { className: 'mvp_statValue' }, rangeText(ranges?.week, t)),
-          ),
-          h(
-            'span',
-            { className: 'mvp_stat', title: t('usage.monthTitle') },
-            h('span', { className: 'mvp_statLabel' }, t('usage.month')),
-            h('span', { className: 'mvp_statValue' }, rangeText(ranges?.month, t)),
-          ),
-          h(
-            'span',
-            { className: 'mvp_stat mvp_stat--total', title: t('usage.totalTitle') },
-            h('span', { className: 'mvp_statLabel' }, t('usage.total')),
-            h('span', { className: 'mvp_statValue' }, rangeText(ranges?.total, t)),
-          ),
-        )
-      : h('div', { className: 'mvp_usageHint' }, t('usage.hostStale')),
+    h(
+      'span',
+      { className: 'mvp_usageActions' },
+      h(
+        'button',
+        {
+          type: 'button',
+          className: 'mvp_button mvp_button--quiet',
+          title: t('usage.exportUsageTitle'),
+          onClick: () => download(`${API}/export?type=usage`),
+        },
+        t('usage.exportUsage'),
+      ),
+      h(
+        'button',
+        {
+          type: 'button',
+          className: 'mvp_button mvp_button--quiet',
+          title: t('usage.exportModelsTitle'),
+          onClick: () => download(`${API}/export?type=models`),
+        },
+        t('usage.exportModels'),
+      ),
+    ),
     state.error !== null
-      ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn' }, state.error)
+      ? h('span', { className: 'mvp_usageHint mvp_usageHint--warn' }, state.error)
       : null,
   )
 }

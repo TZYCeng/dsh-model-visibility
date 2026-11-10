@@ -1,7 +1,7 @@
 # HANDOVER — dsh-model-visibility
 
 > 给下一个接手的人 / AI。目标：**不用重新啃 DSH 源码就能继续加功能**。
-> 当前版本 **1.10.3**（学习快照联网校验 + token 用量账本与导出 + client 模块化拆分 + 前述全部能力；静态内置目录已删除）。
+> 当前版本 **1.12.1**（修复 1.10.x 的开关失效与校验全失败，设置页 UI 重构；学习快照联网校验 + token 用量账本与导出 + client 模块化拆分 + 前述全部能力；静态内置目录已删除）。
 
 ---
 
@@ -64,9 +64,7 @@ lib/provider-probe.js        Host 中转站探测：读配置、解凭据、GET 
 lib/capability-catalog.js    目录匹配 + 模型类型 / 家族模态启发式
 lib/capability-corrections.js  厂商文档校正表（GLM-5.3 纯文本等），带来源链接
 lib/image-input-gate.js      pi-ai 适配器 modelOf 包装（请求侧图像准入，可逆）
-lib/model-catalog.js         由 scripts/build-catalog.mjs 生成的 models.dev 快照（勿手改）
-scripts/build-catalog.mjs    重新生成目录
-client-src/*.mjs             浏览器半源码，15 个模块（dict / css / pure / format 等），index.mjs 是入口
+client-src/*.mjs             浏览器半源码，14 个模块（dict / css / pure / format 等），index.mjs 是入口
 client.js                    构建产物（勿手改），npm run build 重新生成
 cordis.patch.yml             Host 行声明
 locale/zh.json, en.json      插件列表标题/描述
@@ -283,16 +281,17 @@ type Catalog = {
 3. `client.js`：`DICT` 加 `tag.kind.3d`，`bucketOf` 归到 `other`（或新增筛选桶）。
 4. 测试：`inferModelKind('xxx-3d')`。
 
-### 6.3 更新内置目录
+### 6.3 更新能力事实（1.10.0 起）
 
-```powershell
-node .tools/asar.mjs extract "<DSH>/resources/app.asar" `
-  "dsh/node_modules/@earendil-works/pi-ai" ".tools/extract/pi-ai"
-node scripts/build-catalog.mjs --data .tools/extract/pi-ai
-npm test
-```
+静态 `lib/model-catalog.js` 与 `scripts/build-catalog.mjs` **已删除**，不要再想着「重新生成目录」。
+能力事实来自三层，按需要维护其中一层即可：
 
-目录变大时注意仓库体积；当前 652 个模型约 92 KB。不要手工编辑 `lib/model-catalog.js`。
+1. **中转站自己公布**（首选）：`lib/provider-probe.js` 的 dialect 解析；新方言就加字段映射 + 单测。
+2. **联网校验**：设置页点「开始校验」，结果进 `$DSH_HOME/dsh-model-visibility/learned.json`。
+   校验员的输出预算与思考档位见 `CHECKER_MAX_TOKENS` / `CHECKER_REASONING_EFFORT`。
+3. **厂商文档校正**：`lib/capability-corrections.js` 的小表，只收能引用官方文档的错误行。
+
+要清掉一批学到的错误事实，直接删 `learned.json` 或改它的行；Host 按 mtime 自动重读。
 
 ### 6.4 加搜索 / 排序
 
@@ -392,6 +391,116 @@ Host 的 `console` 输出在 DSH 桌面进程里；没有独立日志文件。�
 29. **校验批的 JSON 容错**：允许 ``` 围栏与前后闲话（`extractJsonBlock`），但只接受本批 id 的条目，`kind` 必须在白名单里，模态经 `normalizeModalities` 过滤；`unknown` 返回 null 事实。
 30. **公开目录请求免凭据、不跟随重定向**：models.dev / OpenRouter 各自 15s 超时，失败按空目录处理（进度照常继续）。
 
+### 1.12.0 修掉的坑
+
+46. **公开目录解析成功，事实却被丢弃**：`parseCheckerAnswer` 只用公共事实标记 `origins`，
+   从不把字段填进结果。用户看到「校验跑完，0 条事实」，自然以为「公开目录不返回模型数据」。
+    现在公开行先铺底、校验员逐字段覆盖，且 `origins` 只在**真的贡献了字段**时标 `public`。
+47. **`readModelsDev` 只认 `api.json`**：`models.json`（`{<id>: record}`）与 `catalog.json`
+    （`{providers, models}`）都被解析成 0 条。现在三种形状都认，且 provider-free 的 `models.json`
+    排在 `api.json` 之前（更便宜、更贴合中转站 id）。
+48. **Hugging Face 是唯一的开源权重来源**。`huggingface.co` 在国内常不可达（本机实测 5 s 超时），
+    所以按 `huggingface.co → hf-mirror.com → hugging-face.cn` 顺序回退，只报告成功的那一个。
+49. **提示词太宽松**：以前用一句话描述字段再指望模型回 JSON。现在系统提示词直接给出完整 schema
+    （每个键、每个取值、`null` 表示未知、禁止围栏与解释），回复再过 `validateReplyShape` 严格校验，
+    不合格定向重试一次。`{models:[…]}` / `{results:[…]}` 视为合格——一开始把它们判成违规，
+    导致每个正常回复都白重试一次、token 翻倍（`[200,40]` vs `[100,20]` 的测试就是这么暴露的）。
+50. **并发线程数不可调**：写死 2。现在面板可选 1–8（`MAX_CONCURRENCY`），按次传入 `start()`，
+    越界会被 clamp 而不是报错。
+51. **公开目录失败不可见**：所有错误都吞成空 Map。现在每个源都有 `{name,status,models,message}`，
+    面板逐条列出；四源全挂时 sweep 会显式记一条 `no public catalog could be read`。
+52. **TLS 被本地代理拦截时不可诊断**：错误是裸的 `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`。
+    `transportMessageOf` 现在把它翻成「TLS 证书链不受信任（可能被本地代理拦截…）」。
+
+---
+
+### 1.12.1 修掉的坑
+
+53. **测试会读写用户的真实数据**：`lib/model-info.js` 在调用方没有注入 learned store 时回退到
+    `$DSH_HOME/dsh-model-visibility/learned.json`，而测试没设 `DSH_HOME`，于是断言取决于开发者
+    昨天校验过什么（实测 `grok-imagine-video-1.5` 的 1024 上下文串进了 `contextWindow` 断言）。
+    现在 `test/setup.mjs` 在加载任何模块前把 `DSH_HOME` 指到临时目录，通过 `node --import` 生效。
+54. **`host.test.mjs` 的用例互相污染**：覆盖存储按 `$DSH_HOME` 读写，前一个用例存的 `mystery-model`
+    会让后一个用例读到残留。现在每个用例先 `resetShadowStore()`。
+55. **`listModels` 每次路由被调用两次**：`Array.isArray(await llm.listModels(id)) ? await llm.listModels(id) : []`。
+56. **跨路由去重是 O(n²)**：400+ 模型时在每次网络调用前扫一遍数组，改用 Set。
+57. **`total` 与批次数不吻合**：`targets.length - 1` 在「校验员不可路由」时会多算一个。
+    现在 `total` 直接由批次数求和得出。
+58. **多出的 id 被当成格式违规**：模型顺手回答一个没被问到的模型会触发一次无谓重试。现在
+    `validateReplyShape` 区分 `retryable`（结构损坏 / 缺 id）与仅记录（多余 id）。
+59. **`withKinds` 原地修改 Map**：partial 分支传进去的正是 `pricing.entries` 本身，边遍历边写。改为返回副本。
+60. **`refused ? 'partial' : 'partial'`** 这个无意义三元，以及 `diagnostics.message.replace(…)`
+    在 message 为空时崩溃。
+61. **`askChecker` 的 `options3` 参数**无人传入，是死代码；`DEFAULT_BATCH_SIZE` 定义了却仍硬编码 6。
+62. **三处重复定义**：`providerPatch` 与 `PROVIDER_WRITE_FIELDS`、`OVERRIDE_EFFORT_IDS` 与
+    `PROVIDER_EFFORT_IDS`、`pure.mjs` 的私有 `bucket()` 与 `format.mjs` 的 `bucketOf()`。各自合并成一处。
+63. **`tag.resolutionLabel`** 是无人引用的字典键。（`checker.source.pending` 例外，它经
+    `'checker.source.' + status` 动态命中。）
+
+---
+
+### 1.11.0 修掉的坑（都是「测试全绿但功能全坏」那一类）
+
+31. **`client-src` 拆模块时丢了 import**：`settings-section.mjs` 用了 `FIELD` 却没 `import { FIELD } from './constants.mjs'`，
+    结果 1.10.0→1.10.3 **每个模型开关、整组开关、「全部显示」点击即 `ReferenceError`**。
+    `client-hygiene` 只扫 `identifier(` 调用形态，裸变量天然逃逸；`client-bundle` 只验证 factory 能返回。
+    **守门**：`test/client-render.test.mjs` 真的渲染 `client.js` 并点击每个控件。
+32. **`maxTokens` 写死 2048 + 不锁思考档位**：思考型校验员把预算全花在 reasoning 通道，正文为空/截断，
+    于是每一批都报「回复里没有 JSON」。实测 191 个模型、32 批全失败、61K token 白烧。
+    **守门**：`test/verify-contract.test.mjs` 用真实 chunk 形状复现截断，并断言错误文案说明「被截断 / 花在思考上」。
+33. **`finish.reason.kind === 'max-tokens'` 没被当作错误**：截断被降级成「解析失败」，掩盖真实原因。
+34. **`done` 把跳过的校验员算进完成数**：进度条出现 `3/2`、`36/23`。现在 `total` 与 `done` 都只数事实校验。
+35. **`cancel()` 立刻把 `running` 置 false**：旧 worker 还在 await，新 sweep 直接叠上去，两轮并发写同一状态。
+    现在取消只 abort，`start()` 会 join 旧 run。
+36. **`learned.json` 每模型全量重写**：200 个模型 = 199 次全量读 + 199 次全量写。现在每批一次。
+37. **`toModelListCsv` 对数组调 `.join`**：任何带思考档位的模型都会让「导出模型 CSV」500。
+    **守门**：`test/export-csv.test.mjs`（此前该模块 0 函数覆盖）。
+38. **`toUsageCsv` 把 `days` 当成 `{day: {route: tuple}}`**：真实账本形状是 `{day: tuple}`，
+    第一行真实数据就 `values.every is not a function`。逐路由明细在 `byModel` 里，现在是独立的第三段。
+39. **`isInferredSource` 只认 `catalog` / `inferred`**：`catalog` 这个来源值在删静态目录后已不存在，
+    于是 `snapshot`（LLM 校验结果）渲染成**实线**，看起来和适配器声明一样可信。现在 `snapshot` 是虚线。
+40. **Provider `reasoningEfforts` 档位没有白名单**：校验员返回 vendor 档位（`thinking`/`adaptive`）时，
+    `settings.mutate` 整组被 schema 拒绝，连同一请求里的 `input` 和 `contextWindow` 一起回滚。
+    现在 `effortsForProvider` 只写 `off/minimal/low/medium/high/xhigh/max`。
+41. **中转站探测在 DNS 失败时只给裸 `ENOTFOUND`**：现在翻译成「域名解析失败（DNS 查不到该主机）」等可读文案；
+    另外 `/models` 401/超时时会退到 `/api/pricing` 拿模型 id，状态记 `partial`，分组显示「价格接口 N 个」。
+42. **`http://` base URL 会明文发 API key**：现在只放行 https，`http` 仅允许 localhost / 127.0.0.1 / ::1；
+    `/api/pricing` 走同一规则。
+43. **用量条首屏永远是「—」**：`createUsageApi` 订阅时只起定时器、不立刻读一次，且固定 30s 轮询，
+    冷扫描（本机 586 会话 / 130MB 约 4.4s）期间没有任何反馈。现在首次订阅立刻读，`computing` 时 3s 快轮询。
+44. **校验面板轮询间隔在扫描开始后不切换**：订阅时若 idle 就永远 60s。现在按 `state.running` 重新挂表
+    （2s / 60s 自适应）。
+45. **无人订阅时也会启动定时器**：`load()` 直接叫醒 `setInterval` 会让 `node --test` 进程永不退出。
+    现在 `listeners.size === 0` 时不装表，并对 timer 调 `unref()`（若存在）。
+
+---
+
+## 8.1 设置页 UI 结构（1.11.0 重构）
+
+首屏只留决策需要的东西，长文案全部收进折叠区：
+
+```
+标题行   模型显示 · 已显示 x/y · 已关闭 n · 生图/生视频 n     [说明▾] [刷新] [重新获取能力]
+用量条   token  今天 N · 本周 N · 本月 N · 总计 N            [用量 CSV] [模型 CSV]
+筛选栏   搜索…  [全部 n][对话 n][生图 n][生视频 n][其它 n]  [多模态][支持推理][上下文▾]   [全部显示][折叠全部]
+放行行   [开关] 让输入框按能力标注放行图像   一句说明
+[仅在失败时出现的告警条]
+分组      ▾ DeepSeek 2/2 · 对话2                     [全组显示]
+           行：名称 + ID + 能力标签                  [编辑] [开关]
+页脚     探测：N 个中转站可读 · 学习快照 N 条（日期）
+联网校验 [▸ 联网校验    未运行]                     ← 折叠；展开才有校验员与进度
+```
+
+设计约束（改 UI 时守住）：
+
+- **首屏不放说明文字**：`page.description / legend / kindLegend / manualNote` 只在 `说明` 展开时出现。
+  长度裁到「一句话能读完」。
+- **诊断只在真的失败时出现**：中转站徽标正常时是灰色小字，失败才变告警色；页面级告警条只在
+  路由失败 / Host 旧版 / 回归目录时插入。
+- **失败要说原因**：校验批次失败直接列出错误原文（最多 6 条 + 「另有 N 条」），不要只给计数。
+- **颜色仍只用 `--dsw-alias-*`**：`color-mix` 前面先写 `background: transparent` fallback。
+- **开关的选中态用 brand 色**：早期版本用 `--dsw-alias-bg-base`（= 页面底色），深色主题下相当于不可见。
+
 ---
 
 ## 9. 测试清单（发版前）
@@ -443,7 +552,7 @@ npm pack --dry-run            # 核对 files 清单（client-src 已加入 files
 **④ GitHub Release**：用 REST（Bearer 通过 `git credential fill` 拿 device token；`.publish/release.mjs` 已写好全流程）创建 tag 对应 release，资源同时上传两个：**带版本号**的 `dsh-model-visibility-<v>.tgz` 与**不带版本号**的 `dsh-model-visibility.tgz`——市场条目的 `releases/latest/download/...` 依赖不带版本名，否则安装路径直接 404。
 **⑤ npm publish**：作用域名 `@tzyc/dsh-model-visibility`。直发不通就按下面 token 流程；发完后核对 `npm view @tzyc/dsh-model-visibility version` 与从 registry 下载包检查 `client.js` 里 `id` 是作用域名。
 
-版本号在 `package.json`；当前 `1.10.3`。
+版本号在 `package.json`；当前 `1.11.0`。
 - 发版五步见本节开头（改版本号 → commit+tag+push → pack → GitHub Release 双资源 → npm publish）。1.10.0 起 `client-src` 已加入 `files`，tarball 里源码与产物一起发布。
 - `files` 已包含 `lib`；`scripts` / `test` / `.tools` 不进包。
 - `docs/` 只留 `settings-page.png`、`capability-tags.png`（1.9.0 起）与 `icon-180.png`；换截图时同步改 `screenshots.json` 与 README 的 `<img>`。如果重新截图，先确认目录可写（见坑 18）。

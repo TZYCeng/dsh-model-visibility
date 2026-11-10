@@ -1,6 +1,7 @@
 const React = require('react')
 const h = React.createElement
 
+import { FIELD } from './constants.mjs'
 import { keyOf, kindOf, isGenerationKind, providerLabel, countModels, readCollapsedGroups, persistCollapsedGroups, overrideKeyOf } from './format.mjs'
 import { computeFilteredGroups, countKinds, probeOf } from './pure.mjs'
 import { capabilityTags, tagClassOf } from './tags.mjs'
@@ -9,6 +10,33 @@ import { useHidden, useSource } from './hooks.mjs'
 import { UsageToolbar } from './usage-view.mjs'
 import { VerifyPanel } from './checker-view.mjs'
 
+/** Browser-local key for the "about this page" disclosure. */
+const ABOUT_KEY = 'dsh-model-visibility:about-open:v1'
+
+function readAboutOpen() {
+  try {
+    return window.localStorage.getItem(ABOUT_KEY) === '1'
+  } catch (_error) {
+    return false
+  }
+}
+
+function persistAboutOpen(open) {
+  try {
+    window.localStorage.setItem(ABOUT_KEY, open ? '1' : '0')
+  } catch (_error) {
+    // Storage is optional for a preference like this.
+  }
+}
+
+/**
+ * The settings page.
+ *
+ * Layout, in the order a user needs it: a one-line summary with the two
+ * primary actions, the token strip, the filter bar, the models, then the
+ * diagnostics — and behind a disclosure the long explanation that used to
+ * occupy a third of the viewport before the first model row.
+ */
 function makeSection(form, catalog, overrides, usage, verify) {
   return function ModelVisibilitySection({ t }) {
     const { hidden, snapshot } = useHidden(form)
@@ -19,6 +47,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const [refreshing, setRefreshing] = React.useState(false)
     const [reloading, setReloading] = React.useState(false)
     const [collapsed, setCollapsed] = React.useState(readCollapsedGroups)
+    const [aboutOpen, setAboutOpen] = React.useState(readAboutOpen)
     const [editing, setEditing] = React.useState(null)
     const [providerNote, setProviderNote] = React.useState(null)
 
@@ -68,16 +97,18 @@ function makeSection(form, catalog, overrides, usage, verify) {
       if (disabled) return
       setBusy(true)
       setError(null)
-      Promise.resolve(form.set(field, value)).then(
-        (accepted) => {
-          if (accepted === false) setError(t('page.saveFailed'))
-        },
-        () => {
-          setError(t('page.saveFailed'))
-        },
-      ).finally(() => {
-        setBusy(false)
-      })
+      Promise.resolve(form.set(field, value))
+        .then(
+          (accepted) => {
+            if (accepted === false) setError(t('page.saveFailed'))
+          },
+          () => {
+            setError(t('page.saveFailed'))
+          },
+        )
+        .finally(() => {
+          setBusy(false)
+        })
     }
 
     const commit = (next) => writeField(FIELD, Array.from(next))
@@ -118,7 +149,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
     // A hard reload may supersede a soft refresh that is still running;
     // catalog.load() gives it a new run and discards the older result.
     const reloadCatalog = () => {
-      if (busy || reloading) return
+      if (busy || reloading || refreshing) return
       runCatalogAction(() => catalog.reload(), setReloading)
     }
 
@@ -141,24 +172,31 @@ function makeSection(form, catalog, overrides, usage, verify) {
       })
     }
 
+    const toggleAbout = () => {
+      setAboutOpen((previous) => {
+        persistAboutOpen(!previous)
+        return !previous
+      })
+    }
+
+    /* ------------------------------------------------------------- groups */
+
     const rows = []
     for (const group of filteredGroups) {
       const allGroupModels =
         (groups.find((candidate) => candidate.id === group.id) || group).models || []
       const models = group.models || []
-      const shown = allGroupModels.filter(
-        (model) => !hidden.has(keyOf(group.id, model.id)),
-      ).length
+      const shown = allGroupModels.filter((model) => !hidden.has(keyOf(group.id, model.id))).length
       const allShown = models.every((model) => !hidden.has(keyOf(group.id, model.id)))
       const kinds = countKinds(allGroupModels)
       const kindParts = []
-      if (kinds.chat > 0) kindParts.push(['chat', t('page.filter.chat') + ' ' + kinds.chat])
-      if (kinds.image > 0) kindParts.push(['image', t('page.filter.image') + ' ' + kinds.image])
-      if (kinds.video > 0) kindParts.push(['video', t('page.filter.video') + ' ' + kinds.video])
-      if (kinds.other > 0) kindParts.push(['other', t('page.filter.other') + ' ' + kinds.other])
+      if (kinds.chat > 0) kindParts.push('chat')
+      if (kinds.image > 0) kindParts.push('image')
+      if (kinds.video > 0) kindParts.push('video')
+      if (kinds.other > 0) kindParts.push('other')
       const kindNodes = []
-      for (const [index, [kindKey, label]] of kindParts.entries()) {
-        if (index > 0) kindNodes.push(' · ')
+      for (const [index, kindKey] of kindParts.entries()) {
+        if (index > 0) kindNodes.push(h('span', { key: 'sep-' + kindKey, className: 'mvp_sep' }, '·'))
         kindNodes.push(
           h(
             'span',
@@ -167,8 +205,9 @@ function makeSection(form, catalog, overrides, usage, verify) {
               className:
                 'mvp_kindCount' +
                 (kindKey === 'chat' ? '' : ' mvp_kindCount--' + kindKey),
+              title: t('page.filter.' + kindKey) + ' ' + kinds[kindKey],
             },
-            label,
+            kinds[kindKey],
           ),
         )
       }
@@ -186,34 +225,37 @@ function makeSection(form, catalog, overrides, usage, verify) {
             'div',
             { className: 'mvp_groupHead' },
             h(
-              'div',
-              { className: 'mvp_groupTitle' },
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'mvp_collapse',
-                  'aria-expanded': !collapsedNow,
-                  'aria-label': collapseLabel,
-                  title: collapseLabel,
-                  onClick: () => toggleGroupCollapsed(group.id),
-                },
-                collapsedNow ? '▸' : '▾',
-              ),
+              'button',
+              {
+                type: 'button',
+                className: 'mvp_groupTitle',
+                'aria-expanded': !collapsedNow,
+                'aria-label': collapseLabel,
+                title: collapseLabel,
+                onClick: () => toggleGroupCollapsed(group.id),
+              },
+              h('span', { className: 'mvp_chevron' }, collapsedNow ? '▸' : '▾'),
               h('span', { className: 'mvp_groupName' }, groupName),
               h('span', { className: 'mvp_groupCount' }, shown + '/' + allGroupModels.length),
               kindParts.length > 0
                 ? h('span', { className: 'mvp_groupCap' }, kindNodes)
                 : null,
               probe !== null
-                ? h('span', { className: 'mvp_groupProbe', title: probe.title || undefined }, probe.label)
+                ? h(
+                    'span',
+                    {
+                      className: 'mvp_groupProbe' + (probe.failed === true ? ' mvp_groupProbe--warn' : ''),
+                      title: probe.title || undefined,
+                    },
+                    probe.label,
+                  )
                 : null,
             ),
             h(
               'button',
               {
                 type: 'button',
-                className: 'mvp_button',
+                className: 'mvp_button mvp_button--quiet',
                 disabled: disabled,
                 onClick: () => setGroup(group, models, !allShown),
               },
@@ -245,15 +287,20 @@ function makeSection(form, catalog, overrides, usage, verify) {
                   className:
                     'mvp_row' +
                     (generation ? ' mvp_row--gen' : '') +
+                    (shownModel ? '' : ' mvp_row--off') +
                     kindTint,
                 },
                 h(
                   'div',
                   { className: 'mvp_rowText' },
-                  h('div', { className: 'mvp_rowTitle' }, model.name),
-                  model.id === model.name
-                    ? null
-                    : h('div', { className: 'mvp_rowMeta' }, model.id),
+                  h(
+                    'div',
+                    { className: 'mvp_rowHead' },
+                    h('span', { className: 'mvp_rowTitle' }, model.name),
+                    model.id === model.name
+                      ? null
+                      : h('span', { className: 'mvp_rowMeta' }, model.id),
+                  ),
                   h(
                     'div',
                     { className: 'mvp_tags' },
@@ -278,7 +325,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
                         'button',
                         {
                           type: 'button',
-                          className: 'mvp_button mvp_editButton',
+                          className: 'mvp_button mvp_button--quiet mvp_editButton',
                           'aria-pressed': editing === rowKey,
                           'aria-label': t('row.edit') + ': ' + model.name,
                           title: t('row.editTitle'),
@@ -326,9 +373,13 @@ function makeSection(form, catalog, overrides, usage, verify) {
       )
     }
 
+    /* ------------------------------------------------------------- status */
+
     const loading = state.status === 'loading' || state.status === 'idle'
     const providerList = Array.isArray(state.providers) ? state.providers : []
-    const probeOk = providerList.filter((provider) => provider && provider.status === 'ok').length
+    const probeOk = providerList.filter(
+      (provider) => provider && (provider.status === 'ok' || provider.status === 'partial'),
+    ).length
     const probeCaps = providerList.reduce(
       (count, provider) => count + (Number(provider && provider.capabilities) || 0),
       0,
@@ -339,10 +390,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
           ? t('page.probeSummary', { ok: probeOk, caps: probeCaps })
           : t('page.probeSummaryNone')
         : null
-    // A page refresh can deliver this bundle while the Host half is still
-    // the previous version; the switch would look live but do nothing.
     const hostStale = state.source === 'host' && !hostFeatures.includes('applyInput')
-    // A hard reload is only meaningful when the Host half understands it.
     const canReload = state.source === 'host' && hostFeatures.includes('reload')
     const anyCollapsed = groups.some((group) => collapsed.has(group.id))
     const learnedDate =
@@ -367,54 +415,52 @@ function makeSection(form, catalog, overrides, usage, verify) {
     ]
     const hasActiveFilters =
       filter !== 'all' || normalizedQuery !== '' || multimodalOnly || reasoningOnly || minContext > 0
+    // A relay that answered with a diagnostic is worth surfacing next to the
+    // group, but only failed routes belong in the page-level warning list.
+    const failedRoutes = providerList.filter(
+      (provider) => provider && (provider.status === 'failed' || provider.status === 'unauthorized'),
+    )
+    const summaryText =
+      total === 0
+        ? loading
+          ? t('page.loading')
+          : t('page.empty')
+        : t('page.summary', { visible: total - hiddenCount, total })
+
+    /* ------------------------------------------------------------- render */
 
     return h(
       'div',
       { className: 'mvp_page' },
-      h(UsageToolbar, { usage, t, features: state.source === 'host' ? hostFeatures : [] }),
+      // Title + summary + the two actions that are worth a permanent slot.
       h(
         'div',
         { className: 'mvp_head' },
-        h('h2', { className: 'mvp_title' }, t('page.title')),
-        h('p', { className: 'mvp_desc' }, t('page.description')),
-      ),
-      h(
-        'div',
-        { className: 'mvp_toolbar' },
         h(
           'div',
-          { className: 'mvp_summary' },
-          total === 0
-            ? loading
-              ? t('page.loading')
-              : t('page.empty')
-            : t('page.summary', { visible: total - hiddenCount, total }) +
-              (hiddenCount > 0 ? ' · ' + t('page.hiddenSummary', { count: hiddenCount }) : '') +
-              (generationCount > 0 ? ' · ' + t('page.kindSummary', { count: generationCount }) : ''),
+          { className: 'mvp_headMain' },
+          h('h2', { className: 'mvp_title' }, t('page.title')),
+          h('span', { className: 'mvp_summary' }, summaryText),
+          hiddenCount > 0
+            ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.hiddenSummary', { count: hiddenCount }))
+            : null,
+          generationCount > 0
+            ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.kindSummary', { count: generationCount }))
+            : null,
         ),
         h(
           'div',
-          { className: 'mvp_actions' },
+          { className: 'mvp_headActions' },
           h(
             'button',
             {
               type: 'button',
-              className: 'mvp_button',
-              disabled: disabled || hiddenCount === 0,
-              onClick: () => commit(new Set()),
+              className: 'mvp_button mvp_button--quiet',
+              'aria-pressed': aboutOpen,
+              title: t('page.aboutTitle'),
+              onClick: toggleAbout,
             },
-            t('page.showAll'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'mvp_button',
-              disabled: groups.length === 0,
-              title: t(anyCollapsed ? 'page.expandGroupsTitle' : 'page.collapseGroupsTitle'),
-              onClick: toggleAllCollapsed,
-            },
-            t(anyCollapsed ? 'page.expandGroups' : 'page.collapseGroups'),
+            t('page.about') + (aboutOpen ? ' ▴' : ' ▾'),
           ),
           h(
             'button',
@@ -422,6 +468,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
               type: 'button',
               className: 'mvp_button',
               disabled: busy || refreshing || reloading,
+              title: t('page.refreshTitle'),
               onClick: refreshCatalog,
             },
             t(refreshing ? 'page.refreshing' : 'page.refresh'),
@@ -439,63 +486,77 @@ function makeSection(form, catalog, overrides, usage, verify) {
           ),
         ),
       ),
+      aboutOpen
+        ? h(
+            'div',
+            { className: 'mvp_about' },
+            h('p', { className: 'mvp_aboutP' }, t('page.description')),
+            h('p', { className: 'mvp_aboutP' }, t('page.legend')),
+            h('p', { className: 'mvp_aboutP' }, t('page.kindLegend')),
+            h('p', { className: 'mvp_aboutP' }, t('page.manualNote')),
+          )
+        : null,
+      h(UsageToolbar, { usage, t, features: state.source === 'host' ? hostFeatures : [] }),
       h(
         'div',
         { className: 'mvp_filters' },
-        h('label', { className: 'mvp_search' },
-          h('span', { className: 'mvp_filterLabel' }, t('page.searchPlaceholder')),
-          h('input', {
-            className: 'mvp_searchInput',
-            type: 'search',
-            value: query,
-            placeholder: t('page.searchPlaceholder'),
-            'aria-label': t('page.searchPlaceholder'),
-            onInput: (event) => setQuery(event.target.value),
-          }),
+        h('input', {
+          className: 'mvp_searchInput',
+          type: 'search',
+          value: query,
+          placeholder: t('page.searchPlaceholder'),
+          'aria-label': t('page.searchPlaceholder'),
+          onInput: (event) => setQuery(event.target.value),
+        }),
+        h(
+          'div',
+          { className: 'mvp_filterGroup' },
+          filterOptions.map(([value, label, count]) =>
+            h(
+              'button',
+              {
+                key: value,
+                type: 'button',
+                className: 'mvp_filter',
+                'aria-pressed': filter === value,
+                onClick: () => setFilter(value),
+              },
+              label + ' ' + count,
+            ),
+          ),
         ),
-        h('span', { className: 'mvp_filterLabel' }, t('page.filterLabel')),
-        filterOptions.map(([value, label, count]) =>
+        h(
+          'div',
+          { className: 'mvp_filterGroup' },
           h(
             'button',
             {
-              key: value,
               type: 'button',
               className: 'mvp_filter',
-              'aria-pressed': filter === value,
-              onClick: () => setFilter(value),
+              'aria-pressed': multimodalOnly,
+              title: t('page.capability.multimodalTitle'),
+              onClick: () => setMultimodalOnly(!multimodalOnly),
             },
-            label + ' ' + count,
+            t('page.capability.multimodal'),
           ),
-        ),
-        h('span', { className: 'mvp_filterLabel' }, t('page.capabilityLabel')),
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'mvp_filter',
-            'aria-pressed': multimodalOnly,
-            onClick: () => setMultimodalOnly(!multimodalOnly),
-          },
-          t('page.capability.multimodal'),
-        ),
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'mvp_filter',
-            'aria-pressed': reasoningOnly,
-            onClick: () => setReasoningOnly(!reasoningOnly),
-          },
-          t('page.capability.reasoning'),
-        ),
-        h('label', { className: 'mvp_context' },
-          h('span', { className: 'mvp_filterLabel' }, t('page.contextLabel')),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'mvp_filter',
+              'aria-pressed': reasoningOnly,
+              title: t('page.capability.reasoningTitle'),
+              onClick: () => setReasoningOnly(!reasoningOnly),
+            },
+            t('page.capability.reasoning'),
+          ),
           h(
             'select',
             {
               className: 'mvp_contextSelect',
               value: String(minContext),
               'aria-label': t('page.contextLabel'),
+              title: t('page.contextLabel'),
               onChange: (event) => setMinContext(Number(event.target.value)),
             },
             [
@@ -505,6 +566,31 @@ function makeSection(form, catalog, overrides, usage, verify) {
               [512000, 'page.context.512k'],
               [1000000, 'page.context.1m'],
             ].map(([value, label]) => h('option', { key: value, value: String(value) }, t(label))),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'mvp_filterGroup mvp_filterGroup--push' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'mvp_button mvp_button--quiet',
+              disabled: disabled || hiddenCount === 0,
+              onClick: () => commit(new Set()),
+            },
+            t('page.showAll'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'mvp_button mvp_button--quiet',
+              disabled: groups.length === 0,
+              title: t(anyCollapsed ? 'page.expandGroupsTitle' : 'page.collapseGroupsTitle'),
+              onClick: toggleAllCollapsed,
+            },
+            t(anyCollapsed ? 'page.expandGroups' : 'page.collapseGroups'),
           ),
         ),
       ),
@@ -519,6 +605,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
             className: 'mvp_switch',
             'aria-checked': applyInput,
             'aria-label': t('page.applyInput'),
+            'aria-describedby': 'mvp-apply-hint',
             disabled: disabled,
             onClick: () => commitApply(!applyInput),
           },
@@ -527,29 +614,33 @@ function makeSection(form, catalog, overrides, usage, verify) {
         h(
           'div',
           { className: 'mvp_applyText' },
-          h('div', { className: 'mvp_applyTitle' }, t('page.applyInput')),
-          h('div', { className: 'mvp_applyHint' }, t('page.applyInputHint')),
+          h('span', { className: 'mvp_applyTitle' }, t('page.applyInput')),
+          h('span', { className: 'mvp_applyHint', id: 'mvp-apply-hint' }, t('page.applyInputShort')),
         ),
       ),
-      h(
-        VerifyPanel,
-        { verify, catalog: state, t, canUse: canVerify },
-      ),
-      h('div', { className: 'mvp_legend' }, t('page.legend')),
-      h('div', { className: 'mvp_legend' }, t('page.kindLegend')),
-      h('div', { className: 'mvp_legend' }, t('page.manualNote')),
-      overrideState.available === false
-        ? h('div', { className: 'mvp_fallback' }, t('override.unavailable'))
+      failedRoutes.length > 0
+        ? h(
+            'div',
+            {
+              className: 'mvp_banner mvp_banner--warn',
+              title: failedRoutes
+                .map((route) => (route.name || route.id) + ': ' + (route.message || route.status))
+                .join('\n'),
+            },
+            t('page.probeFailures', {
+              names: failedRoutes.map((route) => route.name || route.id).join(' · '),
+            }),
+          )
         : null,
+      hostStale ? h('div', { className: 'mvp_banner' }, t('page.hostStale')) : null,
       state.detailsError !== null && state.source === 'catalog'
-        ? h('div', { className: 'mvp_fallback' }, t('page.metaFallback'))
+        ? h('div', { className: 'mvp_banner' }, t('page.metaFallback'))
         : null,
-      hostStale ? h('div', { className: 'mvp_fallback' }, t('page.hostStale')) : null,
       state.failures.length > 0
         ? h(
             'div',
             {
-              className: 'mvp_fallback',
+              className: 'mvp_banner mvp_banner--warn',
               title: state.failures
                 .map((failure) => (failure.name || failure.id) + ': ' + failure.message)
                 .join('\n'),
@@ -561,20 +652,34 @@ function makeSection(form, catalog, overrides, usage, verify) {
             }),
           )
         : null,
-      error !== null ? h('div', { className: 'mvp_error', role: 'alert' }, error) : null,
-      state.error !== null
-        ? h('div', { className: 'mvp_error', role: 'alert' }, t('page.error', { message: state.error }))
+      overrideState.available === false
+        ? h('div', { className: 'mvp_banner' }, t('override.unavailable'))
         : null,
-      rows.length > 0 ? rows : null,
+      error !== null ? h('div', { className: 'mvp_banner mvp_banner--error', role: 'alert' }, error) : null,
+      state.error !== null
+        ? h(
+            'div',
+            { className: 'mvp_banner mvp_banner--error', role: 'alert' },
+            t('page.error', { message: state.error }),
+          )
+        : null,
+      h('div', { className: 'mvp_groups' }, rows),
       total > 0 && hasActiveFilters && rows.length === 0
         ? h('div', { className: 'mvp_note' }, t('page.filterEmpty'))
         : null,
       rows.length === 0 && !loading && state.error === null && total === 0
-        ? h('div', { className: 'mvp_error' }, t('page.empty'))
+        ? h('div', { className: 'mvp_note' }, t('page.empty'))
         : null,
-      probeNote !== null ? h('div', { className: 'mvp_note' }, probeNote) : null,
+      h(
+        'div',
+        { className: 'mvp_footer' },
+        probeNote !== null
+          ? h('span', { className: 'mvp_footerItem', title: t('page.probeSummaryTitle') }, probeNote)
+          : null,
+        catalogNote !== null ? h('span', { className: 'mvp_footerItem' }, catalogNote) : null,
+      ),
       providerNote !== null ? h('div', { className: 'mvp_note' }, providerNote) : null,
-      catalogNote !== null ? h('div', { className: 'mvp_note' }, catalogNote) : null,
+      h(VerifyPanel, { verify, catalog: state, t, canUse: canVerify }),
     )
   }
 }

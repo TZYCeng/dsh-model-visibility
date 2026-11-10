@@ -1,12 +1,13 @@
 /**
  * The online capability verification panel.
  *
- * The user picks a checker route (provider + model) and a write-back switch,
- * runs the sweep, and the panel polls the Host for progress and the checker's
- * token spend. The last route choice is kept in browser storage only: the
- * Host persists run facts, not UI selections.
+ * Collapsed to a single summary line: this is a maintenance action, not the
+ * point of the page. Expanding it reveals the checker picker, the write-back
+ * switch and — the part that matters when a sweep fails — the per-batch errors
+ * with their real messages instead of a bare count.
  *
- * @module client-src/checker-view
+ * The last route choice is kept in browser storage only: the Host persists run
+ * facts, not UI selections.
  */
 
 const React = require('react')
@@ -16,6 +17,10 @@ import { formatTokens, checkerRoutesOf } from './pure.mjs'
 import { useSource } from './hooks.mjs'
 
 const PICK_KEY = 'dsh-model-visibility:checker-pick:v1'
+/** How many failure lines to show before summarising the rest. */
+const MAX_ERROR_LINES = 6
+/** Concurrency choices offered in the panel; mirrors lib/check-catalog MAX_CONCURRENCY. */
+const CONCURRENCY_CHOICES = [1, 2, 3, 4, 6, 8]
 
 function readPick() {
   try {
@@ -25,10 +30,14 @@ function readPick() {
           provider: typeof parsed.provider === 'string' ? parsed.provider : '',
           model: typeof parsed.model === 'string' ? parsed.model : '',
           writeBack: parsed.writeBack !== false,
+          concurrency:
+            Number.isFinite(parsed.concurrency) && parsed.concurrency > 0
+              ? Math.min(8, Math.max(1, Math.trunc(parsed.concurrency)))
+              : 2,
         }
-      : { provider: '', model: '', writeBack: true }
+      : { provider: '', model: '', writeBack: true, concurrency: 2 }
   } catch (_error) {
-    return { provider: '', model: '', writeBack: true }
+    return { provider: '', model: '', writeBack: true, concurrency: 2 }
   }
 }
 
@@ -59,10 +68,12 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
     .find((group) => group.id === pick.provider)?.models ?? []
 
   if (!canUse) {
-    return h('div', { className: 'mvp_fallback' }, t('checker.hostStale'))
+    return h('div', { className: 'mvp_banner' }, t('checker.hostStale'))
   }
 
-  const tokensSpent = progress ? formatTokens((progress.tokenUsage?.[0] ?? 0) + (progress.tokenUsage?.[1] ?? 0)) : null
+  const tokensSpent = progress
+    ? formatTokens((progress.tokenUsage?.[0] ?? 0) + (progress.tokenUsage?.[1] ?? 0))
+    : null
 
   const commit = (next) => {
     setPick(next)
@@ -72,11 +83,11 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
   const run = () => {
     setMessage(null)
     verify
-      .start({ provider: pick.provider, model: pick.model, writeBack: pick.writeBack })
-      .then((result) => {
-        if (result !== undefined && result.ok === false) {
-          setMessage(result.message ?? t('checker.failed'))
-        }
+      .start({
+        provider: pick.provider,
+        model: pick.model,
+        writeBack: pick.writeBack,
+        concurrency: pick.concurrency,
       })
       .catch((error) => setMessage(String(error?.message ?? error)))
   }
@@ -84,6 +95,24 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
   const cancel = () => {
     verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
   }
+
+  const summary = running
+    ? t('checker.running', {
+        phase: t('checker.phase.' + (progress?.phase ?? 'verifying')),
+        done: progress?.done ?? 0,
+        total: progress?.total ?? 0,
+        tokens: tokensSpent,
+      })
+    : finished
+      ? t('checker.finished', {
+          done: progress?.done ?? 0,
+          total: progress?.total ?? 0,
+          tokens: tokensSpent,
+        })
+      : t('checker.idle')
+
+  const errors = Array.isArray(progress?.errors) ? progress.errors : []
+  const visibleErrors = errors.slice(0, MAX_ERROR_LINES)
 
   return h(
     'div',
@@ -96,26 +125,16 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
         'aria-expanded': open,
         onClick: () => setOpen(!open),
       },
+      h('span', { className: 'mvp_chevron' }, open ? '▾' : '▸'),
       h('span', { className: 'mvp_checkerTitle' }, t('checker.title')),
-      h(
-        'span',
-        { className: 'mvp_checkerSummary' },
-        running
-          ? t('checker.running', {
-              done: progress?.done ?? 0,
-              total: progress?.total ?? 0,
-              phase: t(`checker.phase.${progress?.phase ?? 'checker'}`),
-            })
-          : finished
-            ? t('checker.finished', { done: progress?.done ?? 0, total: progress?.total ?? 0, tokens: tokensSpent })
-            : t('checker.idle'),
-      ),
+      h('span', { className: 'mvp_checkerSummary' }, summary),
+      errors.length > 0 ? h('span', { className: 'mvp_badge' }, t('checker.errorBadge', { count: errors.length })) : null,
     ),
     open
       ? h(
           'div',
           { className: 'mvp_checkerBody' },
-          h('div', { className: 'mvp_checkerHint' }, t('checker.description')),
+          h('p', { className: 'mvp_checkerHint' }, t('checker.description')),
           h(
             'div',
             { className: 'mvp_checkerForm' },
@@ -154,67 +173,141 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
                 ),
               ),
             ),
-          ),
-          h(
-            'div',
-            { className: 'mvp_checkerActions' },
             h(
-              'button',
-              {
-                type: 'button',
-                role: 'switch',
-                className: 'mvp_switch',
-                'aria-checked': pick.writeBack,
-                title: t('checker.writeBackTitle'),
-                disabled: running,
-                onClick: () => commit({ ...pick, writeBack: !pick.writeBack }),
-              },
-              h('span', { className: 'mvp_thumb' }),
+              'label',
+              { className: 'mvp_field', title: t('checker.concurrencyTitle') },
+              h('span', { className: 'mvp_fieldLabel' }, t('checker.concurrency')),
+              h(
+                'select',
+                {
+                  className: 'mvp_select',
+                  value: String(pick.concurrency),
+                  'aria-label': t('checker.concurrency'),
+                  disabled: running,
+                  onChange: (event) =>
+                    commit({ ...pick, concurrency: Number(event.target.value) }),
+                },
+                CONCURRENCY_CHOICES.map((value) =>
+                  h('option', { key: value, value: String(value) }, t('checker.concurrencyValue', { count: value })),
+                ),
+              ),
             ),
             h(
-              'button',
-              {
-                type: 'button',
-                className: 'mvp_button',
-                title: t('checker.writeBackTitle'),
-                onClick: () => commit({ ...pick, writeBack: !pick.writeBack }),
-              },
-              t('checker.writeBack'),
+              'label',
+              { className: 'mvp_check', title: t('checker.writeBackTitle') },
+              h('input', {
+                type: 'checkbox',
+                checked: pick.writeBack,
+                disabled: running,
+                onChange: (event) => commit({ ...pick, writeBack: event.target.checked }),
+              }),
+              h('span', null, t('checker.writeBack')),
             ),
             h(
               'button',
               {
                 type: 'button',
                 className: running ? 'mvp_button' : 'mvp_button mvp_button--accent',
-                disabled: running ? false : pick.provider === '' || pick.model === '',
+                disabled: !running && (pick.provider === '' || pick.model === ''),
                 title: running ? t('checker.cancelTitle') : t('checker.startTitle'),
                 onClick: running ? cancel : run,
               },
               running ? t('checker.cancel') : t('checker.start'),
             ),
           ),
-          progress !== null && (running || finished)
+          running || finished
             ? h(
                 'div',
                 { className: 'mvp_checkerProgress' },
-                t('checker.progress', {
-                  done: progress?.done ?? 0,
-                  total: progress?.total ?? 0,
-                  tokens: tokensSpent,
-                }),
+                h('div', {
+                  className: 'mvp_progressBar',
+                  role: 'progressbar',
+                  'aria-valuemin': 0,
+                  'aria-valuemax': progress?.total ?? 0,
+                  'aria-valuenow': progress?.done ?? 0,
+                }, h('span', {
+                  className: 'mvp_progressFill',
+                  style: {
+                    width:
+                      (progress?.total ?? 0) > 0
+                        ? Math.min(100, Math.round(((progress?.done ?? 0) / progress.total) * 100)) + '%'
+                        : '0%',
+                  },
+                })),
+                h(
+                  'span',
+                  { className: 'mvp_checkerProgressText' },
+                  t('checker.progress', {
+                    done: progress?.done ?? 0,
+                    total: progress?.total ?? 0,
+                    tokens: tokensSpent,
+                  }),
+                ),
+                h(
+                  'span',
+                  { className: 'mvp_checkerProgressText' },
+                  t('checker.threads', { count: progress?.concurrency ?? pick.concurrency }),
+                ),
               )
             : null,
-          (progress?.errors?.length ?? 0) > 0
+          // Which public catalogs were read, and which were not. Without this
+          // "the catalogs returned nothing" and "the catalogs errored" look
+          // identical, which is exactly how a broken fetch stayed invisible.
+          (progress?.sources?.length ?? 0) > 0
             ? h(
                 'div',
-                {
-                  className: 'mvp_usageHint mvp_usageHint--warn',
-                  title: progress.errors.join('\n'),
-                },
-                t('checker.errors', { count: progress.errors.length }),
+                { className: 'mvp_sources' },
+                h('div', { className: 'mvp_sourcesTitle' }, t('checker.sourcesTitle')),
+                h(
+                  'ul',
+                  { className: 'mvp_sourceList' },
+                  progress.sources.map((source, index) =>
+                    h(
+                      'li',
+                      { key: index, className: source.status === 'ok' ? 'mvp_source--ok' : 'mvp_source--bad' },
+                      h('span', { className: 'mvp_sourceName' }, String(source.name)),
+                      h('span', { className: 'mvp_sourceState' }, t('checker.source.' + String(source.status))),
+                      source.models > 0
+                        ? h('span', { className: 'mvp_sourceCount' }, t('checker.sourceModels', { count: source.models }))
+                        : null,
+                      source.message
+                        ? h('span', { className: 'mvp_sourceMsg' }, String(source.message))
+                        : null,
+                    ),
+                  ),
+                ),
               )
             : null,
-          message !== null ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn' }, message) : null,
+          (progress?.publicOnly ?? 0) > 0
+            ? h(
+                'div',
+                { className: 'mvp_usageHint' },
+                t('checker.publicOnly', { count: progress.publicOnly }),
+              )
+            : null,
+          errors.length > 0
+            ? h(
+                'div',
+                { className: 'mvp_checkerErrors' },
+                h('div', { className: 'mvp_checkerErrorsTitle' }, t('checker.errorTitle')),
+                h(
+                  'ul',
+                  { className: 'mvp_errorList' },
+                  visibleErrors.map((entry, index) =>
+                    h('li', { key: index }, typeof entry === 'string' ? entry : String(entry)),
+                  ),
+                ),
+                errors.length > visibleErrors.length
+                  ? h(
+                      'div',
+                      { className: 'mvp_usageHint' },
+                      t('checker.errorMore', { count: errors.length - visibleErrors.length }),
+                    )
+                  : null,
+              )
+            : null,
+          message !== null ? h('div', { className: 'mvp_banner mvp_banner--error' }, message) : null,
+          state.error !== null ? h('div', { className: 'mvp_banner mvp_banner--error' }, state.error) : null,
         )
       : null,
   )

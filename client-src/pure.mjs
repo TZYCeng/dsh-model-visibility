@@ -5,6 +5,8 @@
  * @module client-src/pure
  */
 
+import { bucketOf, kindOf } from './format.mjs'
+
 /** Number of one bucket's token sum, guarding partial buckets. */
 export function bucketTotalOf(buckets) {
   if (!Array.isArray(buckets)) return 0
@@ -79,11 +81,9 @@ export function computeFilteredGroups(groups, { filter = 'all', query = '', mult
 }
 
 function bucket(model) {
-  const kind = model && typeof model.kind === 'string' && model.kind !== '' ? model.kind : 'chat'
-  if (kind === 'image') return 'image'
-  if (kind === 'video') return 'video'
-  if (kind === 'chat') return 'chat'
-  return 'other'
+  // One implementation lives in `format.mjs` as `bucketOf`; duplicating the
+  // four branches here meant the filter and the tag colours could drift apart.
+  return bucketOf(kindOf(model))
 }
 
 /** Counts per kind bucket for the whole list. */
@@ -104,7 +104,11 @@ export function checkerRoutesOf(groups) {
   return routes
 }
 
-/** Compact label + tooltip for one provider probe diagnostic. */
+/**
+ * Compact label + tooltip for one provider probe diagnostic.
+ * @returns `{ label, title, failed? }` or null; `failed` marks a route the page
+ *   should warn about instead of quietly annotating.
+ */
 export function probeOf(state, group, t) {
   const list = Array.isArray(state.providers) ? state.providers : []
   const diagnostic = list.find((item) => item && item.id === group.id)
@@ -112,6 +116,8 @@ export function probeOf(state, group, t) {
   const details = [
     diagnostic.host ? 'host: ' + diagnostic.host : null,
     diagnostic.status ? 'status: ' + diagnostic.status : null,
+    diagnostic.models ? 'models: ' + diagnostic.models : null,
+    diagnostic.capabilities ? 'capabilities: ' + diagnostic.capabilities : null,
     diagnostic.message ? 'message: ' + diagnostic.message : null,
     diagnostic.pricing && diagnostic.pricing !== 'skipped' ? 'pricing: ' + diagnostic.pricing : null,
   ]
@@ -129,8 +135,19 @@ export function probeOf(state, group, t) {
       title: details,
     }
   }
+  // The listing failed but the pricing endpoint still enumerated the route.
+  if (diagnostic.status === 'partial') {
+    return {
+      label: t('group.probePartial', { models: diagnostic.models ?? 0 }),
+      title: details,
+    }
+  }
   if (diagnostic.status === 'failed' || diagnostic.status === 'unauthorized') {
-    return { label: t('group.probeFailed'), title: details }
+    return {
+      label: t('group.probeFailed'),
+      title: details,
+      failed: true,
+    }
   }
   return { label: t('group.probeSkipped'), title: details }
 }

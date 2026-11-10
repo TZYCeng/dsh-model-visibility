@@ -159,9 +159,11 @@ test('a verify sweep fills the learned snapshot and writes back once per route',
   })
   const snapshot = await verifier.start({ checker: { provider: 'relay', model: 'checker-x' } })
   assert.equal(snapshot.phase, 'done')
-  // `total` counts unverified models; `done` also counts the skipped checker.
+  // `total` and `done` both count factual verifications only. The checker's own
+  // model is never verified, so counting it as done made the progress read
+  // 3/2 (and 36/23 in the field).
   assert.equal(snapshot.total, 2)
-  assert.equal(snapshot.done, 3)
+  assert.equal(snapshot.done, 2)
   assert.deepEqual(snapshot.tokenUsage.slice(0, 2), [100, 20])
   const a = learned.get('model-a')
   assert.equal(a.type, 'chat')
@@ -207,8 +209,14 @@ test('the sweep records its own token spend into the ledger', async () => {
       recorded.push(entry)
     },
   }
+  // The batch asks about every routable model except the checker, so the reply
+  // must cover both or the strict format check retries once (which is correct,
+  // but would double the spend this test is measuring).
   const { verifier } = verifierSetup({
-    replies: ['{"models":[{"id":"model-a","kind":"chat","input":["text","image"],"contextWindow":222000}]}'],
+    replies: [
+      '{"models":[{"id":"model-a","kind":"chat","input":["text","image"],"contextWindow":222000},' +
+        '{"id":"model-b","kind":"chat","contextWindow":90000}]}',
+    ],
     ledger,
     learnedFile: path.join(home, 'learned.json'),
   })
@@ -217,6 +225,7 @@ test('the sweep records its own token spend into the ledger', async () => {
   assert.equal(recorded[0].provider, 'relay')
   assert.equal(recorded[0].model, 'checker-x')
   assert.ok(recorded[0].usage.inputTokens > 0)
+  assert.equal(recorded.length, 1, 'one well-formed reply must not be retried')
 
   // And a real ledger aggregates the same note into the day buckets.
   const realLedger = createUsageLedger({ home, file: path.join(home, 'ledger.json'), sessionsRoot: path.join(home, 'sessions') })

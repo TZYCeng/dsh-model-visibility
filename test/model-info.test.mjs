@@ -4,9 +4,19 @@
  * Run with `npm test` (Node's built-in test runner, no extra dependency).
  * The probe only touches a small slice of `ctx.llm`, so every test drives it
  * with a plain object — no DSH runtime and no network.
+ *
+ * DSH_HOME is redirected to a scratch directory before the modules load: the
+ * merge falls back to `$DSH_HOME/dsh-model-visibility/learned.json` when a test
+ * does not inject a learned store, and the machine's real snapshot otherwise
+ * changes assertions such as "an unconfigured model has no context window".
  */
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
+
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'mv-model-info-'))
 
 import {
   createModelInfoService,
