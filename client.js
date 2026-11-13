@@ -594,6 +594,8 @@ window.__ModuleLoader__.load({
     const { useSource } = require("hooks")
 
     const PICK_KEY = 'dsh-model-visibility:checker-pick:v1'
+    /** Bound live batch details so progress cannot overwhelm the panel. */
+    const MAX_ACTIVE_BATCH_LINES = 3
     /** How many failure lines to show before summarising the rest. */
     const MAX_ERROR_LINES = 6
     /** Concurrency choices offered in the panel; mirrors lib/check-catalog MAX_CONCURRENCY. */
@@ -606,15 +608,16 @@ window.__ModuleLoader__.load({
           ? {
               provider: typeof parsed.provider === 'string' ? parsed.provider : '',
               model: typeof parsed.model === 'string' ? parsed.model : '',
-              writeBack: parsed.writeBack !== false,
+              writeBack: parsed.writeBack === true,
+              webSearch: parsed.webSearch !== false,
               concurrency:
                 Number.isFinite(parsed.concurrency) && parsed.concurrency > 0
                   ? Math.min(8, Math.max(1, Math.trunc(parsed.concurrency)))
                   : 2,
             }
-          : { provider: '', model: '', writeBack: true, concurrency: 2 }
+          : { provider: '', model: '', writeBack: false, webSearch: true, concurrency: 2 }
       } catch (_error) {
-        return { provider: '', model: '', writeBack: true, concurrency: 2 }
+        return { provider: '', model: '', writeBack: false, webSearch: true, concurrency: 2 }
       }
     }
 
@@ -664,6 +667,7 @@ window.__ModuleLoader__.load({
             provider: pick.provider,
             model: pick.model,
             writeBack: pick.writeBack,
+            webSearch: pick.webSearch,
             concurrency: pick.concurrency,
           })
           .catch((error) => setMessage(String(error?.message ?? error)))
@@ -673,21 +677,29 @@ window.__ModuleLoader__.load({
         verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
       }
 
+      const counts = {
+        processed: progress?.processed ?? progress?.done ?? 0,
+        total: progress?.total ?? 0,
+        valid: progress?.done ?? 0,
+        unknown: progress?.unknown ?? 0,
+        failed: progress?.failed ?? 0,
+        searchCalls: progress?.searchCalls ?? 0,
+        fetchCalls: progress?.fetchCalls ?? 0,
+        tokens: tokensSpent,
+      }
       const summary = running
         ? t('checker.running', {
             phase: t('checker.phase.' + (progress?.phase ?? 'verifying')),
-            done: progress?.done ?? 0,
-            total: progress?.total ?? 0,
-            tokens: tokensSpent,
+            ...counts,
           })
         : finished
-          ? t('checker.finished', {
-              done: progress?.done ?? 0,
-              total: progress?.total ?? 0,
-              tokens: tokensSpent,
-            })
+          ? t('checker.finished', counts)
           : t('checker.idle')
 
+      const activeBatches = running && Array.isArray(progress?.batches)
+        ? progress.batches.filter((batch) => batch.status === 'running')
+        : []
+      const visibleBatches = activeBatches.slice(0, MAX_ACTIVE_BATCH_LINES)
       const errors = Array.isArray(progress?.errors) ? progress.errors : []
       const visibleErrors = errors.slice(0, MAX_ERROR_LINES)
 
@@ -771,11 +783,24 @@ window.__ModuleLoader__.load({
                 ),
                 h(
                   'label',
+                  { className: 'mvp_check', title: t('checker.webSearchTitle') },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: pick.webSearch,
+                    disabled: running,
+                    'aria-label': t('checker.webSearch'),
+                    onChange: (event) => commit({ ...pick, webSearch: event.target.checked }),
+                  }),
+                  h('span', null, t('checker.webSearch')),
+                ),
+                h(
+                  'label',
                   { className: 'mvp_check', title: t('checker.writeBackTitle') },
                   h('input', {
                     type: 'checkbox',
                     checked: pick.writeBack,
                     disabled: running,
+                    'aria-label': t('checker.writeBack'),
                     onChange: (event) => commit({ ...pick, writeBack: event.target.checked }),
                   }),
                   h('span', null, t('checker.writeBack')),
@@ -801,30 +826,66 @@ window.__ModuleLoader__.load({
                       role: 'progressbar',
                       'aria-valuemin': 0,
                       'aria-valuemax': progress?.total ?? 0,
-                      'aria-valuenow': progress?.done ?? 0,
+                      'aria-valuenow': counts.processed,
                     }, h('span', {
                       className: 'mvp_progressFill',
                       style: {
                         width:
                           (progress?.total ?? 0) > 0
-                            ? Math.min(100, Math.round(((progress?.done ?? 0) / progress.total) * 100)) + '%'
+                            ? Math.min(100, Math.round((counts.processed / progress.total) * 100)) + '%'
                             : '0%',
                       },
                     })),
                     h(
                       'span',
                       { className: 'mvp_checkerProgressText' },
-                      t('checker.progress', {
-                        done: progress?.done ?? 0,
-                        total: progress?.total ?? 0,
-                        tokens: tokensSpent,
-                      }),
+                      t('checker.progress', counts),
+                    ),
+                    h(
+                      'span',
+                      { className: 'mvp_checkerProgressText' },
+                      t('checker.outcomes', counts),
+                    ),
+                    h(
+                      'span',
+                      { className: 'mvp_checkerProgressText' },
+                      t('checker.webCalls', counts),
                     ),
                     h(
                       'span',
                       { className: 'mvp_checkerProgressText' },
                       t('checker.threads', { count: progress?.concurrency ?? pick.concurrency }),
                     ),
+                  )
+                : null,
+              visibleBatches.length > 0
+                ? h(
+                    'div',
+                    { className: 'mvp_sources', 'aria-label': t('checker.activeBatches') },
+                    h('div', { className: 'mvp_sourcesTitle' }, t('checker.activeBatches')),
+                    h(
+                      'ul',
+                      { className: 'mvp_sourceList' },
+                      visibleBatches.map((batch, index) =>
+                        h(
+                          'li',
+                          { key: index },
+                          h('span', { className: 'mvp_sourceState' },
+                            ['checker', 'search', 'fetch', 'writeBack', 'flush'].includes(batch.stage)
+                              ? t('checker.stage.' + batch.stage)
+                              : String(batch.stage ?? t('checker.stage.checker')),
+                          ),
+                          h('span', { className: 'mvp_sourceName' },
+                            Array.isArray(batch.ids) ? batch.ids.map(String).join(', ') : '',
+                          ),
+                        ),
+                      ),
+                    ),
+                    activeBatches.length > visibleBatches.length
+                      ? h('div', { className: 'mvp_usageHint' },
+                          t('checker.activeMore', { count: activeBatches.length - visibleBatches.length }),
+                        )
+                      : null,
                   )
                 : null,
               // Which public catalogs were read, and which were not. Without this
@@ -1335,7 +1396,7 @@ window.__ModuleLoader__.load({
         'usage.hostStale': '宿主半尚未提供用量统计，重启 DSH 即可启用。',
         'checker.title': '联网校验',
         'checker.description':
-          '选定一个校验员模型：先拉 models.dev / OpenRouter / Hugging Face 三个公开目录做基准，再把其余模型分批交给它核对。公开目录已经知道的能力会直接采用，校验员答不上时也不例外。校验请求会消耗所选模型的额度，其 token 计入上方统计。提示：思考型模型会先花掉输出预算，若批次普遍失败，换一个非思考模型或降低其思考档位。',
+          '选定一个校验员模型：先读取 models.dev / OpenRouter / Hugging Face 三个公开目录，再分批核对其余模型。开启联网后，校验员可调用搜索和网页读取；可能消耗联网服务额度及所选校验员模型的 Token，其 Token 计入上方统计。此过程依据目录、资料与校验员判断，不对目标模型进行实测。联网不可用会报告错误。写入提供商配置默认关闭，可按需开启。提示：思考型模型会先花掉输出预算，若批次普遍失败，可换一个非思考模型或降低其思考档位。',
         'checker.provider': '校验员提供商',
         'checker.model': '校验员模型',
         'checker.start': '开始校验',
@@ -1345,10 +1406,21 @@ window.__ModuleLoader__.load({
         'checker.writeBack': '同时写入提供商配置',
         'checker.writeBackTitle':
           '开启：判定到的 input / contextWindow / 推理档位直接写进各提供商该模型条目（learned.json 只留写不进去的字段）；关闭：只更新本页与快照。',
+        'checker.webSearch': '允许搜索与网页读取',
+        'checker.webSearchTitle': '默认开启。允许校验员调用搜索与网页读取，可能消耗联网服务额度及模型 Token；联网不可用会报告错误。关闭后仅依据公开目录与校验员已有知识核对。',
         'checker.idle': '未运行',
-        'checker.running': '进行中{phase} · {done}/{total} · 已耗 {tokens}',
-        'checker.finished': '已完成 {done}/{total} · 耗 {tokens}',
-        'checker.progress': '{done}/{total} 已核对 · 校验本身消耗 {tokens} token',
+        'checker.running': '进行中{phase} · 已处理 {processed}/{total} · 有效 {valid} / 未知 {unknown} / 失败 {failed} · 搜索 {searchCalls} / 读取 {fetchCalls} · 已耗 {tokens} Token',
+        'checker.finished': '已结束 · 已处理 {processed}/{total} · 有效 {valid} / 未知 {unknown} / 失败 {failed} · 搜索 {searchCalls} / 读取 {fetchCalls} · 耗 {tokens} Token',
+        'checker.progress': '{processed}/{total} 已处理 · 校验本身消耗 {tokens} Token',
+        'checker.outcomes': '有效 {valid} · 未知 {unknown} · 失败 {failed}',
+        'checker.webCalls': '搜索 {searchCalls} 次 · 网页读取 {fetchCalls} 次',
+        'checker.activeBatches': '活跃批次',
+        'checker.activeMore': '另有 {count} 个活跃批次',
+        'checker.stage.checker': '校验员核对',
+        'checker.stage.search': '搜索资料',
+        'checker.stage.fetch': '读取网页',
+        'checker.stage.writeBack': '写入配置',
+        'checker.stage.flush': '保存快照',
         'checker.errorBadge': '{count} 个批次失败',
         'checker.errorTitle': '失败批次',
         'checker.errorMore': '另有 {count} 条未显示',
@@ -1563,7 +1635,7 @@ window.__ModuleLoader__.load({
         'usage.hostStale': 'The Host half does not provide usage stats yet; restart DSH to enable it.',
         'checker.title': 'Online verification',
         'checker.description':
-          'Pick one model as the checker: three public catalogs (models.dev / OpenRouter / Hugging Face) are fetched first, then the remaining models are verified in batches. Whatever the catalogs already know is applied directly, even when the checker has no answer. A sweep spends the checker route quota and its tokens count in the strip above. Note: a thinking model spends the output budget before it answers, so if batches keep failing pick a non-thinking checker or lower its effort.',
+          'Pick one checker model: read three public catalogs (models.dev / OpenRouter / Hugging Face), then verify the remaining models in batches. With web access enabled, the checker can call search and read web pages; this may consume web-service quota and the selected checker model’s tokens, which count in the strip above. Results use catalogs, references and the checker’s judgement; target models are not tested directly. Unavailable web access is reported as an error. Writing to provider settings is off by default and can be enabled. Note: a thinking model spends the output budget before it answers, so if batches keep failing pick a non-thinking checker or lower its effort.',
         'checker.provider': 'Checker provider',
         'checker.model': 'Checker model',
         'checker.start': 'Start',
@@ -1573,10 +1645,21 @@ window.__ModuleLoader__.load({
         'checker.writeBack': 'Also write into provider settings',
         'checker.writeBackTitle':
           'On: the judged input / contextWindow / efforts are written into each provider entry (learned.json keeps only what cannot be mapped). Off: only this page and the snapshot update.',
+        'checker.webSearch': 'Allow search and web-page reads',
+        'checker.webSearchTitle': 'On by default. Let the checker search and read web pages; this may consume web-service quota and model tokens. Unavailable web access is reported as an error. When off, verification uses public catalogs and the checker’s existing knowledge.',
         'checker.idle': 'not run yet',
-        'checker.running': 'running{phase} · {done}/{total} · {tokens} spent',
-        'checker.finished': 'finished {done}/{total} · {tokens} spent',
-        'checker.progress': '{done}/{total} verified · checker spent {tokens} tokens',
+        'checker.running': 'running{phase} · {processed}/{total} processed · {valid} valid / {unknown} unknown / {failed} failed · {searchCalls} searches / {fetchCalls} reads · {tokens} tokens spent',
+        'checker.finished': 'ended · {processed}/{total} processed · {valid} valid / {unknown} unknown / {failed} failed · {searchCalls} searches / {fetchCalls} reads · {tokens} tokens spent',
+        'checker.progress': '{processed}/{total} processed · checker spent {tokens} tokens',
+        'checker.outcomes': '{valid} valid · {unknown} unknown · {failed} failed',
+        'checker.webCalls': '{searchCalls} searches · {fetchCalls} web-page reads',
+        'checker.activeBatches': 'Active batches',
+        'checker.activeMore': '{count} more active batches',
+        'checker.stage.checker': 'Checking',
+        'checker.stage.search': 'Searching',
+        'checker.stage.fetch': 'Reading web pages',
+        'checker.stage.writeBack': 'Writing settings',
+        'checker.stage.flush': 'Saving snapshot',
         'checker.errorBadge': '{count} failed batches',
         'checker.errorTitle': 'Failed batches',
         'checker.errorMore': '{count} more not shown',
@@ -2493,7 +2576,7 @@ window.__ModuleLoader__.load({
         const hostFeatures =
           catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
         const canEdit = state.source === 'host' && hostFeatures.includes('overrides')
-        const canVerify = state.source === 'host' && hostFeatures.includes('verify')
+        const canVerify = state.source === 'host' && hostFeatures.includes('verifyWeb')
         const overrideEntries = new Map()
         for (const entry of overrideState.entries) {
           overrideEntries.set(overrideKeyOf(entry), entry)

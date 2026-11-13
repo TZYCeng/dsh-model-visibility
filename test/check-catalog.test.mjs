@@ -157,7 +157,7 @@ test('a verify sweep fills the learned snapshot and writes back once per route',
       '```json\n{"models":[{"id":"model-a","kind":"chat","input":["text","image"],"contextWindow":222000,"reasoning":true,"reasoningEfforts":["low","high"],"defaultEffort":"high"},{"id":"model-b","kind":"chat","input":["text"],"contextWindow":90000}]}\n```',
     ],
   })
-  const snapshot = await verifier.start({ checker: { provider: 'relay', model: 'checker-x' } })
+  const snapshot = await verifier.start({ checker: { provider: 'relay', model: 'checker-x' }, writeBack: true })
   assert.equal(snapshot.phase, 'done')
   // `total` and `done` both count factual verifications only. The checker's own
   // model is never verified, so counting it as done made the progress read

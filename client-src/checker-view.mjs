@@ -17,6 +17,8 @@ import { formatTokens, checkerRoutesOf } from './pure.mjs'
 import { useSource } from './hooks.mjs'
 
 const PICK_KEY = 'dsh-model-visibility:checker-pick:v1'
+/** Bound live batch details so progress cannot overwhelm the panel. */
+const MAX_ACTIVE_BATCH_LINES = 3
 /** How many failure lines to show before summarising the rest. */
 const MAX_ERROR_LINES = 6
 /** Concurrency choices offered in the panel; mirrors lib/check-catalog MAX_CONCURRENCY. */
@@ -29,15 +31,16 @@ function readPick() {
       ? {
           provider: typeof parsed.provider === 'string' ? parsed.provider : '',
           model: typeof parsed.model === 'string' ? parsed.model : '',
-          writeBack: parsed.writeBack !== false,
+          writeBack: parsed.writeBack === true,
+          webSearch: parsed.webSearch !== false,
           concurrency:
             Number.isFinite(parsed.concurrency) && parsed.concurrency > 0
               ? Math.min(8, Math.max(1, Math.trunc(parsed.concurrency)))
               : 2,
         }
-      : { provider: '', model: '', writeBack: true, concurrency: 2 }
+      : { provider: '', model: '', writeBack: false, webSearch: true, concurrency: 2 }
   } catch (_error) {
-    return { provider: '', model: '', writeBack: true, concurrency: 2 }
+    return { provider: '', model: '', writeBack: false, webSearch: true, concurrency: 2 }
   }
 }
 
@@ -87,6 +90,7 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
         provider: pick.provider,
         model: pick.model,
         writeBack: pick.writeBack,
+        webSearch: pick.webSearch,
         concurrency: pick.concurrency,
       })
       .catch((error) => setMessage(String(error?.message ?? error)))
@@ -96,21 +100,29 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
     verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
   }
 
+  const counts = {
+    processed: progress?.processed ?? progress?.done ?? 0,
+    total: progress?.total ?? 0,
+    valid: progress?.done ?? 0,
+    unknown: progress?.unknown ?? 0,
+    failed: progress?.failed ?? 0,
+    searchCalls: progress?.searchCalls ?? 0,
+    fetchCalls: progress?.fetchCalls ?? 0,
+    tokens: tokensSpent,
+  }
   const summary = running
     ? t('checker.running', {
         phase: t('checker.phase.' + (progress?.phase ?? 'verifying')),
-        done: progress?.done ?? 0,
-        total: progress?.total ?? 0,
-        tokens: tokensSpent,
+        ...counts,
       })
     : finished
-      ? t('checker.finished', {
-          done: progress?.done ?? 0,
-          total: progress?.total ?? 0,
-          tokens: tokensSpent,
-        })
+      ? t('checker.finished', counts)
       : t('checker.idle')
 
+  const activeBatches = running && Array.isArray(progress?.batches)
+    ? progress.batches.filter((batch) => batch.status === 'running')
+    : []
+  const visibleBatches = activeBatches.slice(0, MAX_ACTIVE_BATCH_LINES)
   const errors = Array.isArray(progress?.errors) ? progress.errors : []
   const visibleErrors = errors.slice(0, MAX_ERROR_LINES)
 
@@ -194,11 +206,24 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
             ),
             h(
               'label',
+              { className: 'mvp_check', title: t('checker.webSearchTitle') },
+              h('input', {
+                type: 'checkbox',
+                checked: pick.webSearch,
+                disabled: running,
+                'aria-label': t('checker.webSearch'),
+                onChange: (event) => commit({ ...pick, webSearch: event.target.checked }),
+              }),
+              h('span', null, t('checker.webSearch')),
+            ),
+            h(
+              'label',
               { className: 'mvp_check', title: t('checker.writeBackTitle') },
               h('input', {
                 type: 'checkbox',
                 checked: pick.writeBack,
                 disabled: running,
+                'aria-label': t('checker.writeBack'),
                 onChange: (event) => commit({ ...pick, writeBack: event.target.checked }),
               }),
               h('span', null, t('checker.writeBack')),
@@ -224,30 +249,66 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
                   role: 'progressbar',
                   'aria-valuemin': 0,
                   'aria-valuemax': progress?.total ?? 0,
-                  'aria-valuenow': progress?.done ?? 0,
+                  'aria-valuenow': counts.processed,
                 }, h('span', {
                   className: 'mvp_progressFill',
                   style: {
                     width:
                       (progress?.total ?? 0) > 0
-                        ? Math.min(100, Math.round(((progress?.done ?? 0) / progress.total) * 100)) + '%'
+                        ? Math.min(100, Math.round((counts.processed / progress.total) * 100)) + '%'
                         : '0%',
                   },
                 })),
                 h(
                   'span',
                   { className: 'mvp_checkerProgressText' },
-                  t('checker.progress', {
-                    done: progress?.done ?? 0,
-                    total: progress?.total ?? 0,
-                    tokens: tokensSpent,
-                  }),
+                  t('checker.progress', counts),
+                ),
+                h(
+                  'span',
+                  { className: 'mvp_checkerProgressText' },
+                  t('checker.outcomes', counts),
+                ),
+                h(
+                  'span',
+                  { className: 'mvp_checkerProgressText' },
+                  t('checker.webCalls', counts),
                 ),
                 h(
                   'span',
                   { className: 'mvp_checkerProgressText' },
                   t('checker.threads', { count: progress?.concurrency ?? pick.concurrency }),
                 ),
+              )
+            : null,
+          visibleBatches.length > 0
+            ? h(
+                'div',
+                { className: 'mvp_sources', 'aria-label': t('checker.activeBatches') },
+                h('div', { className: 'mvp_sourcesTitle' }, t('checker.activeBatches')),
+                h(
+                  'ul',
+                  { className: 'mvp_sourceList' },
+                  visibleBatches.map((batch, index) =>
+                    h(
+                      'li',
+                      { key: index },
+                      h('span', { className: 'mvp_sourceState' },
+                        ['checker', 'search', 'fetch', 'writeBack', 'flush'].includes(batch.stage)
+                          ? t('checker.stage.' + batch.stage)
+                          : String(batch.stage ?? t('checker.stage.checker')),
+                      ),
+                      h('span', { className: 'mvp_sourceName' },
+                        Array.isArray(batch.ids) ? batch.ids.map(String).join(', ') : '',
+                      ),
+                    ),
+                  ),
+                ),
+                activeBatches.length > visibleBatches.length
+                  ? h('div', { className: 'mvp_usageHint' },
+                      t('checker.activeMore', { count: activeBatches.length - visibleBatches.length }),
+                    )
+                  : null,
               )
             : null,
           // Which public catalogs were read, and which were not. Without this

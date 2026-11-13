@@ -144,3 +144,13 @@ test('hand-edited files are picked up by invalidation and mtimes', () => {
   store.invalidate()
   assert.equal(store.get('model-b').reasoning, true)
 })
+
+test('learned evidence survives reopening with only safe fields and HTTPS URLs', () => {
+  const file = path.join(tempHome(), 'learned.json')
+  const store = createLearnedCatalog({ file })
+  store.upsertEntries([{ id: 'a', input: ['image'], evidence: [
+    { url: 'https://vendor.example/spec', fields: ['input', 'unrecognized'] },
+    { url: 'file:///secret', fields: ['input'] },
+  ] }])
+  assert.deepEqual(createLearnedCatalog({ file }).get('a').evidence, [{ url: 'https://vendor.example/spec', fields: ['input'] }])
+})

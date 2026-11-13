@@ -384,3 +384,45 @@ test('applyToProvider:false keeps the override local', async () => {
   assert.equal(saved.value.overrides.length, 1)
   assert.equal(harness.settings.calls.length, 0)
 })
+
+test('Host verify route forwards web access and defaults to read-only provider settings', async () => {
+  resetShadowStore()
+  const harness = createHarness()
+  const disposers = []
+  const originalInject = harness.ctx.inject
+  const originalFetch = globalThis.fetch
+  const written = []
+  globalThis.fetch = async () => new Response('{}')
+  harness.ctx.inject = (deps, callback) => originalInject(deps, scope => {
+    scope.effect = fn => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose); return () => {} }
+    const get = scope.get
+    scope.get = name => name === 'web' ? { search: async () => ({ sources: [{ url: 'https://vendor.example/spec', snippet: 'mystery-model accepts images' }] }) } : get(name)
+    callback(scope)
+  })
+  harness.llm.listModels = async () => [{ id: 'mystery-model' }]
+  let round = 0
+  harness.llm.prepareCall = async (config, signal, configure) => ({ config: { ...config, ...configure(config, {}) }, stream: async function* () {
+    if (round++ === 0) yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 's', name: 'search_model_docs', arguments: '{"query":"mystery-model official input"}' } }
+    else yield { type: 'text-delta', text: JSON.stringify([{ id: 'mystery-model', kind: 'chat', input: ['text','image'], output: null, contextWindow: null, maxTokens: null, reasoning: null, reasoningEfforts: null, defaultEffort: null, evidence: [{ url: 'https://vendor.example/spec', fields: ['kind','input'] }] }]) }
+  } })
+  try {
+    apply(harness.ctx, { hidden: { get: () => [] }, probe: false })
+    const response = await harness.route.verify.fetch(new Request('http://local/api/dsh-model-visibility/verify', { method: 'POST', body: JSON.stringify({ provider: 'relay', model: 'checker' }) }))
+    assert.equal(response.status, 200)
+    let progress
+    for (let i = 0; i < 30; i++) {
+      progress = (await (await harness.route.verify.fetch(new Request('http://local/api/dsh-model-visibility/verify'))).json()).value.state
+      if (!progress.running) break
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal(progress.running, false)
+    assert.equal(progress.processed, 1)
+    assert.equal(progress.done, 1)
+    assert.equal(progress.searchCalls, 1)
+    assert.equal(progress.writeBack, false)
+    assert.equal(harness.settings.calls.length, 0)
+  } finally {
+    for (const dispose of disposers.reverse()) await dispose()
+    globalThis.fetch = originalFetch
+  }
+})

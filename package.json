@@ -1,11 +1,11 @@
 {
   "name": "@tzyc/dsh-model-visibility",
-  "version": "1.12.3",
+  "version": "1.13.0",
   "publishConfig": {
     "access": "public"
   },
   "type": "module",
-  "description": "Choose which models appear in the chat composer's model list, with per-provider groups, per-model capability tags sourced from the adapter, the relay model list, a learned local snapshot seeded by an online verification run (public catalogs plus a user-chosen checker model, with optional write-back into provider settings), vendor corrections and manual overrides, separate coloured labels for image/video generation models, name search and capability filters, collapsible provider groups, a hard capability re-fetch, a token-usage strip (today / week / month / total) with one-click CSV exports, per-model overrides that can also be written back into the model provider's own settings, and an image-input alignment (on by default) for relay routes.",
+  "description": "Choose which models appear in the chat composer's model list, with per-provider groups, per-model capability tags sourced from the adapter, the relay model list, a learned local snapshot seeded by an online verification run (public catalogs plus a user-chosen checker with real web search and cited documentation; web access may consume quota, with opt-in write-back into provider settings), vendor corrections and manual overrides, separate coloured labels for image/video generation models, name search and capability filters, collapsible provider groups, a hard capability re-fetch, a token-usage strip (today / week / month / total) with one-click CSV exports, per-model overrides that can also be written back into the model provider's own settings, and an image-input alignment (on by default) for relay routes.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -21,6 +21,7 @@
     "locale/*.json",
     "icon.svg",
     "screenshots.json",
+    "CHANGELOG.md",
     "docs"
   ],
   "scripts": {

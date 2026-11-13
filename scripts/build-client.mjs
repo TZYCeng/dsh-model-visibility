@@ -151,7 +151,14 @@ parts.push(indent(
 ))
 parts.push(`  },`, `})`)
 
-fs.writeFileSync(outFile, parts.join('\n') + '\n')
+// Concurrent test processes read this entry while determinism tests rebuild it.
+// Publish a complete bundle atomically; writeFileSync alone exposes a truncated file.
+const bundle = parts.join('\n') + '\n'
+if (!fs.existsSync(outFile) || fs.readFileSync(outFile, 'utf8') !== bundle) {
+  const temporary = `${outFile}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, bundle)
+  fs.renameSync(temporary, outFile)
+}
 process.stdout.write(`wrote ${outFile} from ${emittedModules.length} modules\n`)
 
 function indent(text, spaces) {

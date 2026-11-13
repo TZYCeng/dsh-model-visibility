@@ -306,6 +306,7 @@ export function apply(ctx, config) {
     const verifier = createCapabilityVerifier({
       llm: scope.llm,
       settings,
+      web: typeof scope.get === 'function' ? scope.get('web') : undefined,
       learned: learnedService,
       ledger: usageLedger,
       logger,
@@ -608,7 +609,7 @@ export function apply(ctx, config) {
             const concurrency = Number.isFinite(body?.concurrency) ? body.concurrency : undefined
             if (!verifier.isRunning()) {
               verifier
-                .start({ checker: { provider, model }, writeBack: body?.writeBack !== false, concurrency })
+                .start({ checker: { provider, model }, writeBack: body?.writeBack === true, webSearch: body?.webSearch !== false, concurrency })
                 .then(() => {
                   // Learned facts (and possibly provider settings) changed.
                   service.invalidate()

@@ -47,11 +47,13 @@ function scriptedLlm({ reply = '', reasoning = 0, finishKind = 'stop', failOnce 
     listModels: async () => MODELS,
     resolveModelInfo: async () => ({ inputModalities: ['text'], contextWindow: 1000 }),
     async prepareCall(config, signal, configure) {
-      calls.push({ config: { ...config } })
+      const recorded = { config: { ...config } }
+      calls.push(recorded)
       signal?.throwIfAborted()
       // dsh-llm calls configure before resolving the final config.
-      const controls = configure === undefined ? { ...config } : { ...configure({ ...config }, {}) }
+      const controls = configure === undefined ? { ...config } : { ...configure({ ...config }, { reasoning: { efforts: [{ id: 'low', name: 'Low' }] } }) }
       const resolvedConfig = { ...config, ...controls }
+      recorded.config = resolvedConfig
       return {
         config: resolvedConfig,
         stream: async function* () {

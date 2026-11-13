@@ -46,3 +46,13 @@ test('a large Content-Length is refused before the body is read', async () => {
   response.headers.set('content-length', '100')
   await assert.rejects(readResponseText(response, 4), /too large/)
 })
+
+test('abort cancels a stalled body reader and rejects the read', async () => {
+  let cancelled = false
+  const controller = new AbortController()
+  const response = new Response(new ReadableStream({ cancel() { cancelled = true } }))
+  const reading = readResponseText(response, 100, controller.signal)
+  controller.abort(new Error('cancelled read'))
+  await assert.rejects(reading, /cancelled read/)
+  assert.equal(cancelled, true)
+})

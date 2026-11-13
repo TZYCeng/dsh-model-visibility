@@ -2,7 +2,7 @@
 
 > 给下一位 Agent、模型或工程师：先读本文，再改代码。本文只保留当前有效的架构、契约与操作步骤；历史发布细节查 Git，功能说明查 [README.md](README.md)。
 >
-> 基线：`@tzyc/dsh-model-visibility` **1.12.3** · Node.js 24 · ESM · 186 个测试 · 2026-11-10 复核
+> 基线：`@tzyc/dsh-model-visibility` **1.13.0** · Node.js 24 · ESM · 217 个测试 · 2026-11-13 校验流程重构
 
 ## 1. 十分钟上手
 
@@ -27,7 +27,7 @@ npm run build
 git status --short
 ```
 
-预期：186 个测试通过，构建成功，重复构建没有 `client.js` 差异。本机使用 Node.js 24，`usage-ledger` 依赖 Node 的 `zlib.zstd*`。
+预期：217 个测试通过，构建成功，重复构建没有 `client.js` 差异。本机使用 Node.js 24，`usage-ledger` 依赖 Node 的 `zlib.zstd*`。
 
 ```powershell
 npm pack --dry-run   # 发布前检查实际包内容
@@ -132,6 +132,11 @@ client-src/
   hooks.mjs                      Store React 绑定
   dict.mjs / css.mjs             中英文字典与主题样式
 lib/
+  public-catalog.js               公开目录纯解析、合并与匹配
+  checker-answer.js               校验回复提取与能力投影
+  checker-contract.js             固定结果格式、字段检查与引用过滤
+  checker-call.js                 有界 LLM 工具循环、搜索与网页读取
+  async-operation.js              超时/取消，即使下游忽略 AbortSignal 也返回
   model-info.js                  能力合并、目录构建、缓存、图像准入判断
   capability-catalog.js          类型与输入模态的保守名称推断
   capability-corrections.js      有官方文档依据的精确 ID 校正
@@ -208,7 +213,7 @@ type Source = 'manual' | 'config' | 'adapter' | 'provider' |
 }
 ```
 
-`learned.features` 用于新浏览器识别旧 Host。当前特性：`applyInput`、`reload`、`overrides`、`verify`、`usage`、`checkerBudget`。不要恢复旧字段名 `catalog`；浏览器 Store 读取 `state.learned`。
+`learned.features` 用于新浏览器识别旧 Host。当前特性：`applyInput`、`reload`、`overrides`、`verify`、`usage`、`checkerBudget`、`verifyWeb`。不要恢复旧字段名 `catalog`；浏览器 Store 读取 `state.learned`。
 
 ### 4.2 学习快照
 
@@ -240,7 +245,7 @@ type Source = 'manual' | 'config' | 'adapter' | 'provider' |
 | `POST /usage` | 强制下一次读取触发扫描，但仍复用当前 in-flight。 |
 | `GET /export?type=usage|models` | 下载对应 CSV。 |
 | `GET /verify` | `{ state, learned }` 进度与快照元信息。 |
-| `POST /verify` | `{ provider, model, writeBack?, concurrency? }` 启动；`{ cancel:true }` 取消。 |
+| `POST /verify` | `{ provider, model, writeBack?, webSearch?, concurrency? }` 启动；`{ cancel:true }` 取消。 |
 
 `/models` 失败是 `500 model-info/failed`；`/overrides` 非 JSON 是 `400 overrides/body`。Provider 写回拒绝不一定是 HTTP 错误：本地覆盖仍有效，原因放入 `value.provider`。
 
@@ -280,7 +285,12 @@ settings.describe()
 
 - 同一时刻一轮 sweep；`start()` join 已存在的 run；
 - 默认批大小 6、并发 2，单次并发限制 1–8；
-- 校验输出预算 8192，默认 `reasoningEffort:'low'`；
+- 校验输出预算 8192，仅模型声明支持时指定 `reasoningEffort:'low'`；
+- `done` 为有效结果，`processed` 为已处理；另有 `unknown`、`failed`、`searchCalls`、`fetchCalls`；进度条以 processed 为准；
+- 请求默认 180s、批次总预算 360s，搜索/读取最多 30s；工具循环最多 5 轮/12 次，响应限制 128000 字符；
+- 联网模式采用严格固定 JSON 及 evidence 字段，只接受本批检索 URL，未引用的能力字段被剔除；引用仍需语义核实；
+- Provider 写回默认关闭；`webSearch` 的 HTTP 默认 true，直接构造无 web 的校验器可离线使用；
+- 所有 worker 通过 allSettled 收尾；flush 失败不能提前释放 running、让旧 worker 污染新 run；
 - 结构错误定向重试一次，失败批次二分；
 - `cancel()` 只 abort，不伪造 worker 已退出；
 - `dispose()` 标记停止、abort 公开目录和 checker，并等待 `running`；
@@ -373,7 +383,7 @@ npm run build
 git diff --exit-code -- client.js
 ```
 
-当前基线 **186 个测试**。覆盖：
+当前基线 **217 个测试**。覆盖：
 
 - 能力优先级、官方校正、未知与推断来源；
 - 快照新旧合并、别名、外部修改；
@@ -419,12 +429,12 @@ Host 改动后重新加载 Host/重启 DSH；Client 改动后构建并刷新页�
 
 ### 已知的剩余风险
 
-1. **校验不是目标模型实测。** 默认 Provider 写回可能固化错误声明；关键模型应人工确认。
+1. **校验不是目标模型实测。** Provider 写回默认关闭，联网引用只能证明 URL 来自本轮检索，语义准确性仍需复核；已开始的 settings.mutate 不支持取消或撤销。
 2. **私有宿主契约。** `modelDirectories`、`llm.adapters`、`modelOf`、设置结构和日志格式都可能随 DSH 更新改变。
 3. **写回下标竞态。** describe 与 mutate 间模型数组改变时可能写错目标；不要在 UI 并发动态修改 Provider 列表。
 4. **多 Host/多 profile。** 文件为全局共享，当前原子替换不等于跨进程事务锁。
 5. **账本性能。** 修改过的日志会整文件重读、同步解压；大型历史库需要流式或分块增量。
-6. **模块规模。** `check-catalog.js` 与 `settings-section.mjs` 已偏大；修改时优先提取纯函数/独立服务，不继续堆分支。
+6. **模块规模。** 校验已拆分公开目录、结果契约、回复投影与工具执行；`check-catalog.js` 仍负责调度，设置页主体仍可继续拆分。
 7. **构建器语法受限。** 长期可换标准 bundler，但必须保留宿主 ModuleLoader 包装及现有回归测试。
 
 ### 推荐顺序

@@ -74,7 +74,7 @@ const CATALOG = {
     learned: {
       models: 3,
       updatedAt: Date.now(),
-      features: ['applyInput', 'reload', 'overrides', 'verify', 'usage', 'checkerBudget'],
+      features: ['applyInput', 'reload', 'overrides', 'verify', 'usage', 'checkerBudget', 'verifyWeb'],
     },
     generatedAt: 1,
   },
@@ -449,7 +449,7 @@ async function renderVerifyPanel(verifyValue, { pick } = {}) {
       groups: [{ id: 'relay', name: 'Relay', models: [{ id: 'grok-4.7', name: 'grok-4.7', kind: 'chat', sources: {} }] }],
       failures: [],
       providers: [],
-      learned: { models: 1, features: ['applyInput', 'reload', 'overrides', 'verify', 'usage', 'checkerBudget'] },
+      learned: { models: 1, features: ['applyInput', 'reload', 'overrides', 'verify', 'usage', 'checkerBudget', 'verifyWeb'] },
       generatedAt: 1,
     },
   }
