@@ -27,7 +27,7 @@ function loadComponent(name, requireModule, window) {
     { filename: `${name}.mjs` })(requireModule, window)
 }
 
-function renderPanel(progress = {}, { pick, storage, language = 'en' } = {}) {
+function renderPanel(progress = {}, { pick, storage, language = 'en', canFullScan = true, pending = false } = {}) {
   const slots = []
   const writes = []
   const starts = []
@@ -60,7 +60,7 @@ function renderPanel(progress = {}, { pick, storage, language = 'en' } = {}) {
   const { VerifyPanel } = loadComponent('checker-view', requireModule, window)
   const verify = {
     subscribe: () => () => {},
-    getSnapshot: () => ({ snapshot: { state: progress }, error: null }),
+    getSnapshot: () => ({ snapshot: { state: progress }, error: null, pending }),
     load: async () => { loads += 1 },
     start: async (payload) => { starts.push(JSON.parse(JSON.stringify(payload))) },
     cancel: async () => {},
@@ -79,6 +79,7 @@ function renderPanel(progress = {}, { pick, storage, language = 'en' } = {}) {
       catalog: { groups: [{ id: 'relay', name: 'Relay', models: [{ id: 'checker' }] }] },
       t,
       canUse: true,
+      canFullScan,
     })
   }
   const findAll = (predicate, node = tree, out = []) => {
@@ -113,6 +114,7 @@ const RUNNING = {
   total: 10,
   unknown: 2,
   failed: 2,
+  skippedKnown: 9,
   searchCalls: 4,
   fetchCalls: 6,
   tokenUsage: [1200, 300],
@@ -124,8 +126,8 @@ for (const language of ['en', 'zh']) {
     const summary = panel.text(panel.byClass('mvp_checkerSummary')[0])
     assert.match(summary, /7\/10/)
     for (const part of language === 'en'
-      ? ['3 valid', '2 unknown', '2 failed', '4 searches', '6 reads', '1.5K tokens']
-      : ['有效 3', '未知 2', '失败 2', '搜索 4', '读取 6', '1.5K Token']) {
+      ? ['3 valid', '2 unknown', '2 failed', '9 known skipped', '4 searches', '6 reads', '1.5K tokens']
+      : ['有效 3', '未知 2', '失败 2', '跳过已知 9', '搜索 4', '读取 6', '1.5K Token']) {
       assert.ok(summary.includes(part), `summary must contain ${part}`)
     }
     panel.open()
@@ -138,6 +140,7 @@ for (const language of ['en', 'zh']) {
     assert.ok(details.includes(language === 'en' ? '3 valid' : '有效 3'))
     assert.ok(details.includes(language === 'en' ? '2 unknown' : '未知 2'))
     assert.ok(details.includes(language === 'en' ? '2 failed' : '失败 2'))
+    assert.ok(details.includes(language === 'en' ? '9 known skipped' : '跳过已知 9'))
     assert.ok(details.includes(language === 'en' ? '6 web-page reads' : '网页读取 6 次'))
   })
 }
@@ -147,6 +150,13 @@ test('finished progress reaches 100% when some processed models were unknown or 
   assert.match(panel.text(panel.byClass('mvp_checkerSummary')[0]), /10\/10 processed/)
   panel.open()
   assert.equal(panel.byClass('mvp_progressFill')[0].props.style.width, '100%')
+})
+
+test('a run that skipped every model reports the result without a zero-total bar', () => {
+  const panel = renderPanel({ running: false, phase: 'done', total: 0, skippedKnown: 14 })
+  assert.match(panel.text(panel.byClass('mvp_checkerSummary')[0]), /No new models to verify · 14 known skipped/)
+  panel.open()
+  assert.equal(panel.findAll((node) => node.props.role === 'progressbar').length, 0)
 })
 
 test('legacy snapshots fall back to done and absent counters render zero', () => {
@@ -224,7 +234,7 @@ test('explicit stored preferences survive and start sends webSearch with the sel
   assert.equal(panel.checkbox('checker.writeBack').props.checked, true)
   assert.equal(panel.checkbox('checker.webSearch').props.checked, false)
   panel.start()
-  assert.deepEqual(panel.starts, [{ provider: 'relay', model: 'checker', writeBack: true, webSearch: false, concurrency: 4 }])
+  assert.deepEqual(panel.starts, [{ provider: 'relay', model: 'checker', writeBack: true, webSearch: false, concurrency: 4, fullScan: false }])
 })
 
 test('web search can be disabled, persisted and passed to start without enabling write-back', () => {
@@ -236,18 +246,59 @@ test('web search can be disabled, persisted and passed to start without enabling
   assert.equal(panel.writes.at(-1).value.webSearch, false)
   assert.equal(panel.writes.at(-1).value.writeBack, false)
   panel.start()
-  assert.deepEqual(panel.starts[0], { provider: 'relay', model: 'checker', writeBack: false, webSearch: false, concurrency: 2 })
+  assert.deepEqual(panel.starts[0], { provider: 'relay', model: 'checker', writeBack: false, webSearch: false, concurrency: 2, fullScan: false })
   panel.checkbox('checker.webSearch').props.onChange({ target: { checked: true } })
   panel.render()
   panel.start()
   assert.equal(panel.starts.at(-1).webSearch, true)
 })
 
-test('run options remain disabled while verification is running', () => {
-  const panel = renderPanel(RUNNING)
+test('full search ignores stored opt-ins and is only applied once without changing web access', () => {
+  const panel = renderPanel({}, { pick: { provider: 'relay', model: 'checker', webSearch: false, fullScan: true } })
   panel.open()
-  assert.equal(panel.checkbox('checker.webSearch').props.disabled, true)
-  assert.equal(panel.checkbox('checker.writeBack').props.disabled, true)
+  assert.equal(panel.checkbox('checker.fullScan').props.checked, false)
+  panel.checkbox('checker.fullScan').props.onChange({ target: { checked: true } })
+  panel.render()
+  assert.equal(panel.checkbox('checker.fullScan').props.checked, true)
+  assert.equal(panel.writes.length, 0)
+  panel.start()
+  panel.render()
+  assert.equal(panel.checkbox('checker.fullScan').props.checked, false)
+  panel.start()
+  assert.deepEqual(panel.starts.map(({ fullScan, webSearch }) => [fullScan, webSearch]), [[true, false], [false, false]])
+})
+
+test('old hosts do not show full search or receive an opt-in', () => {
+  const panel = renderPanel({}, { canFullScan: false, pick: { provider: 'relay', model: 'checker', fullScan: true } })
+  panel.open()
+  assert.equal(panel.checkbox('checker.fullScan'), undefined)
+  panel.start()
+  assert.equal(panel.starts[0].fullScan, false)
+})
+
+test('run options remain disabled while verification is running or a mutation is pending', () => {
+  for (const [progress, pending] of [[{ ...RUNNING, fullScan: true }, false], [{}, true]]) {
+    const panel = renderPanel(progress, { pending })
+    panel.open()
+    assert.equal(panel.checkbox('checker.webSearch').props.disabled, true)
+    assert.equal(panel.checkbox('checker.writeBack').props.disabled, true)
+    assert.equal(panel.checkbox('checker.fullScan').props.disabled, true)
+    assert.equal(panel.checkbox('checker.fullScan').props.checked, !pending)
+  }
+})
+
+test('verification reports positive search backend counts separately from web reads', () => {
+  const panel = renderPanel({ ...RUNNING, searchBackends: { 'dsh-free-search': 3, 'host-web': 1, other: 57 } })
+  panel.open()
+  const detail = panel.text(panel.byClass('mvp_checkerProgress')[0])
+  assert.match(detail, /4 searches · 6 web-page reads/)
+  assert.match(detail, /Search breakdown: 3 DSH Free Search calls · 1 Host web search calls/)
+  assert.doesNotMatch(detail, /57/)
+  const partial = renderPanel({ ...RUNNING, searchBackends: { 'dsh-free-search': 0, 'host-web': 2 } })
+  partial.open()
+  const partialDetail = partial.text(partial.byClass('mvp_checkerProgress')[0])
+  assert.match(partialDetail, /2 Host web search calls/)
+  assert.doesNotMatch(partialDetail, /DSH Free Search/)
 })
 
 test('checker translations stay in sync and explain web costs, errors and no target-model testing', () => {

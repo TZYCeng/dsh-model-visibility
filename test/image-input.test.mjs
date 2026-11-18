@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { installImageInputGate } from '../lib/image-input-gate.js'
-import { createModelInfoService, imageInputDecision } from '../lib/model-info.js'
+import { createModelInfoService, describeModel, imageInputDecision } from '../lib/model-info.js'
 
 /** A relay profile whose per-model `input` is the empty DSH default. */
 function relayProfile(models) {
@@ -122,4 +122,61 @@ test('installImageInputGate refreshes newly registered adapters and keeps other 
   assert.deepEqual(pi.modelOf({}, 'relay', 'm').input, ['text', 'image'])
   assert.equal(deepseek.modelOf, undefined)
   gate.dispose()
+})
+
+test('the UI and gate agree on raw listing aliases, exact rows and ambiguity', async () => {
+  const llm = { resolveModelInfo: async () => ({ inputModalities: ['text'] }) }
+  const vision = { id: 'Vendor/MYSTERY-MODEL:free', inputModalities: ['text', 'image'] }
+  const text = { id: 'mystery-model', inputModalities: ['text'] }
+  const other = { id: 'Other/mystery-model:free', inputModalities: ['text'] }
+  const profile = relayProfile([text.id])
+  for (const [entries, allowed, source] of [
+    [[vision], true, 'provider'],
+    [[vision, text], false, 'provider'],
+    [[vision, other], false, 'unknown'],
+  ]) {
+    const discovered = new Map(entries.map((entry) => [entry.id, entry]))
+    const context = { profile, discovered, learned: {} }
+    const ui = await describeModel(llm, 'relay', text, context)
+    const gate = imageInputDecision('relay', text.id, context)
+    assert.equal(ui.sources.modalities, source)
+    assert.equal(gate.record.sources.modalities, source)
+    assert.deepEqual(gate.record.inputModalities, ui.inputModalities)
+    assert.equal(gate.allowed, allowed)
+  }
+})
+
+test('refresh releases stale patches, restoring an own method or accessor exactly', () => {
+  const original = piAiAdapter()
+  const descriptor = { value: original.modelOf, configurable: false, writable: true, enumerable: true }
+  Object.defineProperty(original, 'modelOf', descriptor)
+  const replacement = piAiAdapter()
+  const base = replacement.modelOf
+  const accessor = { get: () => base, configurable: true, enumerable: true }
+  Object.defineProperty(replacement, 'modelOf', accessor)
+  const llm = { adapters: new Map([['relay', { adapter: original }], ['alias', { adapter: original }]]) }
+  const gate = installImageInputGate(llm, { allow: () => true })
+  const patched = original.modelOf
+  assert.deepEqual(patched({}, 'relay', 'm').input, ['text', 'image'])
+  llm.adapters.set('relay', { adapter: replacement })
+  gate.refresh()
+  assert.equal(original.modelOf, patched, 'an adapter shared by another registration stays patched')
+  assert.deepEqual(replacement.modelOf({}, 'relay', 'm').input, ['text', 'image'])
+  llm.adapters.delete('alias')
+  gate.refresh()
+  assert.deepEqual(Object.getOwnPropertyDescriptor(original, 'modelOf'), descriptor)
+  assert.deepEqual(patched({}, 'relay', 'm').input, ['text'], 'retained wrapper reference is inactive')
+  gate.dispose()
+  gate.refresh()
+  assert.deepEqual(Object.getOwnPropertyDescriptor(replacement, 'modelOf'), { ...accessor, set: undefined })
+})
+
+test('release leaves another owner’s method in place', () => {
+  const adapter = piAiAdapter()
+  const llm = { adapters: new Map([['relay', { adapter }]]) }
+  const gate = installImageInputGate(llm, { allow: () => true })
+  const replacement = () => ({ input: ['audio'] })
+  adapter.modelOf = replacement
+  gate.dispose()
+  assert.equal(adapter.modelOf, replacement)
 })

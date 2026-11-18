@@ -154,3 +154,16 @@ test('learned evidence survives reopening with only safe fields and HTTPS URLs',
   ] }])
   assert.deepEqual(createLearnedCatalog({ file }).get('a').evidence, [{ url: 'https://vendor.example/spec', fields: ['input'] }])
 })
+
+test('exact learned identities win over compact aliases in either insertion order', () => {
+  const files = ['alias', 'alias-reverse'];
+  const facts = [{ id: 'foo-bar', type: 'chat' }, { id: 'foobar', type: 'image' }];
+  for (const suffix of files) {
+    const store = createLearnedCatalog({ file: path.join(tempHome(), suffix + '.json') });
+    store.upsertEntries(suffix === 'alias' ? facts : [...facts].reverse());
+    assert.equal(store.get('foobar').type, 'image');
+    assert.equal(store.get('foo-bar').type, 'chat');
+    assert.equal(store.getExact('foo.bar'), undefined);
+    assert.equal(store.get('foo.bar'), undefined);
+  }
+});

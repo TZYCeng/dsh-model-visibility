@@ -392,8 +392,9 @@ export function createUsageApi() {
  */
 export function createVerifyApi() {
   const listeners = new Set()
-  let state = { status: 'idle', snapshot: null, error: null }
+  let state = { status: 'idle', snapshot: null, error: null, pending: false }
   let inflight = null
+  let generation = 0
   let timer = null
   /** Cadence the armed timer currently runs at, so rearm can compare. */
   let timerMs = null
@@ -404,8 +405,11 @@ export function createVerifyApi() {
   }
 
   const read = async () => {
+    // A GET sent while a POST is pending can still capture pre-POST state.
+    if (state.pending) return
     if (inflight !== null) return inflight
-    const run = (async () => {
+    const token = generation
+    const run = Promise.resolve().then(async () => {
       try {
         const response = await fetch(API + '/verify', {
           headers: { accept: 'application/json' },
@@ -417,13 +421,13 @@ export function createVerifyApi() {
         const body = await response.json()
         const value = body && body.ok === true ? body.value : null
         if (value === null || typeof value !== 'object') throw new Error('malformed verify snapshot')
-        publish({ status: 'ready', snapshot: value, error: null })
+        if (token === generation) publish({ status: 'ready', snapshot: value, error: null, pending: false })
       } catch (error) {
-        publish({ ...state, status: 'error', error: failureText(error) })
+        if (token === generation) publish({ ...state, status: 'error', error: failureText(error) })
       } finally {
-        if (inflight === run) inflight = null
+        if (token === generation) inflight = null
       }
-    })()
+    })
     inflight = run
     return run
   }
@@ -449,11 +453,28 @@ export function createVerifyApi() {
       throw new Error('HTTP ' + response.status + detail)
     }
     const body = await response.json()
-    if (body?.ok === true) {
-      publish({ status: 'ready', snapshot: body.value, error: null })
-      return body.value
-    }
+    if (body?.ok === true && body.value !== null && typeof body.value === 'object') return body.value
+    if (body?.ok === true) throw new Error('malformed verify snapshot')
     throw new Error(failureText(body?.error))
+  }
+
+  const mutate = async (payload) => {
+    if (state.pending) throw new Error('A verification request is already pending.')
+    // Drop the old GET without waiting for it. Its result (or error) no longer
+    // describes the state this POST is changing.
+    generation += 1
+    inflight = null
+    publish({ ...state, error: null, pending: true })
+    try {
+      const value = await post(payload)
+      publish({ status: 'ready', snapshot: value, error: null, pending: false })
+      return value
+    } catch (error) {
+      publish({ ...state, pending: false })
+      throw error
+    } finally {
+      rearm()
+    }
   }
 
   const SWEEP_POLL_MS = 2_000
@@ -513,29 +534,9 @@ export function createVerifyApi() {
         },
       )
     },
-    start(payload) {
-      return post(payload).then(
-        (value) => {
-          rearm()
-          return value
-        },
-        (error) => {
-          rearm()
-          throw error
-        },
-      )
-    },
+    start: mutate,
     cancel() {
-      return post({ cancel: true }).then(
-        (value) => {
-          rearm()
-          return value
-        },
-        (error) => {
-          rearm()
-          throw error
-        },
-      )
+      return mutate({ cancel: true })
     },
   }
 }

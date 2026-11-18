@@ -193,6 +193,44 @@ test('a sweep with the write-back switch off only fills the snapshot', async () 
   assert.equal(learned.get('model-a').contextWindow, 222000)
 })
 
+test('incremental verification skips canonical snapshot hits and no-op runs never fetch', async () => {
+  const learned = createLearnedCatalog({ file: path.join(tempHome(), 'learned.json') })
+  learned.upsertEntries([{ id: 'vendor/model-a:free', contextWindow: 4096 }])
+  let fetches = 0
+  const requested = []
+  const llm = fakeLlm([])
+  llm.listModels = async () => [{ id: 'model-a' }, { id: 'model-b' }, { id: 'checker-x' }]
+  llm.prepareCall = async config => ({ config, async *stream({ messages }) {
+    const ids = JSON.parse(messages[0].content[0].text.split('\n')[1])
+    requested.push(ids)
+    yield { type: 'text-delta', text: JSON.stringify(ids.map(id => ({ id, contextWindow: 8192 }))) }
+  } })
+  const verifier = createCapabilityVerifier({
+    llm, learned, huggingFaceHosts: ['https://huggingface.co'],
+    fetch: async () => { fetches += 1; return new Response('[]') },
+  })
+  const checker = { provider: 'relay', model: 'checker-x' }
+  const first = await verifier.start({ checker })
+  assert.equal(first.skippedKnown, 1)
+  assert.equal(first.total, 1)
+  assert.equal(first.done, 1)
+  assert.deepEqual(requested, [['model-b']])
+  assert.equal(learned.getExact('model-a').contextWindow, 4096)
+  const afterFirst = fetches
+  const noop = await verifier.start({ checker, webSearch: true })
+  assert.equal(noop.phase, 'done')
+  assert.equal(noop.skippedKnown, 2)
+  assert.equal(noop.total, 0)
+  assert.equal(fetches, afterFirst)
+  assert.equal(requested.length, 1)
+  const full = await verifier.start({ checker, fullScan: true })
+  assert.equal(full.fullScan, true)
+  assert.equal(full.skippedKnown, 0)
+  assert.equal(full.done, 2)
+  assert.deepEqual(requested[1], ['model-a', 'model-b'])
+  assert.equal(learned.getExact('model-a').contextWindow, 8192)
+})
+
 test('no checker route, no sweep', async () => {
   const { verifier } = verifierSetup({ replies: [] })
   const snapshot = await verifier.start({})

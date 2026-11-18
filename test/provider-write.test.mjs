@@ -9,6 +9,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { mergeCapabilities } from '../lib/model-info.js'
+import { sanitizeOverride } from '../lib/model-overrides.js'
 import {
   effortsForProvider,
   findProviderEntry,
@@ -35,8 +37,9 @@ function fakeSettings(providers) {
   return {
     calls,
     describe: () => [{ ns: 'llm-pi-ai', revision: 7, value: document }],
-    mutate: async (ns, ops) => {
-      calls.push({ ns, ops })
+    mutate: async (ns, ops, revision) => {
+      calls.push({ ns, ops, revision })
+      assert.equal(revision, 7)
       for (const op of ops) applyOp(document, op.path, op.value)
       return undefined
     },
@@ -176,5 +179,45 @@ test('stripWrittenFields keeps what the provider cannot store', () => {
     },
     ['input', 'contextWindow', 'reasoningEfforts'],
   )
-  assert.deepEqual(remaining, { provider: 'relay', model: 'mystery-model', kind: 'image' })
+  assert.deepEqual(remaining, { provider: 'relay', model: 'mystery-model', kind: 'image', defaultEffort: 'high' })
+})
+
+test('a revision conflict does not apply an index captured before model reorder', async () => {
+  const providers = sampleProviders()
+  const settings = {
+    describe: () => [{ ns: 'llm-pi-ai', revision: 7, value: { providers } }],
+    mutate: async (_ns, ops, revision) => {
+      providers.relay.models.reverse()
+      if (revision !== undefined && revision !== 8) throw new Error('revision conflict')
+      for (const op of ops) applyOp({ providers }, op.path, op.value)
+    },
+  }
+  const result = await writeCapabilities(settings, { provider: 'relay', model: 'mystery-model', contextWindow: 8 })
+  assert.equal(result.written, false)
+  assert.equal(result.reason, 'settings-failed')
+  assert.match(result.message, /revision conflict/)
+  assert.equal(providers.relay.models.every((model) => model.contextWindow === undefined), true)
+})
+
+test('partial writeback preserves custom ladders and a standalone manual default', async () => {
+  for (const efforts of [['off', 'high'], ['custom', 'high', 'off']]) {
+    const providers = sampleProviders()
+    const settings = fakeSettings(providers)
+    const saved = sanitizeOverride({ provider: 'relay', model: 'mystery-model', efforts, defaultEffort: efforts[0] })
+    const result = await writeCapabilities(settings, saved)
+    assert.equal(result.written, true)
+    const configured = providers.relay.models[0]
+    assert.deepEqual(configured.reasoningEfforts, { high: 'high', off: null })
+    const local = sanitizeOverride(stripWrittenFields(saved, result.fields))
+    assert.equal(local.defaultEffort, efforts[0])
+    if (efforts.includes('custom')) assert.deepEqual(local.efforts, saved.efforts)
+    else assert.equal(local.efforts, undefined)
+    const adapter = { reasoning: { efforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], defaultEffort: 'high' } }
+    const base = { id: saved.model, name: saved.model }
+    const record = mergeCapabilities(base, { configured, adapter, override: local })
+    assert.equal(record.reasoning.defaultEffort, efforts[0])
+    assert.deepEqual(record.reasoning.efforts.map(({ id }) => id), efforts)
+    const unmatched = mergeCapabilities(base, { configured, adapter, override: { defaultEffort: 'not-in-ladder' } })
+    assert.equal(unmatched.reasoning.defaultEffort, 'high')
+  }
 })

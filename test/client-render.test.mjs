@@ -88,7 +88,8 @@ const CATALOG = {
 function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-model'], applyInput: true }, writable = true } = {}) {
   const elements = []
   const effects = []
-  let state = []
+  const state = []
+  let cursor = 0
 
   const makeElement = (type, props, ...children) => {
     const element = { type, props: { ...(props ?? {}), children: children.flat() } }
@@ -102,7 +103,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
     useState: (initial) => {
       // Re-seed per render pass is not how React works; this harness keeps one
       // component instance alive across renders, which is what a click needs.
-      const slot = state.length
+      const slot = cursor++
       if (state[slot] === undefined) state[slot] = typeof initial === 'function' ? initial() : initial
       const setter = (next) => {
         state[slot] = typeof next === 'function' ? next(state[slot]) : next
@@ -220,6 +221,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
   const t = (key) => key
   const render = () => {
     elements.length = 0
+    cursor = 0
     return Section({ t })
   }
 
@@ -318,6 +320,36 @@ test('the group and page-level visibility buttons write the hidden list', async 
   assert.ok(showAll !== undefined, 'the show-all control must render')
   showAll.props.onClick()
   assert.deepEqual(plain(harness.writes.at(-1).value), [])
+})
+
+test('visibility and other filters scope the group action to matching models', async () => {
+  const harness = createHarness()
+  const byLabel = (label) => harness.elements.find((element) => element.props['aria-label'] === label)
+  const byText = (label) => harness.elements.find((element) => element.props.children[0] === label)
+  const titles = () => harness.elements
+    .filter((element) => element.props.className === 'mvp_rowTitle')
+    .map((element) => element.props.children[0])
+  harness.render()
+  await settle(harness)
+  harness.render()
+  assert.equal(byLabel('page.visibility.label').props.value, 'all')
+  byLabel('page.visibility.label').props.onChange({ target: { value: 'disabled' } })
+  harness.render()
+  assert.deepEqual(titles(), ['plain-model'])
+  byLabel('page.searchPlaceholder').props.onInput({ target: { value: 'grok' } })
+  harness.render()
+  assert.deepEqual(titles(), [])
+  assert.ok(byText('page.filterEmpty'))
+  byLabel('page.visibility.label').props.onChange({ target: { value: 'enabled' } })
+  harness.render()
+  assert.deepEqual(titles(), ['grok-4.7'])
+  assert.equal(byText('group.hideAll'), undefined)
+  byText('group.hideFiltered').props.onClick()
+  assert.equal(harness.writes[0].field, 'hidden')
+  assert.deepEqual(plain(harness.writes[0].value).sort(), ['relay/grok-4.7', 'relay/plain-model'])
+  byLabel('page.visibility.label').props.onChange({ target: { value: 'all' } })
+  harness.render()
+  assert.ok(byText('group.hideFiltered'), 'a search alone changes group wording')
 })
 
 test('the applyInput switch writes its own field', async () => {

@@ -82,6 +82,22 @@ test('computeFilteredGroups applies keyword, kind, capability and context filter
   assert.equal(computeFilteredGroups(groups, { query: 'no-such-model' }).length, 0)
 })
 
+test('visibility uses provider-scoped hidden keys and combines with all capability filters', () => {
+  const capable = { inputModalities: ['text', 'image'], reasoningSupported: true, contextWindow: 200000 }
+  const groups = [
+    group('relay', [model('foo', 'chat', capable), model('foo-small', 'chat', { ...capable, contextWindow: 1000 }), model('foo-video', 'video', capable)]),
+    group('second', [model('foo', 'chat', capable), model('foo-text', 'chat', { ...capable, inputModalities: ['text'] })]),
+  ]
+  const hidden = new Set(['relay/foo', 'relay/foo-small', 'relay/foo-video', 'second/foo-text'])
+  const options = { filter: 'chat', query: ' FOO ', multimodalOnly: true, reasoningOnly: true, minContext: 128000, hidden }
+  const selections = (visibility) => computeFilteredGroups(groups, { ...options, visibility })
+    .map((entry) => [entry.id, entry.models.map((item) => item.id)])
+  assert.deepEqual(selections('all'), [['relay', ['foo']], ['second', ['foo']]])
+  assert.deepEqual(selections('enabled'), [['second', ['foo']]])
+  assert.deepEqual(selections('disabled'), [['relay', ['foo']]])
+  assert.equal(hidden.size, 4)
+})
+
 test('countKinds buckets chat / image / video / other', () => {
   assert.deepEqual(
     countKinds([model('a', 'chat'), model('b', 'image'), model('c', 'video'), model('d', 'embedding'), model('e')]),
@@ -168,6 +184,54 @@ test('the verify store starts and cancels through the same-origin route', async 
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('verify start supersedes a stale GET and skips polls until the POST settles', async (t) => {
+  const response = (value) => ({ ok: true, json: async () => ({ ok: true, value }) })
+  const old = Promise.withResolvers()
+  const post = Promise.withResolvers()
+  const pendingReads = [old.promise, Promise.resolve(response({ state: { running: true, processed: 2 } }))]
+  t.mock.method(globalThis, 'fetch', (_url, init) =>
+    init.method === 'POST' ? post.promise : pendingReads.shift())
+  const verify = createVerifyApi()
+  const stale = verify.load()
+  await Promise.resolve()
+  const start = verify.start({ provider: 'relay', model: 'checker', fullScan: true })
+  assert.equal(verify.getSnapshot().pending, true)
+  await verify.load()
+  assert.equal(pendingReads.length, 1, 'GET is not sent during POST')
+  post.resolve(response({ state: { running: true, processed: 0 } }))
+  await start
+  assert.equal(verify.getSnapshot().pending, false)
+  assert.equal(verify.getSnapshot().snapshot.state.running, true)
+  old.resolve(response({ state: { running: false } }))
+  await stale
+  assert.equal(verify.getSnapshot().snapshot.state.running, true)
+  await verify.load()
+  assert.equal(verify.getSnapshot().snapshot.state.processed, 2)
+})
+
+test('verify cancel supersedes stale GET errors without exposing a ghost run', async (t) => {
+  const response = (value) => ({ ok: true, json: async () => ({ ok: true, value }) })
+  const old = Promise.withResolvers()
+  let requests = 0
+  t.mock.method(globalThis, 'fetch', (_url, init) => {
+    if (init.method === 'POST') {
+      assert.deepEqual(JSON.parse(init.body), { cancel: true })
+      return Promise.resolve(response({ state: { running: false, phase: 'cancelled' } }))
+    }
+    requests += 1
+    return requests === 1 ? Promise.resolve(response({ state: { running: true } })) : old.promise
+  })
+  const verify = createVerifyApi()
+  await verify.load()
+  const stale = verify.load()
+  await Promise.resolve()
+  await verify.cancel()
+  old.reject(new Error('obsolete poll failed'))
+  await stale
+  assert.equal(verify.getSnapshot().snapshot.state.phase, 'cancelled')
+  assert.equal(verify.getSnapshot().error, null)
 })
 
 test('the usage store reads the ledger snapshot', async () => {

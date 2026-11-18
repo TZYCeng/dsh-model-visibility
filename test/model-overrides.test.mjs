@@ -76,6 +76,21 @@ test('sanitizeOverride requires an identity and at least one declared field', ()
   assert.equal(override.defaultEffort, 'high')
 })
 
+test('a default-only residual override survives store reload after writeback', () => {
+  const home = tempHome()
+  try {
+    const store = createOverrideStore({ home, logger: silent })
+    assert.equal(store.upsert({ provider: 'relay', model: 'm', defaultEffort: ' HIGH ' }).defaultEffort, 'high')
+    const reopened = createOverrideStore({ home, logger: silent })
+    assert.equal(reopened.get('relay', 'm').defaultEffort, 'high')
+    assert.equal(reopened.get('relay', 'm').efforts, undefined)
+    assert.equal(sanitizeOverride({ provider: 'relay', model: 'm', defaultEffort: 'invalid id!' }), undefined)
+    assert.deepEqual(sanitizeEfforts(['constructor']), [{ id: 'constructor', name: 'constructor' }])
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('a manual "no reasoning" only needs the identity', () => {
   const override = sanitizeOverride({
     provider: 'relay',

@@ -8,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import test from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 
 import {
   createUsageLedger,
@@ -18,8 +19,30 @@ import {
   weekStartKey,
 } from '../lib/usage-ledger.js'
 
-function tempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'mv-usage-'))
+function tempDir(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'mv-usage-'))
+  t?.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  return home
+}
+
+function seedLog({ id, parentSession, time }, events) {
+  const lines = [
+    { type: 'session', version: 4, id, createdAt: time, isSeeded: parentSession !== undefined, parentSession, delegationDepth: 0 },
+    ...events.map((event, seq) => ({ ...JSON.parse(event), seq })),
+  ]
+  return lines.map((line) => JSON.stringify(line))
+}
+
+function endSeed(time, data = {}) {
+  return JSON.stringify({ type: 'session/end-seed', time, data })
+}
+
+function writeLog(home, id, lines) {
+  const dir = path.join(home, 'sessions', 'proj', id)
+  fs.mkdirSync(dir, { recursive: true })
+  const log = path.join(dir, 'session.v4.jsonl')
+  fs.writeFileSync(log, `${lines.join('\n')}\n`)
+  return log
 }
 
 function frame(line) {
@@ -148,8 +171,78 @@ test('older months are attributed to the session creation day, newer months exac
   assert.deepEqual(Object.values(folded.buckets)[0]['*'], [30, 3, 0, 0])
 })
 
-test('the ledger scans incrementally and persists its cache', async () => {
-  const home = tempDir()
+test('nested forks count only work after their last tagged seed marker', async (t) => {
+  const home = tempDir(t)
+  const time = new Date(2026, 10, 10, 12).getTime()
+  const root = [
+    attemptEvent({ time, turn: 0, step: 0, input: 10, output: 1 }),
+    endSeed(time), // Untagged restore keeps the prior settlement.
+    messageEvent({ time, turn: 0, step: 1, input: 20, output: 2, model: 'root' }),
+  ]
+  const child = [
+    ...root,
+    endSeed(time, { inherited: true }),
+    messageEvent({ time, turn: 0, step: 1, input: 20, output: 2, model: 'child' }),
+  ]
+  const grandchild = [
+    ...child,
+    endSeed(time, { inherited: true }),
+    messageEvent({ time, turn: 0, step: 1, input: 20, output: 2, model: 'grandchild' }),
+    endSeed(time), // A later untagged marker must not move the fork cut.
+    messageEvent({ time, turn: 0, step: 2, input: 4, output: 3, model: 'grandchild' }),
+  ]
+  writeLog(home, 'root', seedLog({ id: 'root', time }, root))
+  writeLog(home, 'child', seedLog({ id: 'child', parentSession: 'root', time }, child))
+  writeLog(home, 'grandchild', seedLog({ id: 'grandchild', parentSession: 'child', time }, grandchild))
+  const ledger = createUsageLedger({ home, now: () => time })
+  await ledger.rescan()
+  const snapshot = ledger.read()
+  assert.deepEqual(snapshot.ranges.total, [74, 10, 0, 0])
+  assert.deepEqual(snapshot.byModel, {
+    unknown: [10, 1, 0, 0],
+    'relay/root': [20, 2, 0, 0],
+    'relay/child': [20, 2, 0, 0],
+    'relay/grandchild': [24, 5, 0, 0],
+  })
+})
+
+test('opening a v1 cache invalidates unchanged file aggregates but keeps plugin usage', async (t) => {
+  const home = tempDir(t)
+  const time = new Date(2026, 10, 10, 12).getTime()
+  const today = dayKeyOf(time)
+  const relPath = 'proj/child/session.v4.jsonl'
+  const log = writeLog(home, 'child', seedLog({ id: 'child', parentSession: 'root', time }, [
+    messageEvent({ time, turn: 0, step: 0, input: 30, output: 3 }),
+    endSeed(time, { inherited: true }),
+    messageEvent({ time, turn: 1, step: 0, input: 6, output: 2 }),
+  ]))
+  const stat = fs.statSync(log)
+  const file = path.join(home, 'usage-ledger.json')
+  const plugin = { [today]: { 'checker/test': [5, 4, 0, 0], '*': [5, 4, 0, 0] } }
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    plugin,
+    files: {
+      [relPath]: { mtime: Math.trunc(stat.mtimeMs), size: stat.size, buckets: { [today]: { 'relay/gpt-x': [36, 5, 0, 0] } } },
+      'gone/session.v4.jsonl': { buckets: { [today]: { 'relay/gone': [99, 99, 0, 0] } } },
+    },
+  }))
+
+  const options = { home, file, now: () => time }
+  const ledger = createUsageLedger(options)
+  assert.deepEqual(ledger.read().ranges.total, [5, 4, 0, 0])
+  await ledger.rescan()
+  const cache = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(cache.version, 2)
+  assert.deepEqual(cache.plugin, plugin)
+  assert.deepEqual(Object.keys(cache.files), [relPath])
+  assert.deepEqual(cache.files[relPath].buckets[today]['relay/gpt-x'], [6, 2, 0, 0])
+  const reopened = createUsageLedger(options)
+  assert.deepEqual(reopened.read().ranges.total, [11, 6, 0, 0])
+})
+
+test('the ledger scans incrementally and persists its cache', async (t) => {
+  const home = tempDir(t)
   const sessions = path.join(home, 'sessions', 'proj', 'session-a')
   fs.mkdirSync(sessions, { recursive: true })
   fs.writeFileSync(
@@ -177,8 +270,8 @@ test('the ledger scans incrementally and persists its cache', async () => {
   assert.deepEqual(second.ranges.month, [14, 5, 0, 0])
 })
 
-test('plugin-attributed usage lands in the same day buckets', () => {
-  const home = tempDir()
+test('plugin-attributed usage lands in the same day buckets', async (t) => {
+  const home = tempDir(t)
   const file = path.join(home, 'usage-ledger.json')
   const ledger = createUsageLedger({ home, file, sessionsRoot: path.join(home, 'sessions'), now: () => 1_800_000_000_000 })
   ledger.notePluginUsage({
@@ -191,10 +284,52 @@ test('plugin-attributed usage lands in the same day buckets', () => {
   const snap = ledger.read({ now: () => 1_800_000_000_000 })
   assert.deepEqual(snap.ranges.month, [1000, 200, 0, 0])
   assert.equal(snap.byModel['checker/gpt-6'][0], 1000)
+  await ledger.dispose()
 })
 
-test('dispose joins the scan and prevents later persistence', async () => {
-  const home = tempDir()
+test('plugin usage persists while open without a scan or read', async (t) => {
+  const home = tempDir(t)
+  const file = path.join(home, 'usage-ledger.json')
+  const time = new Date(2026, 10, 10, 12).getTime()
+  const options = { home, file, now: () => time }
+  const ledger = createUsageLedger(options)
+  const note = () => ledger.notePluginUsage({ provider: 'checker', model: 'test', usage: { inputTokens: 10, outputTokens: 2 } })
+  note()
+  note()
+  const deadline = Date.now() + 2_000
+  while (!fs.existsSync(file) && Date.now() < deadline) await delay(20)
+  assert.ok(fs.existsSync(file), 'a plugin settlement must persist without a UI scan')
+  const reopened = createUsageLedger(options)
+  assert.deepEqual(reopened.read().byModel['checker/test'], [20, 4, 0, 0])
+  await ledger.dispose()
+})
+
+test('dispose flushes dirty plugin usage before reopen without writing the interrupted scan', async (t) => {
+  const home = tempDir(t)
+  const time = new Date(2026, 10, 10, 12).getTime()
+  writeLog(home, 'root', seedLog({ id: 'root', time }, [
+    messageEvent({ time, turn: 0, step: 0, input: 99, output: 99 }),
+  ]))
+  const file = path.join(home, 'usage-ledger.json')
+  const options = { home, file, now: () => time }
+  const ledger = createUsageLedger(options)
+  const scan = ledger.rescan()
+  ledger.notePluginUsage({ provider: 'checker', model: 'test', usage: { inputTokens: 7, outputTokens: 2 } })
+  assert.equal(fs.existsSync(file), false) // Don't let the background flush fire first.
+  const closing = ledger.dispose()
+  const alsoClosing = ledger.dispose()
+  ledger.notePluginUsage({ provider: 'checker', model: 'test', usage: { inputTokens: 20, outputTokens: 3 } })
+  await alsoClosing
+  const reopened = createUsageLedger(options)
+  assert.deepEqual(reopened.read().ranges.total, [7, 2, 0, 0])
+  assert.deepEqual(reopened.read().byModel['checker/test'], [7, 2, 0, 0])
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).files, {})
+  await closing
+  await scan
+})
+
+test('dispose joins the scan and prevents later persistence', async (t) => {
+  const home = tempDir(t)
   const sessions = path.join(home, 'sessions', 'proj', 'session-a')
   fs.mkdirSync(sessions, { recursive: true })
   fs.writeFileSync(

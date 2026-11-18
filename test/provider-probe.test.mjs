@@ -430,3 +430,64 @@ test('describeCatalog survives a probe that cannot read settings', async () => {
   assert.equal(catalog.groups[0].models[0].inputModalities.includes('image'), true)
   assert.deepEqual(catalog.providers, [])
 })
+
+test('a route change detaches an inflight sweep without assigning stale capabilities to the new route', async () => {
+  let current = descriptors()
+  const blocked = new Map()
+  const calls = []
+  const probe = createProviderProbe({
+    settings: { describe: () => current },
+    credentials: { resolve: async () => ({ value: 'sk-test' }) },
+    fetch: async (url) => {
+      calls.push(url)
+      if (url.endsWith('/api/pricing')) return { status: 403, text: async () => '{}' }
+      return new Promise((resolve) => blocked.set(url, (context_length) => resolve({
+        status: 200,
+        text: async () => JSON.stringify({ data: [{ id: 'grok-4.7', context_length }] }),
+      })))
+    },
+  })
+  const stale = probe.read()
+  await Promise.resolve()
+  current = descriptors({ baseURL: 'https://new.example/v1' })
+  probe.noteSettingsChanged()
+  assert.equal(probe.peek(), null)
+  const newest = probe.read()
+  assert.notEqual(newest, stale)
+  await Promise.resolve()
+  blocked.get('https://relay.example/v1/models')(111)
+  const staleResult = await stale
+  assert.equal(staleResult.profiles.get('relay').baseURL, 'https://new.example/v1')
+  assert.equal(staleResult.discovered.size, 0)
+  assert.deepEqual(staleResult.diagnostics, [])
+  assert.equal(probe.read(), newest, 'the old finally keeps the new inflight promise')
+  blocked.get('https://new.example/v1/models')(222)
+  const latestResult = await newest
+  assert.equal(latestResult.discovered.get('relay').get('grok-4.7').contextWindow, 222)
+  assert.equal(probe.peek(), latestResult)
+  assert.equal(calls.length, 4)
+})
+
+test('a sweep detects a routing change even before a settings notification', async () => {
+  let current = descriptors()
+  let first = true
+  const probe = createProviderProbe({
+    settings: { describe: () => current },
+    credentials: { resolve: async () => ({ value: 'sk-test' }) },
+    fetch: async (url) => {
+      if (url.endsWith('/api/pricing')) return { status: 403, text: async () => '{}' }
+      if (first) {
+        first = false
+        current = descriptors({ baseURL: 'https://new.example/v1' })
+      }
+      return { status: 200, text: async () => '{"data":[{"id":"grok-4.7"}]}' }
+    },
+  })
+  const discarded = await probe.read()
+  assert.equal(discarded.profiles.get('relay').baseURL, 'https://new.example/v1')
+  assert.equal(discarded.discovered.size, 0)
+  assert.equal(probe.peek(), null)
+  const fresh = await probe.read()
+  assert.equal(fresh.diagnostics[0].host, 'new.example')
+  assert.equal(fresh.discovered.get('relay').has('grok-4.7'), true)
+})

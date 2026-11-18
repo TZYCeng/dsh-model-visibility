@@ -5,7 +5,7 @@
  * @module client-src/pure
  */
 
-import { bucketOf, kindOf } from './format.mjs'
+import { bucketOf, keyOf, kindOf } from './format.mjs'
 
 /** Number of one bucket's token sum, guarding partial buckets. */
 export function bucketTotalOf(buckets) {
@@ -51,15 +51,22 @@ export function monthPrefixOf(time) {
  * Apply the section's filters to one catalog.
  *
  * Mirrors the settings page exactly; the composer filter is a separate,
- * simpler pass (visibility only). Inputs are the loaded groups plus the five
- * filter axes; output keeps the group objects in order with only kept models.
+ * simpler pass (visibility only). Output keeps the groups in order with only
+ * models matching all active filters.
  */
-export function computeFilteredGroups(groups, { filter = 'all', query = '', multimodalOnly = false, reasoningOnly = false, minContext = 0 } = {}) {
+export function computeFilteredGroups(groups, {
+  filter = 'all', query = '', multimodalOnly = false, reasoningOnly = false, minContext = 0,
+  visibility = 'all', hidden,
+} = {}) {
   const normalized = String(query ?? '').trim().toLowerCase()
   const filtered = []
   for (const group of groups ?? []) {
     const models = []
     for (const model of group.models ?? []) {
+      if (visibility === 'enabled' || visibility === 'disabled') {
+        const isHidden = hidden?.has(keyOf(group.id, model.id)) ?? false
+        if (isHidden !== (visibility === 'disabled')) continue
+      }
       if (filter !== 'all' && bucket(model) !== filter) continue
       if (normalized !== '') {
         const name = String(model.name ?? '').toLowerCase()

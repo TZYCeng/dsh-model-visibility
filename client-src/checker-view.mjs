@@ -52,11 +52,13 @@ function persistPick(pick) {
   }
 }
 
-export function VerifyPanel({ verify, catalog, t, canUse }) {
+export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false }) {
   const state = useSource(verify)
   const [pick, setPick] = React.useState(readPick)
   const [message, setMessage] = React.useState(null)
   const [open, setOpen] = React.useState(false)
+  // A potentially expensive full search is an opt-in for one start, not a preference.
+  const [fullScan, setFullScan] = React.useState(false)
 
   React.useEffect(() => {
     verify.load()
@@ -66,9 +68,15 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
   const route = routeOptions.find((entry) => entry.id === pick.provider) ?? null
   const progress = state.snapshot?.state
   const running = progress?.running === true
+  const pending = state.pending === true
+  const locked = running || pending
   const finished = progress?.phase === 'done' || progress?.phase === 'cancelled'
   const models = (catalog?.groups ?? [])
     .find((group) => group.id === pick.provider)?.models ?? []
+
+  React.useEffect(() => {
+    if (running || !canFullScan) setFullScan(false)
+  }, [running, canFullScan])
 
   if (!canUse) {
     return h('div', { className: 'mvp_banner' }, t('checker.hostStale'))
@@ -84,7 +92,9 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
   }
 
   const run = () => {
+    if (locked || pick.provider === '' || pick.model === '') return
     setMessage(null)
+    setFullScan(false)
     verify
       .start({
         provider: pick.provider,
@@ -92,12 +102,13 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
         writeBack: pick.writeBack,
         webSearch: pick.webSearch,
         concurrency: pick.concurrency,
+        fullScan: canFullScan && fullScan,
       })
       .catch((error) => setMessage(String(error?.message ?? error)))
   }
 
   const cancel = () => {
-    verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
+    if (!pending) verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
   }
 
   const counts = {
@@ -106,19 +117,25 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
     valid: progress?.done ?? 0,
     unknown: progress?.unknown ?? 0,
     failed: progress?.failed ?? 0,
+    skippedKnown: progress?.skippedKnown ?? 0,
     searchCalls: progress?.searchCalls ?? 0,
     fetchCalls: progress?.fetchCalls ?? 0,
     tokens: tokensSpent,
   }
-  const summary = running
-    ? t('checker.running', {
-        phase: t('checker.phase.' + (progress?.phase ?? 'verifying')),
-        ...counts,
-      })
-    : finished
-      ? t('checker.finished', counts)
-      : t('checker.idle')
+  const allSkipped = progress?.phase === 'done' && counts.total === 0 && counts.skippedKnown > 0
+  let summary = t('checker.idle')
+  if (running) {
+    summary = t('checker.running', { phase: t('checker.phase.' + (progress?.phase ?? 'verifying')), ...counts })
+  } else if (allSkipped) {
+    summary = t('checker.allSkipped', counts)
+  } else if (finished) {
+    summary = t('checker.finished', counts)
+  }
 
+  const searchBackends = ['dsh-free-search', 'host-web'].flatMap((backend) => {
+    const count = progress?.searchBackends?.[backend]
+    return Number.isFinite(count) && count > 0 ? [t('checker.searchBackend.' + backend, { count })] : []
+  })
   const activeBatches = running && Array.isArray(progress?.batches)
     ? progress.batches.filter((batch) => batch.status === 'running')
     : []
@@ -147,6 +164,7 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
           'div',
           { className: 'mvp_checkerBody' },
           h('p', { className: 'mvp_checkerHint' }, t('checker.description')),
+          canFullScan ? h('p', { className: 'mvp_checkerHint' }, t('checker.fullScanTitle')) : null,
           h(
             'div',
             { className: 'mvp_checkerForm' },
@@ -160,6 +178,7 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
                   className: 'mvp_select',
                   value: pick.provider,
                   'aria-label': t('checker.provider'),
+                  disabled: locked,
                   onChange: (event) => commit({ ...pick, provider: event.target.value, model: '' }),
                 },
                 h('option', { key: '', value: '' }, t('override.kindAuto')),
@@ -176,7 +195,7 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
                   className: 'mvp_select',
                   value: pick.model,
                   'aria-label': t('checker.model'),
-                  disabled: route === null,
+                  disabled: locked || route === null,
                   onChange: (event) => commit({ ...pick, model: event.target.value }),
                 },
                 h('option', { key: '', value: '' }, t('override.kindAuto')),
@@ -195,7 +214,7 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
                   className: 'mvp_select',
                   value: String(pick.concurrency),
                   'aria-label': t('checker.concurrency'),
-                  disabled: running,
+                  disabled: locked,
                   onChange: (event) =>
                     commit({ ...pick, concurrency: Number(event.target.value) }),
                 },
@@ -210,19 +229,33 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
               h('input', {
                 type: 'checkbox',
                 checked: pick.webSearch,
-                disabled: running,
+                disabled: locked,
                 'aria-label': t('checker.webSearch'),
                 onChange: (event) => commit({ ...pick, webSearch: event.target.checked }),
               }),
               h('span', null, t('checker.webSearch')),
             ),
+            canFullScan
+              ? h(
+                  'label',
+                  { className: 'mvp_check', title: t('checker.fullScanTitle') },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: running ? progress?.fullScan === true : fullScan,
+                    disabled: locked,
+                    'aria-label': t('checker.fullScan'),
+                    onChange: (event) => { if (!locked) setFullScan(event.target.checked) },
+                  }),
+                  h('span', null, t('checker.fullScan')),
+                )
+              : null,
             h(
               'label',
               { className: 'mvp_check', title: t('checker.writeBackTitle') },
               h('input', {
                 type: 'checkbox',
                 checked: pick.writeBack,
-                disabled: running,
+                disabled: locked,
                 'aria-label': t('checker.writeBack'),
                 onChange: (event) => commit({ ...pick, writeBack: event.target.checked }),
               }),
@@ -233,14 +266,14 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
               {
                 type: 'button',
                 className: running ? 'mvp_button' : 'mvp_button mvp_button--accent',
-                disabled: !running && (pick.provider === '' || pick.model === ''),
+                disabled: pending || (!running && (pick.provider === '' || pick.model === '')),
                 title: running ? t('checker.cancelTitle') : t('checker.startTitle'),
                 onClick: running ? cancel : run,
               },
               running ? t('checker.cancel') : t('checker.start'),
             ),
           ),
-          running || finished
+          (running || finished) && !allSkipped
             ? h(
                 'div',
                 { className: 'mvp_checkerProgress' },
@@ -274,6 +307,11 @@ export function VerifyPanel({ verify, catalog, t, canUse }) {
                   { className: 'mvp_checkerProgressText' },
                   t('checker.webCalls', counts),
                 ),
+                searchBackends.length > 0 ? h(
+                  'span',
+                  { className: 'mvp_checkerProgressText' },
+                  t('checker.searchBreakdown', { breakdown: searchBackends.join(' · ') }),
+                ) : null,
                 h(
                   'span',
                   { className: 'mvp_checkerProgressText' },

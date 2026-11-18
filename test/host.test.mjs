@@ -391,7 +391,6 @@ test('Host verify route forwards web access and defaults to read-only provider s
   const disposers = []
   const originalInject = harness.ctx.inject
   const originalFetch = globalThis.fetch
-  const written = []
   globalThis.fetch = async () => new Response('{}')
   harness.ctx.inject = (deps, callback) => originalInject(deps, scope => {
     scope.effect = fn => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose); return () => {} }
@@ -421,6 +420,23 @@ test('Host verify route forwards web access and defaults to read-only provider s
     assert.equal(progress.searchCalls, 1)
     assert.equal(progress.writeBack, false)
     assert.equal(harness.settings.calls.length, 0)
+    assert.deepEqual(progress.searchBackends, { 'host-web': 1 })
+    const verify = async (fullScan) => {
+      await harness.route.verify.fetch(new Request('http://local/api/dsh-model-visibility/verify', { method: 'POST', body: JSON.stringify({ provider: 'relay', model: 'checker', fullScan, webSearch: false }) }))
+      for (let i = 0; i < 30; i++) {
+        const { value } = await (await harness.route.verify.fetch(new Request('http://local/api/dsh-model-visibility/verify'))).json()
+        if (!value.state.running) return value.state
+        await new Promise(resolve => setImmediate(resolve))
+      }
+      assert.fail('verification did not settle')
+    }
+    const incremental = await verify(false)
+    assert.equal(incremental.skippedKnown, 1)
+    assert.equal(incremental.total, 0)
+    const full = await verify(true)
+    assert.equal(full.fullScan, true)
+    assert.equal(full.skippedKnown, 0)
+    assert.equal(full.total, 1)
   } finally {
     for (const dispose of disposers.reverse()) await dispose()
     globalThis.fetch = originalFetch

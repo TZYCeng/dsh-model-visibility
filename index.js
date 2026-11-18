@@ -30,6 +30,7 @@ import { createModelInfoService } from './lib/model-info.js'
 import { createLearnedCatalog } from './lib/learned-catalog.js'
 import { createOverrideStore } from './lib/model-overrides.js'
 import { createCapabilityVerifier } from './lib/check-catalog.js'
+import { createCheckerSearchBridge } from './lib/checker-search-bridge.js'
 import { toModelListCsv, toUsageCsv } from './lib/export-csv.js'
 import { createUsageLedger } from './lib/usage-ledger.js'
 import { createProviderProbe, readProviderProfiles } from './lib/provider-probe.js'
@@ -255,7 +256,7 @@ export function apply(ctx, config) {
       (typeof scope.get === 'function' ? scope.get('learned') : undefined) ?? learnedFor()
 
     const service = createModelInfoService(scope.llm, {
-      enrichment: probe === null ? undefined : ({ fresh }) => probe.read({ fresh }),
+      enrichment: probe === null ? () => ({ profiles: profilesForGate() }) : ({ fresh }) => probe.read({ fresh }),
       overrides,
       learned: learnedService,
       // Synchronous evidence for the request-side image gate: provider profiles
@@ -287,10 +288,6 @@ export function apply(ctx, config) {
     // incrementally in a background pass, the check sweep records its own
     // spend into the same buckets.
     const usageLedger = createUsageLedger({ logger })
-    scope.effect(
-      () => () => usageLedger.dispose(),
-      'model-visibility: usage ledger',
-    )
     let lastRescanAt = -Infinity
     const nowMs = () => Date.now()
     const maybeRescan = () => {
@@ -307,6 +304,10 @@ export function apply(ctx, config) {
       llm: scope.llm,
       settings,
       web: typeof scope.get === 'function' ? scope.get('web') : undefined,
+      searchBridge: createCheckerSearchBridge({
+        getTools: () => scope.get?.('tools'),
+        getSettings: () => scope.get?.('settings'),
+      }),
       learned: learnedService,
       ledger: usageLedger,
       logger,
@@ -318,8 +319,14 @@ export function apply(ctx, config) {
       },
     })
     scope.effect(
-      () => () => verifier.dispose(),
-      'model-visibility: capability verifier',
+      () => async () => {
+        try {
+          await verifier.dispose()
+        } finally {
+          await usageLedger.dispose()
+        }
+      },
+      'model-visibility: verifier and usage ledger',
     )
     /** Answer with JSON; the route is diagnostics-friendly on purpose. */
     const json = (value, status = 200) =>
@@ -609,7 +616,7 @@ export function apply(ctx, config) {
             const concurrency = Number.isFinite(body?.concurrency) ? body.concurrency : undefined
             if (!verifier.isRunning()) {
               verifier
-                .start({ checker: { provider, model }, writeBack: body?.writeBack === true, webSearch: body?.webSearch !== false, concurrency })
+                .start({ checker: { provider, model }, writeBack: body?.writeBack === true, webSearch: body?.webSearch !== false, fullScan: body?.fullScan === true, concurrency })
                 .then(() => {
                   // Learned facts (and possibly provider settings) changed.
                   service.invalidate()

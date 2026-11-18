@@ -418,8 +418,9 @@ window.__ModuleLoader__.load({
      */
     function createVerifyApi() {
       const listeners = new Set()
-      let state = { status: 'idle', snapshot: null, error: null }
+      let state = { status: 'idle', snapshot: null, error: null, pending: false }
       let inflight = null
+      let generation = 0
       let timer = null
       /** Cadence the armed timer currently runs at, so rearm can compare. */
       let timerMs = null
@@ -430,8 +431,11 @@ window.__ModuleLoader__.load({
       }
 
       const read = async () => {
+        // A GET sent while a POST is pending can still capture pre-POST state.
+        if (state.pending) return
         if (inflight !== null) return inflight
-        const run = (async () => {
+        const token = generation
+        const run = Promise.resolve().then(async () => {
           try {
             const response = await fetch(API + '/verify', {
               headers: { accept: 'application/json' },
@@ -443,13 +447,13 @@ window.__ModuleLoader__.load({
             const body = await response.json()
             const value = body && body.ok === true ? body.value : null
             if (value === null || typeof value !== 'object') throw new Error('malformed verify snapshot')
-            publish({ status: 'ready', snapshot: value, error: null })
+            if (token === generation) publish({ status: 'ready', snapshot: value, error: null, pending: false })
           } catch (error) {
-            publish({ ...state, status: 'error', error: failureText(error) })
+            if (token === generation) publish({ ...state, status: 'error', error: failureText(error) })
           } finally {
-            if (inflight === run) inflight = null
+            if (token === generation) inflight = null
           }
-        })()
+        })
         inflight = run
         return run
       }
@@ -475,11 +479,28 @@ window.__ModuleLoader__.load({
           throw new Error('HTTP ' + response.status + detail)
         }
         const body = await response.json()
-        if (body?.ok === true) {
-          publish({ status: 'ready', snapshot: body.value, error: null })
-          return body.value
-        }
+        if (body?.ok === true && body.value !== null && typeof body.value === 'object') return body.value
+        if (body?.ok === true) throw new Error('malformed verify snapshot')
         throw new Error(failureText(body?.error))
+      }
+
+      const mutate = async (payload) => {
+        if (state.pending) throw new Error('A verification request is already pending.')
+        // Drop the old GET without waiting for it. Its result (or error) no longer
+        // describes the state this POST is changing.
+        generation += 1
+        inflight = null
+        publish({ ...state, error: null, pending: true })
+        try {
+          const value = await post(payload)
+          publish({ status: 'ready', snapshot: value, error: null, pending: false })
+          return value
+        } catch (error) {
+          publish({ ...state, pending: false })
+          throw error
+        } finally {
+          rearm()
+        }
       }
 
       const SWEEP_POLL_MS = 2_000
@@ -539,29 +560,9 @@ window.__ModuleLoader__.load({
             },
           )
         },
-        start(payload) {
-          return post(payload).then(
-            (value) => {
-              rearm()
-              return value
-            },
-            (error) => {
-              rearm()
-              throw error
-            },
-          )
-        },
+        start: mutate,
         cancel() {
-          return post({ cancel: true }).then(
-            (value) => {
-              rearm()
-              return value
-            },
-            (error) => {
-              rearm()
-              throw error
-            },
-          )
+          return mutate({ cancel: true })
         },
       }
     }
@@ -629,11 +630,13 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function VerifyPanel({ verify, catalog, t, canUse }) {
+    function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false }) {
       const state = useSource(verify)
       const [pick, setPick] = React.useState(readPick)
       const [message, setMessage] = React.useState(null)
       const [open, setOpen] = React.useState(false)
+      // A potentially expensive full search is an opt-in for one start, not a preference.
+      const [fullScan, setFullScan] = React.useState(false)
 
       React.useEffect(() => {
         verify.load()
@@ -643,9 +646,15 @@ window.__ModuleLoader__.load({
       const route = routeOptions.find((entry) => entry.id === pick.provider) ?? null
       const progress = state.snapshot?.state
       const running = progress?.running === true
+      const pending = state.pending === true
+      const locked = running || pending
       const finished = progress?.phase === 'done' || progress?.phase === 'cancelled'
       const models = (catalog?.groups ?? [])
         .find((group) => group.id === pick.provider)?.models ?? []
+
+      React.useEffect(() => {
+        if (running || !canFullScan) setFullScan(false)
+      }, [running, canFullScan])
 
       if (!canUse) {
         return h('div', { className: 'mvp_banner' }, t('checker.hostStale'))
@@ -661,7 +670,9 @@ window.__ModuleLoader__.load({
       }
 
       const run = () => {
+        if (locked || pick.provider === '' || pick.model === '') return
         setMessage(null)
+        setFullScan(false)
         verify
           .start({
             provider: pick.provider,
@@ -669,12 +680,13 @@ window.__ModuleLoader__.load({
             writeBack: pick.writeBack,
             webSearch: pick.webSearch,
             concurrency: pick.concurrency,
+            fullScan: canFullScan && fullScan,
           })
           .catch((error) => setMessage(String(error?.message ?? error)))
       }
 
       const cancel = () => {
-        verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
+        if (!pending) verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
       }
 
       const counts = {
@@ -683,19 +695,25 @@ window.__ModuleLoader__.load({
         valid: progress?.done ?? 0,
         unknown: progress?.unknown ?? 0,
         failed: progress?.failed ?? 0,
+        skippedKnown: progress?.skippedKnown ?? 0,
         searchCalls: progress?.searchCalls ?? 0,
         fetchCalls: progress?.fetchCalls ?? 0,
         tokens: tokensSpent,
       }
-      const summary = running
-        ? t('checker.running', {
-            phase: t('checker.phase.' + (progress?.phase ?? 'verifying')),
-            ...counts,
-          })
-        : finished
-          ? t('checker.finished', counts)
-          : t('checker.idle')
+      const allSkipped = progress?.phase === 'done' && counts.total === 0 && counts.skippedKnown > 0
+      let summary = t('checker.idle')
+      if (running) {
+        summary = t('checker.running', { phase: t('checker.phase.' + (progress?.phase ?? 'verifying')), ...counts })
+      } else if (allSkipped) {
+        summary = t('checker.allSkipped', counts)
+      } else if (finished) {
+        summary = t('checker.finished', counts)
+      }
 
+      const searchBackends = ['dsh-free-search', 'host-web'].flatMap((backend) => {
+        const count = progress?.searchBackends?.[backend]
+        return Number.isFinite(count) && count > 0 ? [t('checker.searchBackend.' + backend, { count })] : []
+      })
       const activeBatches = running && Array.isArray(progress?.batches)
         ? progress.batches.filter((batch) => batch.status === 'running')
         : []
@@ -724,6 +742,7 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'mvp_checkerBody' },
               h('p', { className: 'mvp_checkerHint' }, t('checker.description')),
+              canFullScan ? h('p', { className: 'mvp_checkerHint' }, t('checker.fullScanTitle')) : null,
               h(
                 'div',
                 { className: 'mvp_checkerForm' },
@@ -737,6 +756,7 @@ window.__ModuleLoader__.load({
                       className: 'mvp_select',
                       value: pick.provider,
                       'aria-label': t('checker.provider'),
+                      disabled: locked,
                       onChange: (event) => commit({ ...pick, provider: event.target.value, model: '' }),
                     },
                     h('option', { key: '', value: '' }, t('override.kindAuto')),
@@ -753,7 +773,7 @@ window.__ModuleLoader__.load({
                       className: 'mvp_select',
                       value: pick.model,
                       'aria-label': t('checker.model'),
-                      disabled: route === null,
+                      disabled: locked || route === null,
                       onChange: (event) => commit({ ...pick, model: event.target.value }),
                     },
                     h('option', { key: '', value: '' }, t('override.kindAuto')),
@@ -772,7 +792,7 @@ window.__ModuleLoader__.load({
                       className: 'mvp_select',
                       value: String(pick.concurrency),
                       'aria-label': t('checker.concurrency'),
-                      disabled: running,
+                      disabled: locked,
                       onChange: (event) =>
                         commit({ ...pick, concurrency: Number(event.target.value) }),
                     },
@@ -787,19 +807,33 @@ window.__ModuleLoader__.load({
                   h('input', {
                     type: 'checkbox',
                     checked: pick.webSearch,
-                    disabled: running,
+                    disabled: locked,
                     'aria-label': t('checker.webSearch'),
                     onChange: (event) => commit({ ...pick, webSearch: event.target.checked }),
                   }),
                   h('span', null, t('checker.webSearch')),
                 ),
+                canFullScan
+                  ? h(
+                      'label',
+                      { className: 'mvp_check', title: t('checker.fullScanTitle') },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: running ? progress?.fullScan === true : fullScan,
+                        disabled: locked,
+                        'aria-label': t('checker.fullScan'),
+                        onChange: (event) => { if (!locked) setFullScan(event.target.checked) },
+                      }),
+                      h('span', null, t('checker.fullScan')),
+                    )
+                  : null,
                 h(
                   'label',
                   { className: 'mvp_check', title: t('checker.writeBackTitle') },
                   h('input', {
                     type: 'checkbox',
                     checked: pick.writeBack,
-                    disabled: running,
+                    disabled: locked,
                     'aria-label': t('checker.writeBack'),
                     onChange: (event) => commit({ ...pick, writeBack: event.target.checked }),
                   }),
@@ -810,14 +844,14 @@ window.__ModuleLoader__.load({
                   {
                     type: 'button',
                     className: running ? 'mvp_button' : 'mvp_button mvp_button--accent',
-                    disabled: !running && (pick.provider === '' || pick.model === ''),
+                    disabled: pending || (!running && (pick.provider === '' || pick.model === '')),
                     title: running ? t('checker.cancelTitle') : t('checker.startTitle'),
                     onClick: running ? cancel : run,
                   },
                   running ? t('checker.cancel') : t('checker.start'),
                 ),
               ),
-              running || finished
+              (running || finished) && !allSkipped
                 ? h(
                     'div',
                     { className: 'mvp_checkerProgress' },
@@ -851,6 +885,11 @@ window.__ModuleLoader__.load({
                       { className: 'mvp_checkerProgressText' },
                       t('checker.webCalls', counts),
                     ),
+                    searchBackends.length > 0 ? h(
+                      'span',
+                      { className: 'mvp_checkerProgressText' },
+                      t('checker.searchBreakdown', { breakdown: searchBackends.join(' · ') }),
+                    ) : null,
                     h(
                       'span',
                       { className: 'mvp_checkerProgressText' },
@@ -1344,7 +1383,8 @@ window.__ModuleLoader__.load({
           '关闭的模型不会出现在聊天输入框的模型下拉列表中；这里的改动立即生效，之后仍可随时重新打开。每个模型标注真实能力：适配器声明优先，其次读中转站模型列表，最后用校验结果或模型名补全。',
         'page.about': '说明',
         'page.aboutTitle': '展开标签含义、来源与颜色说明',
-        'page.summary': '已显示 {visible} / {total}',
+        'page.summary': '聊天列表已启用 {visible} / {total}',
+        'page.matchCount': '匹配 {count} 个模型',
         'page.hiddenSummary': '已关闭 {count}',
         'page.kindSummary': '生图/生视频 {count}',
         'page.loading': '正在加载模型列表…',
@@ -1364,7 +1404,8 @@ window.__ModuleLoader__.load({
         'page.expandGroups': '展开全部',
         'page.collapseGroupsTitle': '只保留分组标题，方便跳到其他分组',
         'page.expandGroupsTitle': '展开所有被折叠的分组',
-        'page.showAll': '全部显示',
+        'page.showAll': '启用所有模型',
+        'page.showAllTitle': '启用整个列表中的模型，包括不符合当前筛选的模型',
         'page.legend':
           '标签：推理 = 可调推理等级；上下文 = 输入窗口；多模态 = 可输入图像。实线来自适配器、中转站或厂商文档，虚线来自联网校验或模型名推断。生图 / 生视频 / 嵌入等只标类型，不显示思考强度与文本标签。',
         'page.metaFallback':
@@ -1400,7 +1441,7 @@ window.__ModuleLoader__.load({
         'checker.provider': '校验员提供商',
         'checker.model': '校验员模型',
         'checker.start': '开始校验',
-        'checker.startTitle': '在宿主侧后台跑一轮全模型校验',
+        'checker.startTitle': '在宿主侧后台运行校验',
         'checker.cancel': '取消',
         'checker.cancelTitle': '中止正在进行的校验',
         'checker.writeBack': '同时写入提供商配置',
@@ -1408,11 +1449,17 @@ window.__ModuleLoader__.load({
           '开启：判定到的 input / contextWindow / 推理档位直接写进各提供商该模型条目（learned.json 只留写不进去的字段）；关闭：只更新本页与快照。',
         'checker.webSearch': '允许搜索与网页读取',
         'checker.webSearchTitle': '默认开启。允许校验员调用搜索与网页读取，可能消耗联网服务额度及模型 Token；联网不可用会报告错误。关闭后仅依据公开目录与校验员已有知识核对。',
+        'checker.fullScan': '全量搜索',
+        'checker.fullScanTitle': '默认关闭：跳过已有校验记录的模型。开启后本轮重新校验所有符合条件的模型，可能消耗更多配额；仅本次生效，不会开启联网权限。',
+        'checker.searchBackend.dsh-free-search': 'DSH 免费搜索 {count} 次',
+        'checker.searchBackend.host-web': '宿主网页搜索 {count} 次',
+        'checker.allSkipped': '没有新模型需要校验 · 跳过已知 {skippedKnown}',
+        'checker.searchBreakdown': '按搜索来源：{breakdown}',
         'checker.idle': '未运行',
-        'checker.running': '进行中{phase} · 已处理 {processed}/{total} · 有效 {valid} / 未知 {unknown} / 失败 {failed} · 搜索 {searchCalls} / 读取 {fetchCalls} · 已耗 {tokens} Token',
-        'checker.finished': '已结束 · 已处理 {processed}/{total} · 有效 {valid} / 未知 {unknown} / 失败 {failed} · 搜索 {searchCalls} / 读取 {fetchCalls} · 耗 {tokens} Token',
+        'checker.running': '进行中{phase} · 已处理 {processed}/{total} · 有效 {valid} / 未知 {unknown} / 失败 {failed} · 跳过已知 {skippedKnown} · 搜索 {searchCalls} / 读取 {fetchCalls} · 已耗 {tokens} Token',
+        'checker.finished': '已结束 · 已处理 {processed}/{total} · 有效 {valid} / 未知 {unknown} / 失败 {failed} · 跳过已知 {skippedKnown} · 搜索 {searchCalls} / 读取 {fetchCalls} · 耗 {tokens} Token',
         'checker.progress': '{processed}/{total} 已处理 · 校验本身消耗 {tokens} Token',
-        'checker.outcomes': '有效 {valid} · 未知 {unknown} · 失败 {failed}',
+        'checker.outcomes': '有效 {valid} · 未知 {unknown} · 失败 {failed} · 跳过已知 {skippedKnown}',
         'checker.webCalls': '搜索 {searchCalls} 次 · 网页读取 {fetchCalls} 次',
         'checker.activeBatches': '活跃批次',
         'checker.activeMore': '另有 {count} 个活跃批次',
@@ -1465,10 +1512,15 @@ window.__ModuleLoader__.load({
         'page.filter.image': '生图',
         'page.filter.video': '生视频',
         'page.filter.other': '其它',
-        'group.showAll': '全组显示',
-        'group.hideAll': '全组隐藏',
-        'group.showFiltered': '显示结果',
-        'group.hideFiltered': '隐藏结果',
+        'page.visibility.label': '显示状态筛选',
+        'page.visibility.all': '所有状态',
+        'page.visibility.enabled': '已启用',
+        'page.visibility.disabled': '已禁用',
+        'group.showAll': '启用全组',
+        'group.enabledCount': '全组已启用 / 模型总数',
+        'group.hideAll': '禁用全组',
+        'group.showFiltered': '启用匹配模型',
+        'group.hideFiltered': '禁用匹配模型',
         'group.collapseNamed': '折叠 {name} 分组',
         'group.expandNamed': '展开 {name} 分组',
         'group.probeOk': '{models} 个模型 · {caps} 带能力',
@@ -1583,7 +1635,8 @@ window.__ModuleLoader__.load({
           'Models turned off here disappear from the chat composer model list. Changes apply immediately and can be turned back on at any time. Every model shows its real capabilities: adapter declarations first, then the relay model list, then verification results or the model name.',
         'page.about': 'About',
         'page.aboutTitle': 'Show what the tags, sources and colours mean',
-        'page.summary': 'Showing {visible} of {total}',
+        'page.summary': 'Enabled in the composer: {visible} of {total}',
+        'page.matchCount': '{count} matching models',
         'page.hiddenSummary': '{count} hidden',
         'page.kindSummary': '{count} image/video',
         'page.loading': 'Loading model list…',
@@ -1603,7 +1656,8 @@ window.__ModuleLoader__.load({
         'page.expandGroups': 'Expand all',
         'page.collapseGroupsTitle': 'Keep only group headers so other groups are easy to reach',
         'page.expandGroupsTitle': 'Expand every collapsed group',
-        'page.showAll': 'Show all',
+        'page.showAll': 'Enable all models',
+        'page.showAllTitle': 'Enable every model in the catalog, even those outside the current filters',
         'page.legend':
           'Tags: Reasoning = adjustable levels; Context = input window; Multimodal = accepts images. Solid tags come from the adapter, the relay or vendor documentation; dashed tags come from online verification or the model name. Image, video, embedding and other models show only their kind.',
         'page.metaFallback':
@@ -1647,11 +1701,17 @@ window.__ModuleLoader__.load({
           'On: the judged input / contextWindow / efforts are written into each provider entry (learned.json keeps only what cannot be mapped). Off: only this page and the snapshot update.',
         'checker.webSearch': 'Allow search and web-page reads',
         'checker.webSearchTitle': 'On by default. Let the checker search and read web pages; this may consume web-service quota and model tokens. Unavailable web access is reported as an error. When off, verification uses public catalogs and the checker’s existing knowledge.',
+        'checker.fullScan': 'Full search',
+        'checker.fullScanTitle': 'Off by default: skip models with an existing verification record. Turn on to recheck every eligible model for this run only; this may use more quota and does not enable web access.',
+        'checker.searchBackend.dsh-free-search': '{count} DSH Free Search calls',
+        'checker.searchBackend.host-web': '{count} Host web search calls',
+        'checker.allSkipped': 'No new models to verify · {skippedKnown} known skipped',
+        'checker.searchBreakdown': 'Search breakdown: {breakdown}',
         'checker.idle': 'not run yet',
-        'checker.running': 'running{phase} · {processed}/{total} processed · {valid} valid / {unknown} unknown / {failed} failed · {searchCalls} searches / {fetchCalls} reads · {tokens} tokens spent',
-        'checker.finished': 'ended · {processed}/{total} processed · {valid} valid / {unknown} unknown / {failed} failed · {searchCalls} searches / {fetchCalls} reads · {tokens} tokens spent',
+        'checker.running': 'running{phase} · {processed}/{total} processed · {valid} valid / {unknown} unknown / {failed} failed · {skippedKnown} known skipped · {searchCalls} searches / {fetchCalls} reads · {tokens} tokens spent',
+        'checker.finished': 'ended · {processed}/{total} processed · {valid} valid / {unknown} unknown / {failed} failed · {skippedKnown} known skipped · {searchCalls} searches / {fetchCalls} reads · {tokens} tokens spent',
         'checker.progress': '{processed}/{total} processed · checker spent {tokens} tokens',
-        'checker.outcomes': '{valid} valid · {unknown} unknown · {failed} failed',
+        'checker.outcomes': '{valid} valid · {unknown} unknown · {failed} failed · {skippedKnown} known skipped',
         'checker.webCalls': '{searchCalls} searches · {fetchCalls} web-page reads',
         'checker.activeBatches': 'Active batches',
         'checker.activeMore': '{count} more active batches',
@@ -1706,10 +1766,15 @@ window.__ModuleLoader__.load({
         'page.filter.image': 'Image',
         'page.filter.video': 'Video',
         'page.filter.other': 'Other',
-        'group.showAll': 'Show all',
-        'group.hideAll': 'Hide all',
-        'group.showFiltered': 'Show results',
-        'group.hideFiltered': 'Hide results',
+        'page.visibility.label': 'Filter by visibility',
+        'page.visibility.all': 'Any visibility',
+        'page.visibility.enabled': 'Enabled',
+        'page.visibility.disabled': 'Disabled',
+        'group.showAll': 'Enable group',
+        'group.enabledCount': 'Enabled / total in this group',
+        'group.hideAll': 'Disable group',
+        'group.showFiltered': 'Enable matching models',
+        'group.hideFiltered': 'Disable matching models',
         'group.collapseNamed': 'Collapse the {name} group',
         'group.expandNamed': 'Expand the {name} group',
         'group.probeOk': '{models} models · {caps} with caps',
@@ -2352,7 +2417,7 @@ window.__ModuleLoader__.load({
      * @module client-src/pure
      */
 
-    const { bucketOf, kindOf } = require("format")
+    const { bucketOf, keyOf, kindOf } = require("format")
 
     /** Number of one bucket's token sum, guarding partial buckets. */
     function bucketTotalOf(buckets) {
@@ -2398,15 +2463,22 @@ window.__ModuleLoader__.load({
      * Apply the section's filters to one catalog.
      *
      * Mirrors the settings page exactly; the composer filter is a separate,
-     * simpler pass (visibility only). Inputs are the loaded groups plus the five
-     * filter axes; output keeps the group objects in order with only kept models.
+     * simpler pass (visibility only). Output keeps the groups in order with only
+     * models matching all active filters.
      */
-    function computeFilteredGroups(groups, { filter = 'all', query = '', multimodalOnly = false, reasoningOnly = false, minContext = 0 } = {}) {
+    function computeFilteredGroups(groups, {
+      filter = 'all', query = '', multimodalOnly = false, reasoningOnly = false, minContext = 0,
+      visibility = 'all', hidden,
+    } = {}) {
       const normalized = String(query ?? '').trim().toLowerCase()
       const filtered = []
       for (const group of groups ?? []) {
         const models = []
         for (const model of group.models ?? []) {
+          if (visibility === 'enabled' || visibility === 'disabled') {
+            const isHidden = hidden?.has(keyOf(group.id, model.id)) ?? false
+            if (isHidden !== (visibility === 'disabled')) continue
+          }
           if (filter !== 'all' && bucket(model) !== filter) continue
           if (normalized !== '') {
             const name = String(model.name ?? '').toLowerCase()
@@ -2594,13 +2666,18 @@ window.__ModuleLoader__.load({
         const allKinds = countKinds(groups.flatMap((group) => group.models || []))
         const generationCount = allKinds.image + allKinds.video
         const [filter, setFilter] = React.useState('all')
+        const [visibility, setVisibility] = React.useState('all')
         const [query, setQuery] = React.useState('')
         const [multimodalOnly, setMultimodalOnly] = React.useState(false)
         const [reasoningOnly, setReasoningOnly] = React.useState(false)
         const [minContext, setMinContext] = React.useState(0)
         const normalizedQuery = query.trim().toLowerCase()
+        const hasActiveFilters =
+          filter !== 'all' || visibility !== 'all' || normalizedQuery !== '' || multimodalOnly || reasoningOnly || minContext > 0
         const filteredGroups = computeFilteredGroups(groups, {
           filter,
+          visibility,
+          hidden,
           query: normalizedQuery,
           multimodalOnly,
           reasoningOnly,
@@ -2751,7 +2828,7 @@ window.__ModuleLoader__.load({
                   },
                   h('span', { className: 'mvp_chevron' }, collapsedNow ? '▸' : '▾'),
                   h('span', { className: 'mvp_groupName' }, groupName),
-                  h('span', { className: 'mvp_groupCount' }, shown + '/' + allGroupModels.length),
+                  h('span', { className: 'mvp_groupCount', title: t('group.enabledCount') }, shown + '/' + allGroupModels.length),
                   kindParts.length > 0
                     ? h('span', { className: 'mvp_groupCap' }, kindNodes)
                     : null,
@@ -2775,12 +2852,8 @@ window.__ModuleLoader__.load({
                     onClick: () => setGroup(group, models, !allShown),
                   },
                   allShown
-                    ? filter === 'all'
-                      ? t('group.hideAll')
-                      : t('group.hideFiltered')
-                    : filter === 'all'
-                      ? t('group.showAll')
-                      : t('group.showFiltered'),
+                    ? t(hasActiveFilters ? 'group.hideFiltered' : 'group.hideAll')
+                    : t(hasActiveFilters ? 'group.showFiltered' : 'group.showAll'),
                 ),
               ),
               collapsedNow
@@ -2928,8 +3001,6 @@ window.__ModuleLoader__.load({
           ['video', t('page.filter.video'), allKinds.video],
           ['other', t('page.filter.other'), allKinds.other],
         ]
-        const hasActiveFilters =
-          filter !== 'all' || normalizedQuery !== '' || multimodalOnly || reasoningOnly || minContext > 0
         // A relay that answered with a diagnostic is worth surfacing next to the
         // group, but only failed routes belong in the page-level warning list.
         const failedRoutes = providerList.filter(
@@ -2956,6 +3027,9 @@ window.__ModuleLoader__.load({
               { className: 'mvp_headMain' },
               h('h2', { className: 'mvp_title' }, t('page.title')),
               h('span', { className: 'mvp_summary' }, summaryText),
+              hasActiveFilters && total > 0
+                ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.matchCount', { count: countModels(filteredGroups) }))
+                : null,
               hiddenCount > 0
                 ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.hiddenSummary', { count: hiddenCount }))
                 : null,
@@ -3041,6 +3115,19 @@ window.__ModuleLoader__.load({
               ),
             ),
             h(
+              'select',
+              {
+                className: 'mvp_contextSelect',
+                value: visibility,
+                'aria-label': t('page.visibility.label'),
+                title: t('page.visibility.label'),
+                onChange: (event) => setVisibility(event.target.value),
+              },
+              ['all', 'enabled', 'disabled'].map((value) =>
+                h('option', { key: value, value }, t('page.visibility.' + value)),
+              ),
+            ),
+            h(
               'div',
               { className: 'mvp_filterGroup' },
               h(
@@ -3092,6 +3179,7 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'mvp_button mvp_button--quiet',
                   disabled: disabled || hiddenCount === 0,
+                  title: t('page.showAllTitle'),
                   onClick: () => commit(new Set()),
                 },
                 t('page.showAll'),
@@ -3194,7 +3282,13 @@ window.__ModuleLoader__.load({
             catalogNote !== null ? h('span', { className: 'mvp_footerItem' }, catalogNote) : null,
           ),
           providerNote !== null ? h('div', { className: 'mvp_note' }, providerNote) : null,
-          h(VerifyPanel, { verify, catalog: state, t, canUse: canVerify }),
+          h(VerifyPanel, {
+            verify,
+            catalog: state,
+            t,
+            canUse: canVerify,
+            canFullScan: canVerify && hostFeatures.includes('verifyFullScan'),
+          }),
         )
       }
     }

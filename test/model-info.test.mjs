@@ -379,3 +379,23 @@ test('the image-input gate honours manual image modalities', () => {
   assert.equal(manual.reason, 'image')
   assert.equal(manual.record.sources.modalities, 'manual')
 })
+
+test('explicit provider reasoning off outranks the adapter, relay, and learned ladder', async () => {
+  const model = { id: 'acme-large', name: 'Acme Large' }
+  const profile = { models: new Map([[model.id, { ...model, reasoningEfforts: false }]]) }
+  const discovered = new Map([[model.id, { ...model, reasoning: true }]])
+  const learned = { reasoning: true, reasoningEfforts: FULL_INFO.reasoning.efforts }
+  for (const [info, relay] of [[FULL_INFO, discovered], [undefined, discovered], [undefined, undefined]]) {
+    const llm = { resolveModelInfo: async () => info }
+    const record = await describeModel(llm, 'acme', model, { profile, discovered: relay, learned })
+    assert.equal(record.reasoning, undefined)
+    assert.equal(record.reasoningSupported, false)
+    assert.equal(record.sources.reasoning, 'config')
+  }
+  const manual = await describeModel({ resolveModelInfo: async () => FULL_INFO }, 'acme', model, {
+    profile,
+    override: { efforts: [{ id: 'custom', name: 'Custom' }], defaultEffort: 'custom' },
+  })
+  assert.equal(manual.reasoning.defaultEffort, 'custom')
+  assert.equal(manual.sources.reasoning, 'manual')
+})

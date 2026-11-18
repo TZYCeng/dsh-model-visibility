@@ -59,7 +59,7 @@ test('modelIdVariants falls back through resolution and compact forms', () => {
 })
 
 test('the learned store resolves every alias spelling of one id', () => {
-  const store = createLearnedCatalog({ file: unreachable() })
+  const store = createLearnedCatalog({ file: path.join(SANDBOX_HOME, 'alias-example.json') })
   store.upsertEntries([
     {
       id: 'grok-4.7',
@@ -80,12 +80,6 @@ test('the learned store resolves every alias spelling of one id', () => {
   assert.equal(grok.contextWindow, 500000)
   assert.equal(store.get('totally-unknown-model-xyz'), undefined)
 })
-
-/** A broken path forces an in-memory store the mtime memoizer never reloads. */
-function unreachable() {
-  if (process.platform === 'win32') return 'C:\\<unreachable>\\learned.json'
-  return '/<unreachable>/learned.json'
-}
 
 test('inferModelKind recognizes generation and infrastructure models', () => {
   assert.equal(inferModelKind('gpt-image-2.5-flare'), 'image')

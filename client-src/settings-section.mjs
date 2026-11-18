@@ -79,13 +79,18 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const allKinds = countKinds(groups.flatMap((group) => group.models || []))
     const generationCount = allKinds.image + allKinds.video
     const [filter, setFilter] = React.useState('all')
+    const [visibility, setVisibility] = React.useState('all')
     const [query, setQuery] = React.useState('')
     const [multimodalOnly, setMultimodalOnly] = React.useState(false)
     const [reasoningOnly, setReasoningOnly] = React.useState(false)
     const [minContext, setMinContext] = React.useState(0)
     const normalizedQuery = query.trim().toLowerCase()
+    const hasActiveFilters =
+      filter !== 'all' || visibility !== 'all' || normalizedQuery !== '' || multimodalOnly || reasoningOnly || minContext > 0
     const filteredGroups = computeFilteredGroups(groups, {
       filter,
+      visibility,
+      hidden,
       query: normalizedQuery,
       multimodalOnly,
       reasoningOnly,
@@ -236,7 +241,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
               },
               h('span', { className: 'mvp_chevron' }, collapsedNow ? '▸' : '▾'),
               h('span', { className: 'mvp_groupName' }, groupName),
-              h('span', { className: 'mvp_groupCount' }, shown + '/' + allGroupModels.length),
+              h('span', { className: 'mvp_groupCount', title: t('group.enabledCount') }, shown + '/' + allGroupModels.length),
               kindParts.length > 0
                 ? h('span', { className: 'mvp_groupCap' }, kindNodes)
                 : null,
@@ -260,12 +265,8 @@ function makeSection(form, catalog, overrides, usage, verify) {
                 onClick: () => setGroup(group, models, !allShown),
               },
               allShown
-                ? filter === 'all'
-                  ? t('group.hideAll')
-                  : t('group.hideFiltered')
-                : filter === 'all'
-                  ? t('group.showAll')
-                  : t('group.showFiltered'),
+                ? t(hasActiveFilters ? 'group.hideFiltered' : 'group.hideAll')
+                : t(hasActiveFilters ? 'group.showFiltered' : 'group.showAll'),
             ),
           ),
           collapsedNow
@@ -413,8 +414,6 @@ function makeSection(form, catalog, overrides, usage, verify) {
       ['video', t('page.filter.video'), allKinds.video],
       ['other', t('page.filter.other'), allKinds.other],
     ]
-    const hasActiveFilters =
-      filter !== 'all' || normalizedQuery !== '' || multimodalOnly || reasoningOnly || minContext > 0
     // A relay that answered with a diagnostic is worth surfacing next to the
     // group, but only failed routes belong in the page-level warning list.
     const failedRoutes = providerList.filter(
@@ -441,6 +440,9 @@ function makeSection(form, catalog, overrides, usage, verify) {
           { className: 'mvp_headMain' },
           h('h2', { className: 'mvp_title' }, t('page.title')),
           h('span', { className: 'mvp_summary' }, summaryText),
+          hasActiveFilters && total > 0
+            ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.matchCount', { count: countModels(filteredGroups) }))
+            : null,
           hiddenCount > 0
             ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.hiddenSummary', { count: hiddenCount }))
             : null,
@@ -526,6 +528,19 @@ function makeSection(form, catalog, overrides, usage, verify) {
           ),
         ),
         h(
+          'select',
+          {
+            className: 'mvp_contextSelect',
+            value: visibility,
+            'aria-label': t('page.visibility.label'),
+            title: t('page.visibility.label'),
+            onChange: (event) => setVisibility(event.target.value),
+          },
+          ['all', 'enabled', 'disabled'].map((value) =>
+            h('option', { key: value, value }, t('page.visibility.' + value)),
+          ),
+        ),
+        h(
           'div',
           { className: 'mvp_filterGroup' },
           h(
@@ -577,6 +592,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
               type: 'button',
               className: 'mvp_button mvp_button--quiet',
               disabled: disabled || hiddenCount === 0,
+              title: t('page.showAllTitle'),
               onClick: () => commit(new Set()),
             },
             t('page.showAll'),
@@ -679,7 +695,13 @@ function makeSection(form, catalog, overrides, usage, verify) {
         catalogNote !== null ? h('span', { className: 'mvp_footerItem' }, catalogNote) : null,
       ),
       providerNote !== null ? h('div', { className: 'mvp_note' }, providerNote) : null,
-      h(VerifyPanel, { verify, catalog: state, t, canUse: canVerify }),
+      h(VerifyPanel, {
+        verify,
+        catalog: state,
+        t,
+        canUse: canVerify,
+        canFullScan: canVerify && hostFeatures.includes('verifyFullScan'),
+      }),
     )
   }
 }

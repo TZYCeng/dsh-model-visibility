@@ -2,7 +2,7 @@
 
 > 给下一位 Agent、模型或工程师：先读本文，再改代码。本文只保留当前有效的架构、契约与操作步骤；历史发布细节查 Git，功能说明查 [README.md](README.md)。
 >
-> 基线：`@tzyc/dsh-model-visibility` **1.13.0** · Node.js 24 · ESM · 217 个测试 · 2026-11-13 校验流程重构
+> 基线：`@tzyc/dsh-model-visibility` **1.14.0** · Node.js 24 · ESM · 增量校验与 Free Search 接入
 
 ## 1. 十分钟上手
 
@@ -21,13 +21,13 @@
 
 ```powershell
 cd D:\code\dsh-model-visibility
-npm install
+npm ci
 npm test
 npm run build
 git status --short
 ```
 
-预期：217 个测试通过，构建成功，重复构建没有 `client.js` 差异。本机使用 Node.js 24，`usage-ledger` 依赖 Node 的 `zlib.zstd*`。
+预期：全量测试通过，构建成功，重复构建没有 `client.js` 差异。本机使用 Node.js 24，`usage-ledger` 依赖 Node 的 `zlib.zstd*`。
 
 ```powershell
 npm pack --dry-run   # 发布前检查实际包内容
@@ -213,7 +213,7 @@ type Source = 'manual' | 'config' | 'adapter' | 'provider' |
 }
 ```
 
-`learned.features` 用于新浏览器识别旧 Host。当前特性：`applyInput`、`reload`、`overrides`、`verify`、`usage`、`checkerBudget`、`verifyWeb`。不要恢复旧字段名 `catalog`；浏览器 Store 读取 `state.learned`。
+`learned.features` 用于新浏览器识别旧 Host。当前特性：`applyInput`、`reload`、`overrides`、`verify`、`usage`、`checkerBudget`、`verifyWeb`、`verifyFullScan`。不要恢复旧字段名 `catalog`；浏览器 Store 读取 `state.learned`。
 
 ### 4.2 学习快照
 
@@ -245,7 +245,7 @@ type Source = 'manual' | 'config' | 'adapter' | 'provider' |
 | `POST /usage` | 强制下一次读取触发扫描，但仍复用当前 in-flight。 |
 | `GET /export?type=usage|models` | 下载对应 CSV。 |
 | `GET /verify` | `{ state, learned }` 进度与快照元信息。 |
-| `POST /verify` | `{ provider, model, writeBack?, webSearch?, concurrency? }` 启动；`{ cancel:true }` 取消。 |
+| `POST /verify` | `{ provider, model, writeBack?, webSearch?, fullScan?, concurrency? }` 启动；`{ cancel:true }` 取消。 |
 
 `/models` 失败是 `500 model-info/failed`；`/overrides` 非 JSON 是 `400 overrides/body`。Provider 写回拒绝不一定是 HTTP 错误：本地覆盖仍有效，原因放入 `value.provider`。
 
@@ -258,7 +258,7 @@ settings.describe()
   → 找含 pi-ai 的 namespace 与 providers[id].models 下标
   → settings.mutate(ns, [
       { op:'set', path:['providers', id, 'models', index, field], value }
-    ])
+    ], revision)
 ```
 
 映射：`input` → `input`，`contextWindow` → `contextWindow`，档位 → `reasoningEfforts`。
@@ -284,6 +284,8 @@ settings.describe()
 `createCapabilityVerifier`：
 
 - 同一时刻一轮 sweep；`start()` join 已存在的 run；
+- 默认在访问网络前以 `learned.getExact()` 排除已有规范 ID，返回 `skippedKnown`，没有目标直接结束；`fullScan:true` 则重查所有可校验模型；
+- `search_model_docs` 优先通过 Host 独立工具执行器调用已确认的 Free Search `advanced_search`（不传引擎指定）；只有未接入时走 Host `web.search`，`read_model_doc` 仍用 `web.fetch`。`searchBackends` 记录实际发起调用的路径；
 - 默认批大小 6、并发 2，单次并发限制 1–8；
 - 校验输出预算 8192，仅模型声明支持时指定 `reasoningEffort:'low'`；
 - `done` 为有效结果，`processed` 为已处理；另有 `unknown`、`failed`、`searchCalls`、`fetchCalls`；进度条以 processed 为准；
@@ -301,8 +303,9 @@ settings.describe()
 - 递归找 `session.v4.jsonl.zstd` / `session.v4.jsonl`；
 - Zstd 是多帧拼接，必须逐帧扫描，不可整文件一次解压；
 - `(mtime,size)` 未变则复用；当前月精确日期，旧历史按会话创建日；
+- fork 用最后一个标记为 `inherited:true` 的 `session/end-seed` 切分自有日志。v2 缓存重新扫描文件统计，保留插件用量；
 - 每文件内 `*` 是便利合计，聚合必须跳过；
-- `dispose()` 阻止新扫描、吸账和写文件，等待当前扫描，停止后不得再落盘；
+- 插件消耗独立合并落盘；卸载先取消并等待校验员，再停止账本接收、等待扫描退出并保存已接收用量；账本卸载完成后不得再落盘；
 - 历史缓存约保留 14 个月，“总计”不是无限期财务总账。
 
 ## 5. 不可破坏的规则
@@ -321,7 +324,7 @@ settings.describe()
 10. **凭据不出 Host。** 不返回密钥、请求头或完整认证 URL；不跟随重定向。
 11. **官方校正只锁精确 ID。** `glm-5.3` 与 `glm-5.3-flash` 不能混同；校正需有官方文档。
 12. **模型 ID 归一化保持保守。** 不为了增加命中率把标点、后缀任意折叠。
-13. **Provider 写回不猜测数组下标。** describe 与 mutate 之间仍可能漂移；需要更强保证时先设计条件写/重读确认。
+13. **Provider 写回不猜测数组下标。** 使用 describe 返回的 revision 条件写；发生冲突时重新审阅，不按旧下标盲目重试。
 14. **卸载可逆。** 图像 patch 只删除自己的 wrapper；后台任务不得在 scope dispose 后继续写配置或文件。
 15. **手动覆盖高于 official。** 用户的显式声明不能被启发式或校正悄悄替换。
 16. **UI 文案中英同步。** `client-src/dict.mjs` 两边 key 与 placeholder 必须一致。
@@ -383,7 +386,7 @@ npm run build
 git diff --exit-code -- client.js
 ```
 
-当前基线 **217 个测试**。覆盖：
+自动化覆盖：覆盖：
 
 - 能力优先级、官方校正、未知与推断来源；
 - 快照新旧合并、别名、外部修改；
@@ -431,7 +434,7 @@ Host 改动后重新加载 Host/重启 DSH；Client 改动后构建并刷新页�
 
 1. **校验不是目标模型实测。** Provider 写回默认关闭，联网引用只能证明 URL 来自本轮检索，语义准确性仍需复核；已开始的 settings.mutate 不支持取消或撤销。
 2. **私有宿主契约。** `modelDirectories`、`llm.adapters`、`modelOf`、设置结构和日志格式都可能随 DSH 更新改变。
-3. **写回下标竞态。** describe 与 mutate 间模型数组改变时可能写错目标；不要在 UI 并发动态修改 Provider 列表。
+3. **写回冲突。** 通过 `expectedRevision` 避免向已变动文档写入旧下标；发生外部修改时报告冲突，不自动覆盖用户改动。
 4. **多 Host/多 profile。** 文件为全局共享，当前原子替换不等于跨进程事务锁。
 5. **账本性能。** 修改过的日志会整文件重读、同步解压；大型历史库需要流式或分块增量。
 6. **模块规模。** 校验已拆分公开目录、结果契约、回复投影与工具执行；`check-catalog.js` 仍负责调度，设置页主体仍可继续拆分。
