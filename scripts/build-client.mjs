@@ -49,7 +49,8 @@ function assertSupported(line, file) {
 function transform(source, file) {
   const out = []
   const deferred = []
-  for (const line of source.split('\n')) {
+  // Git can check out client sources with CRLF; emit the same LF bundle everywhere.
+  for (const line of source.split(/\r?\n/)) {
     assertSupported(line, file)
     const relative = /^\s?import \{([^}]*)\}\s+from\s+'\.\/([^']+\.mjs)'.*$/.exec(line)
     if (relative !== null) {
