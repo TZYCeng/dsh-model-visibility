@@ -9,6 +9,7 @@ import test from 'node:test'
 
 import { installImageInputGate } from '../lib/image-input-gate.js'
 import { createModelInfoService, describeModel, imageInputDecision } from '../lib/model-info.js'
+import { readProviderProfiles } from '../lib/provider-probe.js'
 
 /** A relay profile whose per-model `input` is the empty DSH default. */
 function relayProfile(models) {
@@ -23,13 +24,10 @@ function relayProfile(models) {
 
 /** A pi-ai shaped adapter whose modelOf lives on the prototype. */
 function piAiAdapter(input = ['text']) {
+  const snapshot = { profiles: new Map([['relay', { provider: 'relay' }]]) }
   const proto = {
-    current() {
-      return {}
-    },
-    profileOf() {
-      return {}
-    },
+    current() { return snapshot },
+    profileOf(current, provider) { return current?.profiles?.get(provider) },
     modelOf(_snapshot, provider, model) {
       return { provider, id: model, name: model, input: [...input] }
     },
@@ -56,6 +54,18 @@ test('imageInputDecision follows the same evidence as the page', () => {
   assert.equal(imageInputDecision('builtin', 'grok-4.7', {}).allowed, false)
 })
 
+test('a public name alias is available for display and diagnostics but cannot admit images', async () => {
+  const id = 'relay/custom-fast'
+  const profile = relayProfile([id])
+  const learned = { id, input: ['text', 'image'], origins: ['public'], publicAlias: true }
+  const llm = { resolveModelInfo: async () => ({ inputModalities: ['text'] }) }
+  const display = await describeModel(llm, 'relay', { id }, { profile, learned })
+  assert.deepEqual(display.inputModalities, ['text', 'image'])
+  assert.equal(display.learned.publicAlias, true)
+  assert.deepEqual(display.learned.origins, ['public'])
+  assert.equal(imageInputDecision('relay', id, { profile, learned }).allowed, false)
+})
+
 test('an explicit text-only provider declaration blocks the gate', () => {
   const profile = {
     id: 'relay',
@@ -66,6 +76,57 @@ test('an explicit text-only provider declaration blocks the gate', () => {
     imageInputDecision('relay', 'deepseek/deepseek-v4.1-flash', { profile }).allowed,
     false,
   )
+})
+
+test('catalog modelOverrides enforce exact Provider declarations with or without baseURL', async () => {
+  const model = { id: 'Vendor/Exact-Model', name: 'Gemini Compatible' }
+  const learned = { input: ['text', 'image'], type: 'chat' }
+  const discovery = new Map([[model.id, { id: model.id, inputModalities: ['text', 'image'] }]])
+  for (const endpoint of [{ baseURL: 'https://example.test' }, {}]) {
+    const profiles = readProviderProfiles([{ ns: 'llm-pi-ai', value: { providers: {
+      relay: { ...endpoint, models: [], modelOverrides: {
+        [model.id]: { input: ['text'], contextWindow: 32000 },
+        'Vendor/Other': { contextWindow: 64000 },
+      } },
+    } } }])
+    const profile = profiles.get('relay')
+    assert.equal(profile.catalogModels, true)
+    assert.equal(profile.models.get(model.id).id, model.id)
+    assert.equal(profile.models.has(model.id.toLowerCase()), false)
+    const llm = { resolveModelInfo: async () => ({
+      inputModalities: ['text'], context: { contextWindow: 128000 }, defaultMaxTokens: 8192,
+    }) }
+    const context = { profile, discovered: discovery, learned }
+    const display = await describeModel(llm, 'relay', model, context)
+    assert.deepEqual(display.inputModalities, ['text'])
+    assert.equal(display.sources.modalities, 'config')
+    assert.equal(display.contextWindow, 32000)
+    assert.equal(display.defaultMaxTokens, 8192)
+    assert.equal(imageInputDecision('relay', model.id, { ...context, override: learned }).allowed, false)
+    const untouched = await describeModel(llm, 'relay', { ...model, id: 'Vendor/Other' }, context)
+    assert.deepEqual(untouched.inputModalities, ['text'])
+    assert.equal(untouched.sources.modalities, 'adapter')
+    assert.equal(imageInputDecision('relay', 'Vendor/Other', context).allowed, false)
+  }
+})
+
+test('the image gate receives the actual adapter display name for an exact relay model', () => {
+  const id = 'model-without-family-in-id'
+  const adapter = piAiAdapter()
+  const profile = { ...relayProfile([id]), catalogModels: false, inputProvenance: true, adapter, adapterSnapshot: adapter.current() }
+  adapter.modelOf = (_snapshot, provider, id) => ({ provider, id, name: 'Gemini Vision', input: ['text'], api: profile.api, baseUrl: profile.baseURL })
+  const llm = { adapters: new Map([['relay', { adapter }]]) }
+  const service = createModelInfoService(llm, {
+    context: { profiles: new Map([['relay', profile]]), learned: {} },
+  })
+  assert.equal(service.imageInputAllowed('relay', id), false)
+  const gate = installImageInputGate(llm, { allow: service.imageInputAllowed })
+  try {
+    assert.deepEqual(adapter.modelOf(adapter.current(), 'relay', id).input, ['text', 'image'])
+    assert.deepEqual(adapter.modelOf(adapter.current(), 'relay', 'other').input, ['text'])
+  } finally {
+    gate.dispose()
+  }
 })
 
 test('createModelInfoService exposes the same image decision', () => {
@@ -101,12 +162,12 @@ test('installImageInputGate adds image only to allowed pi-ai relay models', () =
     allow: (provider, model) => provider === 'relay' && model === 'vision-model',
   })
 
-  assert.deepEqual(adapter.modelOf({}, 'relay', 'vision-model').input, ['text', 'image'])
-  assert.deepEqual(adapter.modelOf({}, 'relay', 'text-model').input, ['text'])
+  assert.deepEqual(adapter.modelOf(adapter.current(), 'relay', 'vision-model').input, ['text', 'image'])
+  assert.deepEqual(adapter.modelOf(adapter.current(), 'relay', 'text-model').input, ['text'])
   assert.deepEqual(adapter.modelOf({}, 'other', 'vision-model').input, ['text'])
 
   gate.dispose()
-  assert.deepEqual(adapter.modelOf({}, 'relay', 'vision-model').input, ['text'])
+  assert.deepEqual(adapter.modelOf(adapter.current(), 'relay', 'vision-model').input, ['text'])
 })
 
 test('installImageInputGate refreshes newly registered adapters and keeps other shapes alone', () => {
@@ -119,7 +180,7 @@ test('installImageInputGate refreshes newly registered adapters and keeps other 
   llm.adapters.set('deepseek-account', { adapter: deepseek })
   gate.refresh()
 
-  assert.deepEqual(pi.modelOf({}, 'relay', 'm').input, ['text', 'image'])
+  assert.deepEqual(pi.modelOf(pi.current(), 'relay', 'm').input, ['text', 'image'])
   assert.equal(deepseek.modelOf, undefined)
   gate.dispose()
 })
@@ -157,15 +218,15 @@ test('refresh releases stale patches, restoring an own method or accessor exactl
   const llm = { adapters: new Map([['relay', { adapter: original }], ['alias', { adapter: original }]]) }
   const gate = installImageInputGate(llm, { allow: () => true })
   const patched = original.modelOf
-  assert.deepEqual(patched({}, 'relay', 'm').input, ['text', 'image'])
+  assert.deepEqual(patched.call(original, original.current(), 'relay', 'm').input, ['text', 'image'])
   llm.adapters.set('relay', { adapter: replacement })
   gate.refresh()
   assert.equal(original.modelOf, patched, 'an adapter shared by another registration stays patched')
-  assert.deepEqual(replacement.modelOf({}, 'relay', 'm').input, ['text', 'image'])
+  assert.deepEqual(replacement.modelOf(replacement.current(), 'relay', 'm').input, ['text', 'image'])
   llm.adapters.delete('alias')
   gate.refresh()
   assert.deepEqual(Object.getOwnPropertyDescriptor(original, 'modelOf'), descriptor)
-  assert.deepEqual(patched({}, 'relay', 'm').input, ['text'], 'retained wrapper reference is inactive')
+  assert.deepEqual(patched.call(original, original.current(), 'relay', 'm').input, ['text'], 'retained wrapper reference is inactive')
   gate.dispose()
   gate.refresh()
   assert.deepEqual(Object.getOwnPropertyDescriptor(replacement, 'modelOf'), { ...accessor, set: undefined })
@@ -179,4 +240,55 @@ test('release leaves another owner’s method in place', () => {
   adapter.modelOf = replacement
   gate.dispose()
   assert.equal(adapter.modelOf, replacement)
+})
+
+test('qualified aliases reject other vendors even when a bare row advertises vision', async () => {
+  const llm = { resolveModelInfo: async () => ({ inputModalities: ['text'] }) }
+  const input = ['text', 'image']
+  const run = async (id, listed, allowed, source) => {
+    const profile = relayProfile([id])
+    const discovered = new Map(listed.map(model => [model, { id: model, inputModalities: input }]))
+    const context = { profile, discovered, learned: {} }
+    const display = await describeModel(llm, 'relay', { id }, context)
+    assert.equal(display.sources.modalities, source, id)
+    assert.equal(imageInputDecision('relay', id, context).allowed, allowed, id)
+  }
+  await run('x/model', ['model', 'y/model'], false, 'unknown')
+  await run('x/model', ['y/model'], false, 'unknown')
+  await run('x/model', ['model', 'y/model', 'x/model'], true, 'provider')
+  await run('model', ['model', 'y/model'], true, 'provider')
+  await run('X/MODEL:free', ['x/model:fast', 'y/model'], true, 'provider')
+  await run('x/MODEL:free', ['x/model:thinking', 'y/model'], false, 'unknown')
+  await run('x/model', ['x/model:free', 'x/model:fast', 'model'], false, 'unknown')
+  for (const suffix of ['-preview', '-27b', '-4k', '-2k', ':batch', ':thinking']) {
+    await run(`x/model${suffix}`, ['x/model'], false, 'unknown')
+  }
+  await run('x/model-5.1', ['x/model-5-1'], false, 'unknown')
+})
+
+test('a route snapshot never uses newer declarations or another generation of the same route', () => {
+  const id = 'mystery-model'
+  const adapter = piAiAdapter()
+  const previous = adapter.current()
+  const current = { profiles: new Map(previous.profiles) }
+  adapter.current = () => current
+  const base = relayProfile([id])
+  adapter.modelOf = (_snapshot, provider, id) => ({ provider, id, name: id, input: ['text'], api: base.api, baseUrl: base.baseURL })
+  const llm = { adapters: new Map([['relay', { adapter }]]) }
+  let profile = { ...base, catalogModels: false, inputProvenance: true, adapter, adapterSnapshot: previous }
+  const service = createModelInfoService(llm, { context: () => ({ profiles: new Map([['relay', profile]]), overrides: { get: () => ({ input: ['text', 'image'] }) } }) })
+  const gate = installImageInputGate(llm, { allow: service.imageInputAllowed })
+  try {
+    assert.deepEqual(adapter.modelOf(previous, 'relay', id).input, ['text'])
+    assert.deepEqual(adapter.modelOf(current, 'relay', id).input, ['text'])
+    profile = { ...profile, adapterSnapshot: current, models: new Map([[id, { id, input: ['text'] }]]) }
+    assert.deepEqual(adapter.modelOf(current, 'relay', id).input, ['text'])
+    profile = { ...profile, models: base.models, inputDefault: true }
+    assert.deepEqual(adapter.modelOf(current, 'relay', id).input, ['text'])
+    profile = { ...profile, inputDefault: false }
+    assert.deepEqual(adapter.modelOf(current, 'relay', id).input, ['text', 'image'])
+    assert.deepEqual(adapter.modelOf(previous, 'relay', id).input, ['text'])
+  } finally {
+    gate.dispose()
+  }
 })

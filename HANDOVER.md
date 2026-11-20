@@ -2,7 +2,7 @@
 
 > 给下一位 Agent、模型或工程师：先读本文，再改代码。本文只保留当前有效的架构、契约与操作步骤；历史发布细节查 Git，功能说明查 [README.md](README.md)。
 >
-> 基线：`@tzyc/dsh-model-visibility` **1.14.0** · Node.js 24 · ESM · 增量校验与 Free Search 接入
+> 基线：`@tzyc/dsh-model-visibility` **1.15.0** · Node.js 24 · ESM · 增量校验与 Free Search 接入
 
 ## 1. 十分钟上手
 
@@ -239,13 +239,13 @@ type Source = 'manual' | 'config' | 'adapter' | 'provider' |
 | `GET /models` | 读取能力目录；能力缓存 15 s，探测缓存 10 min。 |
 | `GET /models?fresh=1` | 绕过 TTL，但合并当前 in-flight。 |
 | `GET /models?reload=1` | 使本地缓存与代次失效，丢弃旧结果，再读取。 |
-| `GET /overrides` | `{ ok, value: { overrides } }`。 |
-| `POST /overrides` | 保存一条覆盖，或 `{ remove:true, provider, model }`。默认尝试 Provider 写回，`applyToProvider:false` 可关闭。 |
+| `GET /overrides` | `{ ok, value: { overrides, revisions } }`，修订号按 provider/model 返回。 |
+| `POST /overrides` | 保存或删除一条覆盖，提交编辑开始时的 `expectedRevision`，新条目用 `null`，冲突返回 409。默认本地保存。勾选 `applyToProvider:true` 后才尝试写回。 |
 | `GET /usage` | 返回账本，按 60 s 节流触发扫描。 |
 | `POST /usage` | 强制下一次读取触发扫描，但仍复用当前 in-flight。 |
 | `GET /export?type=usage|models` | 下载对应 CSV。 |
 | `GET /verify` | `{ state, learned }` 进度与快照元信息。 |
-| `POST /verify` | `{ provider, model, writeBack?, webSearch?, fullScan?, concurrency? }` 启动；`{ cancel:true }` 取消。 |
+| `POST /verify` | `{ mode?, provider?, model?, fuzzyMatch?, writeBack?, fullScan?, concurrency? }` 启动；`mode` 支持 `public`、`supplement`、`checker`；旧 Client 的 `useChecker`/`webSearch` 保持兼容；`{ cancel:true }` 取消。 |
 
 `/models` 失败是 `500 model-info/failed`；`/overrides` 非 JSON 是 `400 overrides/body`。Provider 写回拒绝不一定是 HTTP 错误：本地覆盖仍有效，原因放入 `value.provider`。
 
@@ -255,7 +255,7 @@ type Source = 'manual' | 'config' | 'adapter' | 'provider' |
 
 ```text
 settings.describe()
-  → 找含 pi-ai 的 namespace 与 providers[id].models 下标
+  → 确认 pi-ai 路由的设置归属与 providers[id].models 的精确下标
   → settings.mutate(ns, [
       { op:'set', path:['providers', id, 'models', index, field], value }
     ], revision)
@@ -263,18 +263,19 @@ settings.describe()
 
 映射：`input` → `input`，`contextWindow` → `contextWindow`，档位 → `reasoningEfforts`。
 
-- `off` 映射 `null`，其他允许档位映射自己的 ID；
+- 自动写回仅在显式启用时，为有权威设置归属的自定义路由补齐兼容模态或上下文；不覆盖明确值、不写推理字段；
+- 手动档位用 `reasoningEffortMappings` 指定请求值或沿用现有精确值：仅 `off` 允许 `null`，其他档位须用非空字符串。未知上游值只在本地保留，不把档位 ID 当请求值；
 - 档位白名单：`off/minimal/low/medium/high/xhigh/max`；
 - 只有 `off` 的档位不写 Provider，保留本地；
 - `kind` 与 `defaultEffort` 无等价 per-model 字段，保留本地；
-- 已写字段通过 `stripWrittenFields` 从本地覆盖剥离；
+- 写入前检查原始配置，拒绝修改由 `!!js` 生成的目标路径。写入后验证持久值和生效值，只有字段都符合预期且本地条目修订号未变时，才剥离对应的本地字段。响应通过 `localOnly`、`unresolvedEfforts` 或 `reasoningConflict` 解释保留原因；
 - 写后必须刷新能力、Provider profile 与图像准入缓存；
 - 不用整个 Provider `update`，不自动创建 `models`，不用 `modelOverrides` 绕过限制。
 
 ### 4.5 网络与响应上限
 
 - `provider-probe`：只向配置的 `baseURL` 同源地址请求，HTTPS only；HTTP 只允许 loopback。每请求默认 3.5 s，响应 4 MiB。
-- `check-catalog`：公开目录无凭据，models.dev 两源 + OpenRouter + Hugging Face 镜像；每源 20 s，响应 16 MiB。
+- `check-catalog`：公开目录无凭据，models.dev 两源 + OpenRouter + Hugging Face 镜像；每源响应限制 16 MiB；较大的 models.dev/api.json 有独立超时和一次有界瞬时失败重试。
 - 两者均 `redirect: 'error'`，防止 Authorization 跨域泄漏。
 - `http-body.js` 以流式 chunk 累计**字节数**，不是 `text.length`；超限 cancel reader，Content-Length 只用于提前拒绝。
 - 不要在无 `body` 的测试 double 上强行调用 `getReader`；helper 会退回 `text()` 并再次按 UTF-8 字节数验证。
@@ -284,26 +285,26 @@ settings.describe()
 `createCapabilityVerifier`：
 
 - 同一时刻一轮 sweep；`start()` join 已存在的 run；
-- 默认在访问网络前以 `learned.getExact()` 排除已有规范 ID，返回 `skippedKnown`，没有目标直接结束；`fullScan:true` 则重查所有可校验模型；
+- 默认在访问网络前以 `learned.getExact()` 排除已有精确 ID，保留厂商与后缀；仅公开目录记录的模型仍能接收校验员查证，返回 `skippedKnown`，没有目标直接结束；`fullScan:true` 则重查所有可校验模型；
 - `search_model_docs` 优先通过 Host 独立工具执行器调用已确认的 Free Search `advanced_search`（不传引擎指定）；只有未接入时走 Host `web.search`，`read_model_doc` 仍用 `web.fetch`。`searchBackends` 记录实际发起调用的路径；
 - 默认批大小 6、并发 2，单次并发限制 1–8；
-- 校验输出预算 8192，仅模型声明支持时指定 `reasoningEffort:'low'`；
+- 校验输出预算 8192；按适配器能力优先 `off`，再 `minimal`，再最低可选档位。检索工具阶段与无工具 JSON 输出阶段完全隔离，推理不进入解析或下轮提示；截断时最多拆两组补全缺项并保留单次输出余量；
 - `done` 为有效结果，`processed` 为已处理；另有 `unknown`、`failed`、`searchCalls`、`fetchCalls`；进度条以 processed 为准；
-- 请求默认 180s、批次总预算 360s，搜索/读取最多 30s；工具循环最多 5 轮/12 次，响应限制 128000 字符；
-- 联网模式采用严格固定 JSON 及 evidence 字段，只接受本批检索 URL，未引用的能力字段被剔除；引用仍需语义核实；
-- Provider 写回默认关闭；`webSearch` 的 HTTP 默认 true，直接构造无 web 的校验器可离线使用；
+- 请求默认 180s、批次总预算 360s，搜索/读取最多 30s；最多 4 轮资料查找/12 次工具调用，保留一次不带工具的汇总，必要时用原证据修正 JSON 一次；响应限制 128000 字符；
+- 联网最终回复只解析 JSON，接受带精确 ID/明确 ref 的数组、models/results 包装或模型 ID 映射；未知字段可省略。逐字段只接受本批有内容的检索 URL，未引用的声明被剔除；
+- Provider 写回默认关闭；`useChecker:false` 仅取公开目录来源并禁止 Provider 更新。`fuzzyMatch:true` 允许唯一别名作为参考，不参与实际写回和图像放行；`webSearch` 的 HTTP 默认 true，直接构造无 web 的校验器可离线使用；
 - 所有 worker 通过 allSettled 收尾；flush 失败不能提前释放 running、让旧 worker 污染新 run；
-- 结构错误定向重试一次，失败批次二分；
+- 联网定向修复只复用本批证据；保留有效记录，超时或截断不重复发搜索，离线可有界二分；
 - `cancel()` 只 abort，不伪造 worker 已退出；
 - `dispose()` 标记停止、abort 公开目录和 checker，并等待 `running`；
 - dispose 后禁止重新启动；停止时只保留已 flush 的批次，不开始新的落库。
 
 `createUsageLedger`：
 
-- 递归找 `session.v4.jsonl.zstd` / `session.v4.jsonl`；
-- Zstd 是多帧拼接，必须逐帧扫描，不可整文件一次解压；
-- `(mtime,size)` 未变则复用；当前月精确日期，旧历史按会话创建日；
-- fork 用最后一个标记为 `inherited:true` 的 `session/end-seed` 切分自有日志。v2 缓存重新扫描文件统计，保留插件用量；
+- 优先用 DSH 的只读 `sessionPersistence` 服务列出和读取会话。只有服务不可用时读取默认目录中的 v4 日志；
+- 磁盘回退逐帧扫描 Zstd 日志，遇到损坏保留上次完整统计并显示提示；
+- 使用服务提供的修订号或磁盘文件指纹判断是否重扫。保留期内按实际事件日期和模型路由统计；
+- fork 依据继承边界切分自有日志。v3 缓存会重扫旧版会话统计，并保留插件用量；
 - 每文件内 `*` 是便利合计，聚合必须跳过；
 - 插件消耗独立合并落盘；卸载先取消并等待校验员，再停止账本接收、等待扫描退出并保存已接收用量；账本卸载完成后不得再落盘；
 - 历史缓存约保留 14 个月，“总计”不是无限期财务总账。
@@ -386,7 +387,7 @@ npm run build
 git diff --exit-code -- client.js
 ```
 
-自动化覆盖：覆盖：
+自动化覆盖：覆盖：408 项（Node.js 24，`npm test`）。
 
 - 能力优先级、官方校正、未知与推断来源；
 - 快照新旧合并、别名、外部修改；
@@ -396,7 +397,8 @@ git diff --exit-code -- client.js
 - 校验预算、格式、重试、取消与 dispose；
 - 用量 Zstd、重试、增量与 dispose；
 - CSV 转义与公式注入；
-- 客户端 Bundle 确定性、模块卫生与真实渲染点击。
+- 客户端 Bundle 确定性、模块卫生与真实渲染点击；
+- 写回原因/字段的中英文文案完整性（`client-modules.test.mjs`，防止界面回退成原始键名）。
 
 `test/setup.mjs` 在任何模块加载前将 `DSH_HOME` 指向临时目录；`host.test.mjs` 每个用例清理覆盖文件。新增测试必须沿用这一隔离，不能读取用户真实快照。
 
@@ -461,7 +463,7 @@ npm pack --dry-run
 
 1. 更新 `package.json` 版本、README 测试徽章与本文基线；保持包名和 Loader id 一致。
 2. 检查 README 图片与 `screenshots.json`；当前是 `docs/overview.png` 与 `docs/online-verification.png`，市场图标是 `docs/icon-180.png`。
-3. 确认 `package.json.files` 包含 `client-src`、`lib`、`docs`；`scripts` 和 `test` 不需进入运行包。
+3. 确认 `package.json.files` 包含 `client-src`、`lib`、`docs`；`scripts` 和 `test` 不需进入运行包。`code_engineer/` 只作为仓库内的人物素材保留，`files` 里用 `!code_engineer` 显式排除，发布前用 `tar -tzf` 复核它不在包内。
 4. 完成上述 GUI 冒烟，尤其 Host 重载、真实图片发送与校验取消。
 5. 经用户确认后再 commit、tag、push、`npm pack`、GitHub Release 和 `npm publish`。
 6. GitHub Release 同时提供带版本号与固定名 `dsh-model-visibility.tgz`，固定名供市场 `releases/latest/download` 使用。

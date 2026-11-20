@@ -38,9 +38,9 @@ test('readModelsDev maps modalities, limits and reasoning', () => {
     },
   }
   const facts = readModelsDev(body)
-  assert.deepEqual(facts.get('gpt-6-sol').input, ['text', 'image'])
-  assert.equal(facts.get('gpt-6-sol').contextWindow, 400000)
-  assert.equal(facts.get('gpt-6-sol').reasoning, true)
+  assert.deepEqual(facts.get('openai/gpt-6-sol').input, ['text', 'image'])
+  assert.equal(facts.get('openai/gpt-6-sol').contextWindow, 400000)
+  assert.equal(facts.get('openai/gpt-6-sol').reasoning, true)
   assert.equal(facts.get('vendor-prefix/gpt-6-sol')?.contextWindow, undefined)
 })
 
@@ -50,7 +50,7 @@ test('readOpenRouter reuses the relay dialect', () => {
       { id: 'anthropic/claude-5', context_length: 200000, architecture: { input_modalities: ['text', 'image'] }, supported_parameters: ['reasoning'] },
     ],
   })
-  const fact = facts.get('claude-5')
+  const fact = facts.get('anthropic/claude-5')
   assert.deepEqual(fact.inputModalities, ['text', 'image'])
   assert.equal(fact.contextWindow, 200000)
   assert.equal(fact.reasoning, true)
@@ -93,6 +93,7 @@ function fakeLlm(replies) {
   return {
     calls: [],
     listProviders: () => [{ id: 'relay', name: 'Relay' }],
+    listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }],
     listModels: async () => [{ id: 'model-a' }, { id: 'model-b' }, { id: 'checker-x' }],
     resolveModelInfo: async () => undefined,
     async prepareCall(config, signal, controls) {
@@ -111,6 +112,13 @@ function fakeLlm(replies) {
   }
 }
 
+function configEditorFor(settings) {
+  return { configuration: () => {
+    const value = settings.describe()[0].value
+    return [{ entry: { options: { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: value } }, override: value }]
+  } }
+}
+
 function verifierSetup({ replies, settings = defaultSettings(), learnedFile, ledger }) {
   const llm = fakeLlm(replies)
   const learned = createLearnedCatalog({ file: learnedFile ?? path.join(tempHome(), 'learned.json') })
@@ -126,6 +134,7 @@ function verifierSetup({ replies, settings = defaultSettings(), learnedFile, led
   const verifier = createCapabilityVerifier({
     llm,
     settings,
+    configEditor: configEditorFor(settings),
     learned,
     ledger,
     fetch: publicFetch,
@@ -143,10 +152,11 @@ function defaultSettings() {
     },
   }
   return {
-    describe: () => [{ ns: 'llm-pi-ai', value: { providers } }],
+    describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers } }],
     calls: [],
     async mutate(ns, ops) {
       this.calls.push({ ns, ops })
+      for (const { path: [, provider, , index, field], value } of ops) providers[provider].models[index][field] = value
     },
   }
 }
@@ -183,6 +193,49 @@ test('a verify sweep fills the learned snapshot and writes back once per route',
   assert.equal(learned.get('checker-x'), undefined)
 })
 
+test('verification write-back protects existing config, never guesses wire values, and skips aliases', async () => {
+  const models = {
+    relay: [
+      { id: 'model-a', input: ['text'], reasoningEfforts: { high: 'vendor-level' } },
+      { id: 'model-b', input: [] },
+      { id: 'checker-x' },
+    ],
+    other: [{ id: 'vendor/model-a', input: [] }],
+  }
+  const providers = Object.fromEntries(Object.entries(models).map(([key, entries]) => [key, { models: entries }]))
+  const settings = {
+    calls: [],
+    describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers } }],
+    async mutate(_ns, ops) {
+      this.calls.push(ops)
+      for (const op of ops) {
+        const [, provider, , index, field] = op.path
+        models[provider][index][field] = op.value
+      }
+    },
+  }
+  const { verifier, llm, learned } = verifierSetup({ settings, replies: [JSON.stringify([
+    { id: 'model-a', input: ['text', 'image'], contextWindow: 400000, reasoningEfforts: ['max'] },
+    { id: 'model-b', input: ['text', 'image'], reasoningEfforts: ['high'] },
+  ])] })
+  llm.listProviders = () => Object.keys(providers).map((id) => ({ id }))
+  llm.listConfigurableProviders = () => Object.keys(providers).map((provider) => ({
+    provider, declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', provider],
+  }))
+  llm.listModels = async (provider) => models[provider]
+  const snapshot = await verifier.start({ checker: { provider: 'relay', model: 'checker-x' }, writeBack: true })
+  assert.equal(snapshot.phase, 'done')
+  assert.equal(snapshot.done, 2)
+  assert.deepEqual(snapshot.batches[0].written, ['relay/model-a', 'relay/model-b'])
+  assert.deepEqual(models.relay[0], {
+    id: 'model-a', input: ['text'], contextWindow: 400000, reasoningEfforts: { high: 'vendor-level' },
+  })
+  assert.deepEqual(models.relay[1].input, ['text', 'image'])
+  assert.equal(models.relay[1].reasoningEfforts, undefined)
+  assert.deepEqual(models.other[0], { id: 'vendor/model-a', input: [] })
+  assert.equal(learned.get('model-a').reasoningEfforts[0].id, 'max')
+})
+
 test('a sweep with the write-back switch off only fills the snapshot', async () => {
   const { verifier, learned, settings } = verifierSetup({
     replies: ['{"models":[{"id":"model-a","kind":"chat","input":["text","image"],"contextWindow":222000}]}'],
@@ -193,9 +246,9 @@ test('a sweep with the write-back switch off only fills the snapshot', async () 
   assert.equal(learned.get('model-a').contextWindow, 222000)
 })
 
-test('incremental verification skips canonical snapshot hits and no-op runs never fetch', async () => {
+test('incremental verification skips exact checked snapshot hits and no-op runs never fetch', async () => {
   const learned = createLearnedCatalog({ file: path.join(tempHome(), 'learned.json') })
-  learned.upsertEntries([{ id: 'vendor/model-a:free', contextWindow: 4096 }])
+  learned.upsertEntries([{ id: 'model-a', contextWindow: 4096 }], { origins: ['checker'] })
   let fetches = 0
   const requested = []
   const llm = fakeLlm([])
@@ -269,4 +322,131 @@ test('the sweep records its own token spend into the ledger', async () => {
   const realLedger = createUsageLedger({ home, file: path.join(home, 'ledger.json'), sessionsRoot: path.join(home, 'sessions') })
   for (const entry of recorded) realLedger.notePluginUsage(entry)
   assert.deepEqual(realLedger.read().ranges.total.slice(0, 2), [100, 20])
+})
+
+
+test('public-only mode never invokes checker or web and never writes alias-derived fields', async () => {
+  const { llm, learned } = verifierSetup({ replies: [] })
+  const models = [{ id: 'vendorA/shared', input: [] }, { id: 'vendorB/shared', input: [] }, { id: 'vendorC/only:free', input: [] }]
+  const routes = { relay: { models } }
+  let writes = 0
+  llm.listModels = async () => models
+  llm.listConfigurableProviders = () => [{ provider: 'relay', settingsNs: 'llm-pi-ai', settingsPath: ['providers','relay'], declared: true }]
+  llm.prepareCall = () => assert.fail('no paid checker in public-only mode')
+  const settings = {
+    describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: routes } }],
+    async mutate(_ns, ops) { writes++; for (const op of ops) models[Number(op.path[3])][op.path[4]] = op.value },
+  }
+  const data = {
+    vendorA: { models: { shared: { id: 'shared', modalities: { input: ['text','image'] }, limit: { context: 999 } } } },
+    vendorB: { models: { shared: { id: 'shared', modalities: { input: ['text'] }, limit: { context: 123 } } } },
+    vendorC: { models: { only: { id: 'only', modalities: { input: ['text','image'] } } } },
+  }
+  const run = createCapabilityVerifier({ llm, settings, learned, web: { search: () => assert.fail('no web search') },
+    fetch: async url => Response.json(String(url).endsWith('/api.json') && String(url).includes('models.dev') ? data : {}),
+    logger: { warn() {} },
+  })
+  const strict = await run.start({ useChecker: false, webSearch: true, writeBack: true })
+  assert.deepEqual([strict.done, strict.unknown, strict.publicOnly, strict.aliasMatches, strict.searchCalls], [2, 1, 2, 0, 0])
+  assert.equal(learned.getExact(models[0].id).contextWindow, 999)
+  assert.equal(learned.getExact(models[1].id).contextWindow, 123)
+  assert.equal(writes, 0)
+  assert.equal(strict.writeBack, false)
+  const fuzzy = await run.start({ useChecker: false, fuzzyMatch: true, writeBack: true })
+  assert.deepEqual([fuzzy.done, fuzzy.skippedKnown, fuzzy.aliasMatches, writes], [1, 2, 1, 0])
+  assert.deepEqual(models[2].input, [])
+  assert.equal(learned.getExact(models[2].id).publicAlias, true)
+  await run.start({ useChecker: false, fuzzyMatch: false })
+  assert.equal(learned.getExact(models[2].id), undefined)
+})
+
+
+test('catalog aliases cannot leak into prompted automatic writeback', async () => {
+  const models = [{ id: 'vendor/target:free', input: [] }]
+  const model = models[0]
+  const settings = { describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: { relay: { models } } } }],
+    mutate: async (_ns, ops) => { for (const op of ops) model[op.path.at(-1)] = op.value },
+  }
+  const { llm, learned } = verifierSetup({ replies: ['[{"id":"vendor/target:free","contextWindow":10000}]'] })
+  llm.listModels = async () => models
+  llm.listConfigurableProviders = () => [{ provider: 'relay', settingsNs: 'llm-pi-ai', settingsPath: ['providers','relay'], declared: true }]
+  const data = { vendor: { models: { target: { id: 'target', modalities: { input: ['text','image'] } } } } }
+  const run = createCapabilityVerifier({ llm, settings, configEditor: configEditorFor(settings), learned, fetch: async () => Response.json(data) })
+  await run.start({ checker: { provider: 'relay', model: 'checker' }, writeBack: true, fuzzyMatch: true })
+  assert.equal(model.contextWindow, 10000)
+  assert.deepEqual(model.input, [])
+})
+
+
+test('exact qualified public facts write to the corresponding vendor only', async () => {
+  const models = [{ id: 'vendorA/shared', input: [] }, { id: 'vendorB/shared', input: [] }, { id: 'shared', input: [] }]
+  const settings = { describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: { relay: { models } } } }],
+    mutate: async (_ns, ops) => { for (const op of ops) models[Number(op.path[3])][op.path[4]] = op.value },
+  }
+  const { llm, learned } = verifierSetup({ replies: ['[]'] })
+  llm.listModels = async () => models
+  llm.listConfigurableProviders = () => [{ provider: 'relay', settingsNs: 'llm-pi-ai', settingsPath: ['providers','relay'], declared: true }]
+  const data = {
+    vendorA: { models: { shared: { id: 'shared', modalities: { input: ['text','image'] }, limit: { context: 999 } } } },
+    vendorB: { models: { shared: { id: 'shared', modalities: { input: ['text'] }, limit: { context: 123 } } } },
+  }
+  const run = createCapabilityVerifier({ llm, settings, configEditor: configEditorFor(settings), learned, fetch: async url => Response.json(String(url).includes('models.dev/api.json') ? data : {}) })
+  const result = await run.start({ checker: { provider: 'relay', model: 'checker' }, writeBack: true, fuzzyMatch: true })
+  assert.deepEqual(models.map(model => model.contextWindow), [999, 123, undefined])
+  assert.deepEqual(models.map(model => model.input), [['text','image'], ['text'], []])
+  assert.equal(result.aliasMatches, 0)
+})
+
+
+test('cancelled writeback stays pending until the actual host mutation settles, without rewriting later sweep state', async () => {
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const applyObserved = Promise.withResolvers()
+  const settings = defaultSettings()
+  const apply = settings.mutate.bind(settings)
+  let dispatches = 0
+  settings.mutate = async (ns, ops) => {
+    dispatches++
+    entered.resolve()
+    await release.promise
+    await apply(ns, ops)
+  }
+  const llm = fakeLlm(['[{"id":"model-a","input":["image"]},{"id":"model-b","contextWindow":4096}]'])
+  const verifier = createCapabilityVerifier({
+    llm, settings, configEditor: configEditorFor(settings),
+    learned: { upsertEntries() {}, meta() {} }, fetch: async () => new Response('{}'), logger: { warn() {} },
+    onApplied: () => applyObserved.resolve(), timeoutMs: 1000,
+  })
+  const options = { checker: { provider: 'relay', model: 'checker-x' }, writeBack: true }
+  const first = verifier.start(options)
+  await entered.promise
+  verifier.cancel()
+  const stopped = await first
+  assert.equal(stopped.phase, 'cancelled')
+  assert.equal(stopped.done, 2)
+  assert.equal(stopped.processed, 2)
+  assert.equal(stopped.pendingWrite.model, 'model-a')
+  assert.equal(stopped.pendingWrite.waitEnded, 'CANCELLED')
+  const blocked = await verifier.start(options)
+  assert.equal(dispatches, 1)
+  assert.match(blocked.errors.join(), /previous dispatched settings mutation has not settled/)
+  assert.equal(blocked.batches[0].written, undefined)
+  release.resolve()
+  await applyObserved.promise
+  const settled = verifier.snapshot()
+  assert.equal(settled.latestWriteSettlement.model, 'model-a')
+  assert.equal(settled.latestWriteSettlement.written, true)
+  assert.equal(settled.pendingWrite, undefined)
+  assert.equal(settled.batches[0].written, undefined)
+})
+
+test('incremental writeback asks for a full scan without writing old unverifiable facts', async () => {
+  const settings = defaultSettings()
+  const { llm, learned } = verifierSetup({ settings, replies: [] })
+  for (const id of ['model-a', 'model-b']) learned.upsertEntries({ id, input: ['image'], origins: ['checker'] })
+  const verifier = createCapabilityVerifier({ llm, settings, configEditor: configEditorFor(settings), learned, fetch: () => assert.fail('no incremental fetch') })
+  const state = await verifier.start({ checker: { provider: 'relay', model: 'checker-x' }, writeBack: true })
+  assert.equal(state.skippedKnown, 2)
+  assert.match(state.errors.join(), /run a full scan with write-back enabled/)
+  assert.equal(settings.calls.length, 0)
 })

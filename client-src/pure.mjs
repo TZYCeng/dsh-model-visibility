@@ -76,7 +76,7 @@ export function computeFilteredGroups(groups, {
       if (multimodalOnly && !(Array.isArray(model.inputModalities) && model.inputModalities.includes('image'))) {
         continue
       }
-      if (reasoningOnly && model.reasoningSupported !== true) continue
+      if (reasoningOnly && model.reasoningSupported !== true && !(model.requestReasoning?.efforts?.length > 0)) continue
       if (minContext > 0 && !(Number.isFinite(model.contextWindow) && model.contextWindow >= minContext)) {
         continue
       }

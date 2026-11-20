@@ -1,6 +1,6 @@
 {
   "name": "@tzyc/dsh-model-visibility",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "publishConfig": {
     "access": "public"
   },
@@ -24,8 +24,9 @@
     "locale/*.json",
     "icon.svg",
     "screenshots.json",
-    "CHANGELOG.md",
-    "docs"
+    "HANDOVER.md",
+    "docs",
+    "!code_engineer"
   ],
   "scripts": {
     "test": "node --import ./test/setup.mjs --test test/*.test.mjs",

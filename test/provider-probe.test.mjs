@@ -18,6 +18,7 @@ import {
   parsePricing,
   profileSignature,
   readProviderProfiles,
+  USER_AGENT,
 } from '../lib/provider-probe.js'
 import { createModelInfoService, describeCatalog } from '../lib/model-info.js'
 import { createLearnedCatalog } from '../lib/learned-catalog.js'
@@ -161,6 +162,24 @@ test('parseModelListing understands OpenRouter-style metadata', () => {
   assert.equal(entries.get('no-facts').kind, undefined)
 })
 
+test('relay kinds distinguish explicit tasks from generic text or chat metadata', () => {
+  const entries = parseModelListing({ data: [
+    { id: 'mixed', type: 'chat', model_type: 'embedding', output_modalities: ['text'] },
+    { id: 'ranker', supported_endpoint_types: ['openai', 'reranking'], output_modalities: ['text'] },
+    { id: 'vectorizer', architecture: { output_modalities: ['embeddings'] } },
+    { id: 'vectorizer-legacy', architecture: { modality: 'text->embeddings' } },
+    { id: 'ideogram-4', type: 'text', architecture: { output_modalities: ['text'] } },
+    { id: 'normal-chat', type: 'chat' },
+  ] })
+  for (const [id, kind] of [['mixed', 'embedding'], ['ranker', 'rerank'], ['vectorizer', 'embedding'], ['vectorizer-legacy', 'embedding']]) {
+    assert.equal(entries.get(id).kind, kind, id)
+    assert.equal(entries.get(id).weakKind, undefined, id)
+  }
+  assert.equal(entries.get('ideogram-4').kind, 'chat')
+  assert.equal(entries.get('ideogram-4').weakKind, true)
+  assert.equal(entries.get('normal-chat').weakKind, undefined)
+})
+
 test('parseModelListing understands pi-ai object listings and capability flags', () => {
   const entries = parseModelListing({
     models: {
@@ -211,6 +230,7 @@ test('createProviderProbe reads models with the resolved credential and caches',
     'https://relay.example/api/pricing': { status: 403, body: { message: 'pricing is disabled' } },
   })
   const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }] },
     settings: { describe: () => descriptors() },
     credentials: { resolve: async (ref) => (ref === 'RELAY_API_KEY' ? { value: 'sk-test', source: 'test' } : undefined) },
     fetch: fetchImpl,
@@ -222,6 +242,10 @@ test('createProviderProbe reads models with the resolved credential and caches',
   assert.equal(fetchImpl.calls.length, 2)
   assert.equal(fetchImpl.calls[0].headers.authorization, 'Bearer sk-test')
   assert.equal(fetchImpl.calls[0].headers['x-relay-tenant'], 'tenant-1')
+  // The probe's own identity must not be pinned to a package version: the
+  // literal here said `1.4` for ten releases and nothing noticed.
+  assert.equal(fetchImpl.calls[0].headers['user-agent'], USER_AGENT)
+  assert.equal(/\/\d+\.\d+/.test(USER_AGENT), false, 'no version suffix to go stale')
   assert.equal(first.discovered.get('relay').get('grok-4.7').contextWindow, 500000)
   assert.equal(first.diagnostics[0].status, 'ok')
   assert.equal(first.diagnostics[0].models, 1)
@@ -242,6 +266,7 @@ test('createProviderProbe reports an unauthorized relay without throwing', async
     'https://relay.example/v1/models': { status: 401, body: { error: 'invalid token' } },
   })
   const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }] },
     settings: { describe: () => descriptors() },
     credentials: { resolve: async () => ({ value: 'sk-bad', source: 'test' }) },
     fetch: fetchImpl,
@@ -255,6 +280,7 @@ test('createProviderProbe reports an unauthorized relay without throwing', async
 test('createProviderProbe skips a route without a configured credential', async () => {
   const fetchImpl = fakeFetch({})
   const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }] },
     settings: { describe: () => descriptors() },
     credentials: { resolve: async () => undefined },
     fetch: fetchImpl,
@@ -272,6 +298,7 @@ test('createProviderProbe falls back to /v1/models when the bare base 404s', asy
     'https://relay.example/api/pricing': { status: 404, body: {} },
   })
   const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }] },
     settings: {
       describe: () => descriptors({ baseURL: 'https://relay.example' }),
     },
@@ -300,6 +327,7 @@ test('noteSettingsChanged drops the cache only when routing facts changed', asyn
     'https://relay.example/api/pricing': { status: 403, body: {} },
   })
   const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }] },
     settings: { describe: () => current },
     credentials: { resolve: async () => ({ value: 'sk-test', source: 'test' }) },
     fetch: fetchImpl,
@@ -346,6 +374,7 @@ test('the capability catalog carries probe diagnostics and relay kinds', async (
     'https://relay.example/api/pricing': { status: 403, body: {} },
   })
   const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }] },
     settings: {
       describe: () =>
         descriptors({
@@ -433,35 +462,38 @@ test('describeCatalog survives a probe that cannot read settings', async () => {
 
 test('a route change detaches an inflight sweep without assigning stale capabilities to the new route', async () => {
   let current = descriptors()
-  const blocked = new Map()
+  const oldStarted = Promise.withResolvers()
+  const newStarted = Promise.withResolvers()
   const calls = []
   const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }] },
     settings: { describe: () => current },
     credentials: { resolve: async () => ({ value: 'sk-test' }) },
     fetch: async (url) => {
       calls.push(url)
       if (url.endsWith('/api/pricing')) return { status: 403, text: async () => '{}' }
-      return new Promise((resolve) => blocked.set(url, (context_length) => resolve({
+      const started = url.includes('new.example') ? newStarted : oldStarted
+      return new Promise((resolve) => started.resolve((context_length) => resolve({
         status: 200,
         text: async () => JSON.stringify({ data: [{ id: 'grok-4.7', context_length }] }),
       })))
     },
   })
   const stale = probe.read()
-  await Promise.resolve()
+  const releaseOld = await oldStarted.promise
   current = descriptors({ baseURL: 'https://new.example/v1' })
   probe.noteSettingsChanged()
   assert.equal(probe.peek(), null)
   const newest = probe.read()
   assert.notEqual(newest, stale)
-  await Promise.resolve()
-  blocked.get('https://relay.example/v1/models')(111)
+  const releaseNew = await newStarted.promise
+  releaseOld(111)
   const staleResult = await stale
   assert.equal(staleResult.profiles.get('relay').baseURL, 'https://new.example/v1')
   assert.equal(staleResult.discovered.size, 0)
   assert.deepEqual(staleResult.diagnostics, [])
   assert.equal(probe.read(), newest, 'the old finally keeps the new inflight promise')
-  blocked.get('https://new.example/v1/models')(222)
+  releaseNew(222)
   const latestResult = await newest
   assert.equal(latestResult.discovered.get('relay').get('grok-4.7').contextWindow, 222)
   assert.equal(probe.peek(), latestResult)
@@ -472,6 +504,7 @@ test('a sweep detects a routing change even before a settings notification', asy
   let current = descriptors()
   let first = true
   const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }] },
     settings: { describe: () => current },
     credentials: { resolve: async () => ({ value: 'sk-test' }) },
     fetch: async (url) => {
@@ -490,4 +523,69 @@ test('a sweep detects a routing change even before a settings notification', asy
   const fresh = await probe.read()
   assert.equal(fresh.diagnostics[0].host, 'new.example')
   assert.equal(fresh.discovered.get('relay').has('grok-4.7'), true)
+})
+
+test('only the exact directory owner can provide a routable settings profile', async () => {
+  const owner = descriptors({ baseURL: 'https://good.example/v1' })[0]
+  const duplicate = { ...descriptors({ baseURL: 'https://outdated.example/v1', models: [{ id: 'unrelated' }, { id: 'another' }, { id: 'larger' }] })[0], ns: 'old:llm-pi-ai' }
+  const llm = { listConfigurableProviders: () => [{ provider: 'relay', settingsNs: owner.ns, settingsPath: ['providers', 'relay'], declared: true }] }
+  assert.equal(readProviderProfiles([owner, duplicate], { llm }).get('relay').baseURL, 'https://good.example/v1')
+  assert.equal(readProviderProfiles([owner, owner], { llm }).size, 0)
+  assert.equal(readProviderProfiles([owner], { llm: { listConfigurableProviders: () => [{ ...llm.listConfigurableProviders()[0], settingsPath: ['wrong', 'relay'] }] } }).size, 0)
+  const fetch = () => assert.fail('unowned provider must not be probed')
+  assert.equal((await createProviderProbe({ settings: { describe: () => [owner] }, fetch }).read()).profiles.size, 0)
+})
+
+test('native Google metadata uses provider auth, bare model IDs and native limits', async () => {
+  const fetchImpl = fakeFetch({
+    'https://google.example/v1beta/models?pageSize=1000': { body: { models: [
+      { name: 'models/gemini-test', displayName: 'Gemini Test', inputTokenLimit: 500000, outputTokenLimit: 8192, thinking: true, supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/embedding-test', supportedGenerationMethods: ['embedContent'] },
+    ] } },
+  })
+  const probe = createProviderProbe({
+    llm: { listConfigurableProviders: () => [{ provider: 'relay', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'], declared: true }] },
+    settings: { describe: () => descriptors({ api: 'google-generative-ai', baseURL: 'https://google.example/v1beta' }) },
+    credentials: { resolve: () => ({ value: ' google-fixture ' }) },
+    fetch: fetchImpl,
+  })
+  const result = await probe.read()
+  assert.equal(fetchImpl.calls.length, 1)
+  assert.equal(fetchImpl.calls[0].headers['x-goog-api-key'], 'google-fixture')
+  assert.equal(fetchImpl.calls[0].headers.authorization, undefined)
+  assert.deepEqual(result.discovered.get('relay').get('gemini-test'), {
+    id: 'gemini-test', name: 'Gemini Test', contextWindow: 500000, maxTokens: 8192, reasoning: true,
+  })
+  assert.equal(result.discovered.get('relay').get('embedding-test').kind, 'embedding')
+})
+
+test('map keys are endpoint identities and vision inputs are not image generators', () => {
+  const entries = parseModelListing({ models: {
+    'vendor/model': { id: 'nested-canonical', name: 'Label', supported_endpoint_types: ['chat_with_image'], inputModalities: ['text', 'image'] },
+    'primitive': 5,
+    'vision-tool': { supported_endpoint_types: ['image_classification'] },
+  } })
+  assert.equal(entries.has('nested-canonical'), false)
+  assert.equal(entries.has('primitive'), false)
+  assert.equal(entries.get('vendor/model').kind, 'chat')
+  assert.equal(entries.get('vision-tool').kind, 'classifier')
+})
+
+test('invalid local endpoint/credentials fail without requests and diagnostics never echo them', async () => {
+  const llm = { listConfigurableProviders: () => [{ provider: 'relay', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'], declared: true }] }
+  for (const [baseURL, key, resolveCount] of [
+    ['https://relay.example/v1?ignored=key-secret', 'good', 0],
+    ['https://relay.example/v1', 'key-secretΩ', 1],
+  ]) {
+    let resolutions = 0
+    const probe = createProviderProbe({
+      llm, settings: { describe: () => descriptors({ baseURL }) },
+      credentials: { resolve: () => { resolutions++; return { value: key } } },
+      fetch: () => assert.fail('invalid input must not reach fetch'),
+    })
+    const result = await probe.read()
+    assert.equal(result.diagnostics[0].status, 'skipped')
+    assert.doesNotMatch(JSON.stringify(result.diagnostics), /key-secret/)
+    assert.equal(resolutions, resolveCount)
+  }
 })

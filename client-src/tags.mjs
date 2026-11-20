@@ -63,58 +63,53 @@ function capabilityTags(model, t) {
 
   const tags = []
   const reasoning = model.reasoning
-  const levels = effortNames(reasoning)
   const reasoningSource = sourceOf(model, 'reasoning')
-  const errorTitle =
-    typeof model.infoError === 'string' && model.infoError !== ''
-      ? t('tag.infoErrorTitle', { message: model.infoError })
-      : t('tag.unknownTitle')
+  const requestReasoning = Object.hasOwn(model, 'requestReasoning') ? model.requestReasoning
+    : reasoningSource === 'config' || reasoningSource === 'adapter' ? reasoning : null
+  const requestLevels = effortNames(requestReasoning)
+  const referenceLevels = model.reasoningSupported === false ? [] : effortNames(reasoning)
+  const sameLadder = referenceLevels.length === requestLevels.length
+    && referenceLevels.every((level, index) => level === requestLevels[index])
+    && reasoning?.defaultEffort === requestReasoning?.defaultEffort
+  const errorTitle = typeof model.infoError === 'string' && model.infoError !== ''
+    ? t('tag.infoErrorTitle', { message: model.infoError }) : t('tag.unknownTitle')
 
-  if (levels.length > 0) {
-    tags.push({
-      key: 'reasoning',
-      tone: 'accent',
-      label: t('tag.reasoning'),
-      title: t('tag.reasoningTitle', {
-        levels: levels.join(' / '),
-        source: sourceLabel(reasoningSource, t),
-      }),
-    })
-    const fallback = defaultEffortName(reasoning)
-    tags.push({
-      key: 'effort',
-      tone: 'neutral',
-      label: t('tag.effort') + ' ' + levels.join('/'),
-      title:
-        fallback === null
-          ? t('tag.effortTitleNoFallback', {
-              levels: levels.join(' / '),
-              source: sourceLabel(reasoningSource, t),
-            })
-          : t('tag.effortTitle', {
-              levels: levels.join(' / '),
-              fallback,
-              source: sourceLabel(reasoningSource, t),
-            }),
-    })
-  } else if (model.reasoningSupported === true) {
-    tags.push({
-      key: 'reasoning',
-      tone: 'accent',
-      label: t('tag.reasoning'),
-      title: t('tag.reasoningCatalogTitle', { source: sourceLabel(reasoningSource, t) }),
-      inferred: isInferredSource(reasoningSource),
-    })
-  } else if (model.reasoningSupported === false) {
-    tags.push({
-      key: 'reasoning',
-      tone: 'muted',
-      label: t('tag.noReasoning'),
-      title: sourceLabel(reasoningSource, t),
-      inferred: isInferredSource(reasoningSource),
-    })
+  if (model.reasoningSupported === false && requestLevels.length === 0) {
+    const authoritative = reasoningSource === 'config' || reasoningSource === 'adapter'
+    tags.push({ key: 'reasoning', tone: 'muted', label: t(authoritative ? 'tag.noReasoning' : 'tag.noReasoningReference'),
+      title: sourceLabel(reasoningSource, t), inferred: !authoritative })
+  } else if (model.reasoningSupported === true || requestLevels.length > 0) {
+    tags.push({ key: 'reasoning', tone: 'accent', label: t(requestLevels.length > 0 ? 'tag.reasoning' : 'tag.reasoningReference'),
+      title: requestLevels.length > 0
+        ? t('tag.reasoningTitle', { levels: requestLevels.join(' / '), source: sourceLabel('adapter', t) })
+        : t('tag.reasoningCatalogTitle', { source: sourceLabel(reasoningSource, t) }),
+      inferred: requestLevels.length === 0 && (isInferredSource(reasoningSource) || reasoningSource === 'manual') })
   } else {
     tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.reasoningUnknown'), title: errorTitle })
+  }
+
+  if (requestLevels.length > 0 && model.reasoningSupported === false) {
+    tags.push({ key: 'reference-no-reasoning', tone: 'muted', inferred: true,
+      label: t('tag.noReasoningReference'), title: t('tag.effortReferenceTitle', { source: sourceLabel(reasoningSource, t) }) })
+  }
+  if (requestLevels.length > 0) {
+    const fallback = defaultEffortName(requestReasoning)
+    tags.push({ key: 'effort', tone: 'neutral', label: t('tag.effort') + ' ' + requestLevels.join('/'),
+      title: fallback === null
+        ? t('tag.effortTitleNoFallback', { levels: requestLevels.join(' / '), source: sourceLabel('adapter', t) })
+        : t('tag.effortTitle', { levels: requestLevels.join(' / '), fallback, source: sourceLabel('adapter', t) }) })
+  }
+  if (model.reasoningWireDisabled === true) {
+    tags.push({ key: 'effort-wire-off', tone: 'muted', label: t('tag.effortWireOff'), title: t('tag.effortWireOffTitle') })
+  }
+  if (model.learned?.publicAlias) {
+    tags.push({ key: 'public-alias', tone: 'muted', inferred: true,
+      label: t('tag.aliasReference'), title: t('tag.aliasReferenceTitle') })
+  }
+  if (referenceLevels.length > 0 && !sameLadder) {
+    tags.push({ key: 'reference-effort', tone: 'muted', inferred: true,
+      label: t(model.reasoningCatalog ? 'tag.effortPublicReference' : 'tag.effortReference') + ' ' + referenceLevels.join('/'),
+      title: t('tag.effortReferenceTitle', { source: model.reasoningCatalog ?? sourceLabel(reasoningSource, t) }) })
   }
 
   const contextSource = sourceOf(model, 'context')
@@ -139,10 +134,11 @@ function capabilityTags(model, t) {
     tags.push({ key: 'modality', tone: 'muted', label: t('tag.modalityUnknown'), title: errorTitle })
   } else {
     const vision = modalities.includes('image')
+    const textOnly = modalities.every((modality) => modality === 'text')
     tags.push({
       key: 'modality',
       tone: vision ? 'vision' : 'neutral',
-      label: vision ? t('tag.multimodal') : t('tag.textOnly'),
+      label: vision ? t('tag.multimodal') : textOnly ? t('tag.textOnly') : modalityNames(modalities, t),
       title: t('tag.modalityTitle', {
         modalities: modalityNames(modalities, t),
         source: sourceLabel(modalitySource, t),

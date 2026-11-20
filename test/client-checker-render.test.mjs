@@ -7,9 +7,10 @@ import { DICT } from '../client-src/dict.mjs'
 import { CSS } from '../client-src/css.mjs'
 import * as pure from '../client-src/pure.mjs'
 import * as format from '../client-src/format.mjs'
+import * as constants from '../client-src/constants.mjs'
 
 /** Minimal ESM adapter for just the two React modules under test, entirely in memory. */
-function loadComponent(name, requireModule, window) {
+function loadComponent(name, requireModule, window, globals = {}) {
   const source = readFileSync(new URL(`../client-src/${name}.mjs`, import.meta.url), 'utf8')
   const exports = []
   const body = source
@@ -23,14 +24,18 @@ function loadComponent(name, requireModule, window) {
       exports.push(...names.split(',').map((name) => name.trim()))
       return ''
     })
-  return vm.runInNewContext(`(function(require, window) {\n${body}\nreturn { ${exports.join(', ')} }\n})`, {},
+  return vm.runInNewContext(`(function(require, window) {\n${body}\nreturn { ${exports.join(', ')} }\n})`, globals,
     { filename: `${name}.mjs` })(requireModule, window)
 }
 
-function renderPanel(progress = {}, { pick, storage, language = 'en', canFullScan = true, pending = false } = {}) {
+function renderPanel(progress = {}, options = {}) {
+  const { pick, storage, language = 'en', canFullScan = true, canSetMode = false, canSetSourceMode = false,
+    pending = false, canUse = true, groups = [{ id: 'relay', name: 'Relay', models: [{ id: 'checker' }] }],
+    startError, loadError = null } = options
   const slots = []
   const writes = []
   const starts = []
+  const cancels = []
   let cursor = 0
   let loads = 0
   let tree
@@ -42,6 +47,12 @@ function renderPanel(progress = {}, { pick, storage, language = 'en', canFullSca
       return [slots[index], (value) => { slots[index] = value }]
     },
     useCallback: (fn) => fn,
+    useId: () => `test-id-${cursor++}`,
+    useRef(initial) {
+      const index = cursor++
+      if (!(index in slots)) slots[index] = { current: initial }
+      return slots[index]
+    },
     useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
     useEffect: () => {},
   }
@@ -60,10 +71,13 @@ function renderPanel(progress = {}, { pick, storage, language = 'en', canFullSca
   const { VerifyPanel } = loadComponent('checker-view', requireModule, window)
   const verify = {
     subscribe: () => () => {},
-    getSnapshot: () => ({ snapshot: { state: progress }, error: null, pending }),
+    getSnapshot: () => ({ snapshot: { state: progress }, error: loadError, pending }),
     load: async () => { loads += 1 },
-    start: async (payload) => { starts.push(JSON.parse(JSON.stringify(payload))) },
-    cancel: async () => {},
+    start: async (payload) => {
+      starts.push(JSON.parse(JSON.stringify(payload)))
+      if (startError) throw startError
+    },
+    cancel: async () => { cancels.push(true) },
   }
   const t = (key, params = {}) => {
     assert.ok(key in DICT[language], `missing ${language} translation: ${key}`)
@@ -76,10 +90,12 @@ function renderPanel(progress = {}, { pick, storage, language = 'en', canFullSca
     cursor = 0
     tree = VerifyPanel({
       verify,
-      catalog: { groups: [{ id: 'relay', name: 'Relay', models: [{ id: 'checker' }] }] },
+      catalog: { groups },
       t,
-      canUse: true,
+      canUse,
       canFullScan,
+      canSetMode,
+      canSetSourceMode,
     })
   }
   const findAll = (predicate, node = tree, out = []) => {
@@ -99,10 +115,14 @@ function renderPanel(progress = {}, { pick, storage, language = 'en', canFullSca
   }
   render()
   return {
-    render, findAll, byClass, text, writes, starts, t,
+    render, findAll, byClass, text, writes, starts, cancels, t,
     open() { byClass('mvp_checkerHead')[0].props.onClick(); render() },
     checkbox(key) { return findAll((node) => node.type === 'input' && node.props['aria-label'] === t(key))[0] },
-    start() { findAll((node) => node.type === 'button' && node.props.title === t('checker.startTitle'))[0].props.onClick() },
+    field(key) { return findAll((node) => node.type === 'select' && node.props['aria-label'] === t(key))[0] },
+    modes() { return findAll((node) => node.type === 'input' && node.props.type === 'radio') },
+    chooseMode(mode) { this.modes().find((node) => node.props.value === mode).props.onChange(); render() },
+    startControl() { return findAll((node) => node.type === 'button' && node.props.title === t('checker.startTitle'))[0] },
+    start() { this.startControl().props.onClick() },
   }
 }
 
@@ -121,35 +141,31 @@ const RUNNING = {
 }
 
 for (const language of ['en', 'zh']) {
-  test(`${language}: summary and progress separate processed, valid, unknown, failed and web calls`, () => {
+  test(`${language}: a compact summary does not repeat outcome and usage counts`, () => {
     const panel = renderPanel(RUNNING, { language })
     const summary = panel.text(panel.byClass('mvp_checkerSummary')[0])
     assert.match(summary, /7\/10/)
-    for (const part of language === 'en'
-      ? ['3 valid', '2 unknown', '2 failed', '9 known skipped', '4 searches', '6 reads', '1.5K tokens']
-      : ['有效 3', '未知 2', '失败 2', '跳过已知 9', '搜索 4', '读取 6', '1.5K Token']) {
-      assert.ok(summary.includes(part), `summary must contain ${part}`)
-    }
     panel.open()
     const bar = panel.findAll((node) => node.props.role === 'progressbar')[0]
     assert.equal(bar.props['aria-valuenow'], 7)
     assert.equal(bar.props['aria-valuemax'], 10)
     assert.equal(panel.byClass('mvp_progressFill')[0].props.style.width, '70%')
-    const details = panel.text(panel.byClass('mvp_checkerProgress')[0])
-    assert.ok(details.includes('7/10'))
-    assert.ok(details.includes(language === 'en' ? '3 valid' : '有效 3'))
-    assert.ok(details.includes(language === 'en' ? '2 unknown' : '未知 2'))
-    assert.ok(details.includes(language === 'en' ? '2 failed' : '失败 2'))
-    assert.ok(details.includes(language === 'en' ? '9 known skipped' : '跳过已知 9'))
-    assert.ok(details.includes(language === 'en' ? '6 web-page reads' : '网页读取 6 次'))
+    assert.equal(panel.text().split('7/10').length - 1, 1)
+    for (const part of language === 'en'
+      ? ['3 valid', '2 unknown', '2 failed', '9 known skipped', '4 searches', '6 web-page reads', '1.5K tokens']
+      : ['有效 3', '未知 2', '失败 2', '跳过已知 9', '搜索 4 次', '网页读取 6 次', '1.5K Token']) {
+      assert.ok(!summary.includes(part), `summary must not repeat ${part}`)
+      assert.equal(panel.text().split(part).length - 1, 1, `expanded view should report ${part} once`)
+    }
   })
 }
 
-test('finished progress reaches 100% when some processed models were unknown or failed', () => {
+test('finished progress reports all processed models without a finished progress bar', () => {
   const panel = renderPanel({ ...RUNNING, running: false, phase: 'done', processed: 10, unknown: 4, failed: 3 })
   assert.match(panel.text(panel.byClass('mvp_checkerSummary')[0]), /10\/10 processed/)
   panel.open()
-  assert.equal(panel.byClass('mvp_progressFill')[0].props.style.width, '100%')
+  assert.equal(panel.byClass('mvp_progressFill').length, 0)
+  assert.match(panel.text(panel.byClass('mvp_checkerProgress')[0]), /3 valid · 4 unknown · 3 failed/)
 })
 
 test('a run that skipped every model reports the result without a zero-total bar', () => {
@@ -163,18 +179,22 @@ test('legacy snapshots fall back to done and absent counters render zero', () =>
   const panel = renderPanel({ running: false, phase: 'cancelled', done: 2, total: 5 })
   assert.match(panel.text(panel.byClass('mvp_checkerSummary')[0]), /2\/5 processed/)
   panel.open()
-  assert.equal(panel.findAll((node) => node.props.role === 'progressbar')[0].props['aria-valuenow'], 2)
-  assert.equal(panel.byClass('mvp_progressFill')[0].props.style.width, '40%')
+  assert.equal(panel.findAll((node) => node.props.role === 'progressbar').length, 0)
   assert.match(panel.text(panel.byClass('mvp_checkerProgress')[0]), /0 unknown · 0 failed/)
-  assert.match(panel.text(panel.byClass('mvp_checkerProgress')[0]), /0 searches · 0 web-page reads/)
+  assert.match(panel.text(), /0 searches\s+·\s+0 web-page reads/)
 })
 
-test('an explicit zero processed count wins over done, and empty totals are safe', () => {
-  const panel = renderPanel({ ...RUNNING, processed: 0, total: 0 })
-  assert.match(panel.text(panel.byClass('mvp_checkerSummary')[0]), /0\/0 processed/)
+test('an explicit zero processed count wins over done; a plan with no known total has no zero-total bar', () => {
+  const panel = renderPanel({ ...RUNNING, processed: 0 })
+  assert.match(panel.text(panel.byClass('mvp_checkerSummary')[0]), /0\/10 processed/)
   panel.open()
   assert.equal(panel.findAll((node) => node.props.role === 'progressbar')[0].props['aria-valuenow'], 0)
   assert.equal(panel.byClass('mvp_progressFill')[0].props.style.width, '0%')
+  const listing = renderPanel({ running: true, phase: 'listing', mode: 'checker', total: 0 }, { canSetSourceMode: true })
+  listing.open()
+  assert.match(listing.text(listing.byClass('mvp_checkerSummary')[0]), /Reading model list · Online checker only/)
+  assert.doesNotMatch(listing.text(), /0\/0|Reading public catalogs|assigned to the checker/)
+  assert.equal(listing.findAll((node) => node.props.role === 'progressbar').length, 0)
 })
 
 test('active batches show stages and model IDs in at most three rows', () => {
@@ -290,13 +310,13 @@ test('run options remain disabled while verification is running or a mutation is
 test('verification reports positive search backend counts separately from web reads', () => {
   const panel = renderPanel({ ...RUNNING, searchBackends: { 'dsh-free-search': 3, 'host-web': 1, other: 57 } })
   panel.open()
-  const detail = panel.text(panel.byClass('mvp_checkerProgress')[0])
+  const detail = panel.text()
   assert.match(detail, /4 searches · 6 web-page reads/)
   assert.match(detail, /Search breakdown: 3 DSH Free Search calls · 1 Host web search calls/)
   assert.doesNotMatch(detail, /57/)
   const partial = renderPanel({ ...RUNNING, searchBackends: { 'dsh-free-search': 0, 'host-web': 2 } })
   partial.open()
-  const partialDetail = partial.text(partial.byClass('mvp_checkerProgress')[0])
+  const partialDetail = partial.text()
   assert.match(partialDetail, /2 Host web search calls/)
   assert.doesNotMatch(partialDetail, /DSH Free Search/)
 })
@@ -307,14 +327,12 @@ test('checker translations stay in sync and explain web costs, errors and no tar
     const placeholders = (value) => [...value.matchAll(/\{(\w+)\}/g)].map((match) => match[1]).sort()
     assert.deepEqual(placeholders(DICT.zh[key]), placeholders(DICT.en[key]), key)
   }
-  assert.match(DICT.zh['checker.description'], /搜索和网页读取/)
-  assert.match(DICT.zh['checker.description'], /联网服务额度.*Token/)
-  assert.match(DICT.zh['checker.description'], /不对目标模型进行实测/)
-  assert.match(DICT.zh['checker.description'], /联网不可用会报告错误/)
-  assert.match(DICT.en['checker.description'], /search and read web pages/)
-  assert.match(DICT.en['checker.description'], /web-service quota.*tokens/)
-  assert.match(DICT.en['checker.description'], /target models are not tested directly/)
-  assert.match(DICT.en['checker.description'], /Unavailable web access is reported as an error/)
+  assert.match(DICT.zh['checker.hint.supplement'], /联网额度.*Token/)
+  assert.match(DICT.zh['checker.hint.checker'], /跳过公开目录.*全部符合条件/)
+  assert.match(DICT.zh['checker.resultsScope'], /不实测目标模型.*联网不可用时会报告错误/)
+  assert.match(DICT.en['checker.hint.supplement'], /web quota and model tokens/)
+  assert.match(DICT.en['checker.hint.checker'], /all eligible models, bypassing public catalogs/)
+  assert.match(DICT.en['checker.resultsScope'], /without direct tests of target models.*Unavailable web access is reported as an error/)
 })
 
 test('new checker markup uses only existing theme CSS classes', () => {
@@ -322,4 +340,275 @@ test('new checker markup uses only existing theme CSS classes', () => {
   const used = new Set([...source.matchAll(/mvp_[A-Za-z]+/g)].map((match) => match[0]))
   const defined = new Set([...CSS.matchAll(/\.(mvp_[A-Za-z]+)/g)].map((match) => match[1]))
   assert.deepEqual([...used].filter((name) => !defined.has(name)), [])
+})
+
+
+test('public-only mode starts without a checker or web search and honors alias opt-in', () => {
+  const panel = renderPanel({}, { canSetMode: true })
+  panel.open()
+  assert.equal(panel.checkbox('checker.useChecker').props.checked, true)
+  assert.equal(panel.checkbox('checker.fuzzyMatch').props.checked, false)
+  panel.checkbox('checker.useChecker').props.onChange({ target: { checked: false } })
+  panel.render()
+  assert.equal(panel.checkbox('checker.webSearch'), undefined)
+  panel.checkbox('checker.fuzzyMatch').props.onChange({ target: { checked: true } })
+  panel.render()
+  panel.start()
+  assert.deepEqual(panel.starts[0], { writeBack: false, webSearch: false, useChecker: false, fuzzyMatch: true, concurrency: 2, fullScan: false })
+})
+
+
+test('new hosts offer three localized modes with supplement selected and no separate web switch', () => {
+  const panel = renderPanel({}, { canSetSourceMode: true, canSetMode: true, language: 'zh' })
+  panel.open()
+  const modes = panel.byClass('mvp_checkerMode').map((node) => panel.text(node).trim())
+  assert.deepEqual(modes, ['只用公开目录', '公开目录＋校验员补漏', '仅校验员联网'])
+  assert.equal(panel.modes().find((node) => node.props.checked).props.value, 'supplement')
+  assert.equal(panel.checkbox('checker.useChecker'), undefined)
+  assert.equal(panel.checkbox('checker.webSearch'), undefined)
+  assert.ok(panel.startControl().props.disabled)
+  panel.start()
+  assert.deepEqual(panel.starts, [])
+  const advanced = panel.findAll((node) => node.type === 'details' && panel.text(node).includes(panel.t('checker.advanced')))[0]
+  assert.ok(advanced)
+  assert.equal(advanced.props.open, undefined)
+  assert.ok(panel.findAll((node) => node === panel.checkbox('checker.fuzzyMatch'), advanced).length)
+  assert.equal(panel.checkbox('checker.fuzzyMatch').props.checked, true)
+  assert.equal(panel.checkbox('checker.writeBack').props.checked, false)
+  panel.field('checker.provider').props.onChange({ target: { value: 'relay' } })
+  panel.render()
+  assert.ok(panel.startControl().props.disabled)
+  panel.field('checker.model').props.onChange({ target: { value: 'checker' } })
+  panel.render()
+  assert.equal(panel.startControl().props.disabled, false)
+  panel.start()
+  assert.deepEqual(panel.starts, [{ provider: 'relay', model: 'checker', mode: 'supplement', fuzzyMatch: true,
+    writeBack: false, fullScan: false, concurrency: 2 }])
+})
+
+test('public and online-only modes send only the relevant options and retain the chosen route', () => {
+  const panel = renderPanel({}, { canSetSourceMode: true, pick: { provider: 'relay', model: 'checker', writeBack: true, fuzzyMatch: false, concurrency: 5 } })
+  panel.open()
+  panel.chooseMode('public')
+  assert.equal(panel.field('checker.provider'), undefined)
+  assert.equal(panel.field('checker.model'), undefined)
+  assert.equal(panel.field('checker.concurrency'), undefined)
+  assert.equal(panel.checkbox('checker.writeBack'), undefined)
+  panel.checkbox('checker.fullScan').props.onChange({ target: { checked: true } })
+  panel.render()
+  panel.start()
+  assert.deepEqual(panel.starts[0], { mode: 'public', writeBack: false, fuzzyMatch: false, concurrency: 5, fullScan: true })
+  panel.chooseMode('checker')
+  assert.equal(panel.field('checker.model').props.value, 'checker')
+  assert.equal(panel.checkbox('checker.fullScan'), undefined)
+  assert.equal(panel.checkbox('checker.fuzzyMatch'), undefined)
+  assert.equal(panel.checkbox('checker.webSearch'), undefined)
+  assert.match(panel.text(), /Provider write-back on/)
+  panel.start()
+  assert.deepEqual(panel.starts[1], { mode: 'checker', provider: 'relay', model: 'checker', writeBack: true,
+    fuzzyMatch: false, concurrency: 5, fullScan: true })
+  assert.equal(panel.writes.at(-1).value.mode, 'checker')
+  panel.chooseMode('supplement')
+  panel.start()
+  assert.deepEqual(panel.starts[2], { mode: 'supplement', provider: 'relay', model: 'checker', writeBack: true,
+    fuzzyMatch: false, concurrency: 5, fullScan: false })
+})
+
+test('legacy offline intent migrates without silently enabling web search; older hosts ignore the new mode', () => {
+  for (const legacy of [{ webSearch: false }, { useChecker: false }]) {
+    const panel = renderPanel({}, { canSetSourceMode: true, pick: { ...legacy, provider: 'relay', model: 'checker' } })
+    panel.open()
+    assert.equal(panel.modes().find((node) => node.props.checked).props.value, 'public')
+    panel.start()
+    assert.equal(panel.starts[0].mode, 'public')
+  }
+  const panel = renderPanel({}, { canSetMode: true, pick: { mode: 'checker', webSearch: false, provider: 'relay', model: 'checker' } })
+  panel.open()
+  assert.equal(panel.modes().length, 0)
+  assert.equal(panel.checkbox('checker.webSearch').props.checked, false)
+  panel.start()
+  assert.deepEqual(panel.starts[0], { provider: 'relay', model: 'checker', writeBack: false, useChecker: true,
+    webSearch: false, fuzzyMatch: false, concurrency: 2, fullScan: false })
+})
+
+test('run status shows the Host route and exact plan, including a known zero, not the locally selected mode', () => {
+  const panel = renderPanel({ ...RUNNING, mode: 'supplement', checker: { provider: 'actual', model: 'remote' },
+    catalogTargets: 10, catalogMatches: 10, checkerTargets: 0, publicOnly: 7 }, { canSetSourceMode: true, pick: { mode: 'public' } })
+  panel.open()
+  assert.equal(panel.modes().find((node) => node.props.checked).props.value, 'supplement')
+  assert.ok(panel.modes().every((node) => node.props.disabled))
+  assert.match(panel.text(panel.byClass('mvp_checkerSummary')[0]), /Public catalogs \+ checker/)
+  assert.match(panel.text(), /Catalog lookup: 10 models · 10 catalog matches · 0 models assigned to the checker · Checker actual\/remote/)
+  assert.match(panel.text(), /Catalog facts for 7 models/)
+  const publicRun = renderPanel({ ...RUNNING, mode: 'public', checkerTargets: 0 }, { canSetSourceMode: true })
+  publicRun.open()
+  assert.doesNotMatch(publicRun.text(), /4 searches|1.5K tokens/)
+})
+
+test('short errors keep details accessible and action errors are bounded', async () => {
+  const long = 'Request rejected: ' + 'verbose '.repeat(40)
+  const panel = renderPanel({ phase: 'error', errors: [long, 'two', 'three', 'four'] },
+    { canSetSourceMode: true, pick: { mode: 'public' }, startError: new Error(long) })
+  panel.open()
+  const [preview, full] = panel.byClass('mvp_errorList')
+  assert.equal(panel.findAll((node) => node.type === 'li', preview).length, 3)
+  assert.match(panel.text(preview), /…/)
+  assert.doesNotMatch(panel.text(preview), /four/)
+  assert.ok(panel.text(full).includes(long))
+  assert.match(panel.text(full), /four/)
+  panel.start()
+  await new Promise(setImmediate)
+  panel.render()
+  const alert = panel.findAll((node) => node.props.role === 'alert')[0]
+  assert.match(panel.text(alert), /Request rejected: .*…/)
+  assert.ok(panel.text(panel.byClass('mvp_errorList')[1]).includes(long))
+  assert.match(panel.text(panel.byClass('mvp_badge')[0]), /4 errors/)
+})
+
+test('a fatal run still reports partial outcomes and usage', () => {
+  const panel = renderPanel({ ...RUNNING, running: false, phase: 'error', mode: 'checker', checkerTargets: 10,
+    errors: ['could not save one batch'] }, { canSetSourceMode: true })
+  assert.match(panel.text(panel.byClass('mvp_checkerSummary')[0]), /Verification failed · Online checker only · 7\/10 processed/)
+  panel.open()
+  assert.match(panel.text(), /3 valid.*6 web-page reads.*1.5K tokens/)
+  assert.equal(panel.findAll((node) => node.props.role === 'progressbar').length, 0)
+})
+
+test('verification cancel remains visible when the enriched catalog is unavailable', () => {
+  const panel = renderPanel(RUNNING, { canUse: false })
+  const cancel = panel.findAll((node) => node.props.title === panel.t('checker.cancelTitle'))
+  assert.equal(cancel.length, 1, 'a running sweep exposes cancel even before expanding')
+  assert.equal(cancel[0].props.disabled, false)
+  cancel[0].props.onClick()
+  assert.deepEqual(panel.cancels, [true])
+  const done = renderPanel({ phase: 'done' }, { canUse: false, pick: { provider: 'relay', model: 'checker' } })
+  done.open()
+  const start = done.findAll((node) => node.props.title === done.t('checker.startTitle'))[0]
+  assert.equal(start.props.disabled, true)
+  start.props.onClick()
+  assert.equal(done.starts.length, 0)
+})
+
+test('incremental write-back explains skipped prior results without requesting an unsolicited full scan', () => {
+  const panel = renderPanel({ phase: 'done', total: 0, writeBack: true, skippedKnown: 12 },
+    { pick: { provider: 'relay', model: 'checker', writeBack: true } })
+  panel.open()
+  assert.match(panel.text(), /Recheck existing models to include earlier results/)
+  assert.match(panel.text(), /12 known models were skipped and not written back/)
+  panel.start()
+  assert.equal(panel.starts[0].fullScan, false)
+})
+
+test('a cancelled sweep still shows a dispatched pending provider write', () => {
+  const panel = renderPanel({ phase: 'cancelled', pendingWrite: { provider: 'relay', model: 'target', waitEnded: 'CANCELLED' } }, { canUse: false })
+  const status = panel.findAll((node) => node.props.role === 'status')
+  assert.equal(status.length, 1)
+  assert.match(panel.text(status[0]), /still pending \(relay\/target\)/)
+  const settled = renderPanel({ phase: 'cancelled', latestWriteSettlement: { provider: 'relay', model: 'target', finishedAt: 5, written: true } })
+  settled.open()
+  assert.match(settled.text(), /delayed provider write was applied/)
+})
+
+function renderUsage(state, fetch) {
+  let cursor = 0
+  const slots = []
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.flat(Infinity) } }),
+    useState(initial) {
+      const index = cursor++
+      if (!(index in slots)) slots[index] = initial
+      return [slots[index], (value) => { slots[index] = value }]
+    },
+  }
+  const modules = { react: React, constants, pure, hooks: { useSource: () => state } }
+  const { UsageToolbar } = loadComponent('usage-view', (name) => modules[name], {}, { fetch })
+  const t = (key, params) => DICT.en[key].replace(/\{(\w+)\}/g, (_, name) => params[name])
+  return () => {
+    cursor = 0
+    const tree = UsageToolbar({ usage: {}, t, features: ['usage'] })
+    const elements = []
+    const visit = (node) => {
+      if (node && typeof node === 'object' && node.props) {
+        elements.push(node)
+        node.props.children.forEach(visit)
+      }
+    }
+    visit(tree)
+    return elements
+  }
+}
+
+test('usage distinguishes absent or cold data, measured zero, and scan errors', () => {
+  const state = { snapshot: null, error: null }
+  const render = renderUsage(state)
+  const values = () => render().filter((node) => node.props.className === 'mvp_statValue').map((node) => node.props.children[0])
+  assert.deepEqual(values(), ['—', '—', '—', '—'])
+  state.snapshot = { ranges: { today: [0, 0, 0, 0] }, computing: true }
+  assert.deepEqual(values(), ['—', '—', '—', '—'])
+  assert.ok(render().some((node) => node.props.role === 'status' && node.props.children[0] === 'scanning…'))
+  state.snapshot.computing = false
+  assert.deepEqual(values(), ['0', '—', '—', '—'])
+  state.snapshot.error = 'could not read one log'
+  assert.deepEqual(values(), ['—', '—', '—', '—'])
+  assert.ok(render().some((node) => node.props.role === 'alert' && node.props.children[0].includes('one log')))
+})
+
+test('cold export shows progress and displays a same-origin CSV request failure', async () => {
+  const reply = Promise.withResolvers()
+  const calls = []
+  const render = renderUsage({ snapshot: null, error: null }, (url, init) => { calls.push({ url, init }); return reply.promise })
+  const button = render().find((node) => node.props.children[0] === 'Usage CSV')
+  button.props.onClick()
+  assert.match(calls[0].url, /\/export\?type=usage$/)
+  assert.equal(calls[0].init.credentials, 'same-origin')
+  assert.ok(render().some((node) => node.props.role === 'status' && node.props.children[0].includes('preparing')))
+  reply.resolve(Response.json({ error: { message: 'scan failed' } }, { status: 500 }))
+  await new Promise(setImmediate)
+  const failed = render()
+  assert.ok(failed.some((node) => node.props.role === 'alert' && node.props.children[0].includes('scan failed')))
+  assert.equal(failed.find((node) => node.props.children[0] === 'Usage CSV').props.disabled, false)
+})
+
+
+test('override editor saves the captured revision and preserves untouched fields and ladder order', () => {
+  const slots = []
+  const saves = []
+  let cursor = 0
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.flat(Infinity) } }),
+    useState(initial) {
+      const index = cursor++
+      if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial
+      return [slots[index], (value) => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }]
+    },
+    useRef(initial) { return slots[cursor++] ??= { current: initial } },
+    useId: () => `test-id-${cursor++}`,
+    useEffect: () => {},
+  }
+  const modules = { react: React, format }
+  const { ModelOverrideEditor } = loadComponent('override-editor', (name) => modules[name], {})
+  const entry = { provider: 'relay', model: 'org/model', kind: 'chat', contextWindow: 32_000,
+    input: ['image', 'text'], efforts: [{ id: 'custom' }, { id: 'high' }, { id: 'low' }], defaultEffort: 'high' }
+  const render = (stale = false) => {
+    cursor = 0
+    const tree = ModelOverrideEditor({ entry, name: 'Model', revision: 'r1', stale, hasOverride: true,
+      t: (key) => key, overrides: { save: async (payload, revision) => saves.push({ payload, revision }) } })
+    const elements = []
+    const visit = (node) => {
+      if (node && typeof node === 'object' && node.props) {
+        elements.push(node)
+        node.props.children.forEach(visit)
+      }
+    }
+    visit(tree)
+    return elements
+  }
+  render().find((node) => node.props['aria-label'] === 'override.context').props.onInput({ target: { value: '64000' } })
+  const staleSave = render(true).find((node) => node.props.children[0] === 'override.saveLocal')
+  assert.equal(staleSave.props.disabled, true)
+  staleSave.props.onClick()
+  assert.equal(saves.length, 0)
+  render().find((node) => node.props.children[0] === 'override.saveLocal').props.onClick()
+  assert.deepEqual(JSON.parse(JSON.stringify(saves)), [{ revision: 'r1', payload: { ...entry,
+    contextWindow: 64_000, applyToProvider: false } }])
 })

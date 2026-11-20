@@ -2,20 +2,51 @@ name: Publish package
 
 on:
   workflow_dispatch:
+    inputs:
+      confirm_publish:
+        description: 'Publish this existing version tag to npm and GitHub Releases'
+        type: boolean
+        required: true
+        default: false
   push:
     tags:
       - 'v*'
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
+      - name: Require an existing tag and explicit manual confirmation
+        shell: bash
+        env:
+          CONFIRM_PUBLISH: ${{ inputs.confirm_publish }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != 'tag' ]]; then
+            echo '::error::Select an existing version tag, not a branch.'
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && "$CONFIRM_PUBLISH" != 'true' ]]; then
+            echo '::error::Manual publication requires confirm_publish=true.'
+            exit 1
+          fi
+
       - name: Check out source
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -23,6 +54,21 @@ jobs:
           node-version: '24'
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+
+      - name: Match the SemVer tag to the package manifest
+        id: version
+        shell: bash
+        run: |
+          node --input-type=commonjs <<'NODE'
+          const fs = require('node:fs')
+          const { version } = require('./package.json')
+          const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*))?(?:\+[\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*)?$/
+          const match = typeof version === 'string' && semver.exec(version)
+          if (!match || match[0] !== version || match.slice(1, 4).some((component) => !Number.isSafeInteger(Number(component))) || match[4]?.split('.').some((id) => /^0\d+$/.test(id)) || process.env.GITHUB_REF !== `refs/tags/v${version}`) {
+            throw new Error('The ref must be v<SemVer> and match package.json exactly.')
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nprerelease=${Boolean(match[4])}\n`)
+          NODE
 
       - name: Install dependencies
         run: npm ci
@@ -34,8 +80,73 @@ jobs:
         run: npm run build
 
       - name: Verify generated client
-        shell: bash
         run: git diff --exit-code -- client.js
 
+      - name: Pack versioned and fixed-name tarballs
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir release-assets
+          npm pack --json --pack-destination release-assets > pack-result.json
+          PACKED_FILE=$(node --input-type=commonjs <<'NODE'
+          const path = require('node:path')
+          const { name } = require('./package.json')
+          const result = require('./pack-result.json')
+          // npm 11 and npm 12 use different JSON shapes for the same pack.
+          const packed = Array.isArray(result) ? result[0] : result[name]
+          const filename = packed?.filename
+          if (typeof filename !== 'string' || !filename.endsWith('.tgz') || path.basename(filename) !== filename) {
+            throw new Error('npm pack did not report a tarball filename.')
+          }
+          console.log(filename)
+          NODE
+          )
+          mv -- "release-assets/$PACKED_FILE" "release-assets/dsh-model-visibility-$VERSION.tgz"
+          cp -- "release-assets/dsh-model-visibility-$VERSION.tgz" release-assets/dsh-model-visibility.tgz
+
+      - name: Stage the release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/*.tgz
+          if-no-files-found: error
+          overwrite: true
+
       - name: Publish with npm trusted publishing
-        run: npm publish
+        shell: bash
+        env:
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          DIST_TAG=latest
+          if [[ "$PRERELEASE" == 'true' ]]; then DIST_TAG=next; fi
+          npm publish ./release-assets/dsh-model-visibility.tgz --tag "$DIST_TAG"
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the published tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Attach GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          PRERELEASE: ${{ needs.publish.outputs.prerelease }}
+        run: |
+          TAG="v$VERSION"
+          ASSETS=(release-assets/dsh-model-visibility.tgz "release-assets/dsh-model-visibility-$VERSION.tgz")
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY"
+          else
+            FLAGS=(--verify-tag --generate-notes)
+            if [[ "$PRERELEASE" == 'true' ]]; then FLAGS+=(--prerelease); fi
+            gh release create "$TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" "${FLAGS[@]}"
+          fi

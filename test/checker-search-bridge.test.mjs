@@ -24,6 +24,11 @@ function setup(execute, { value = { provider: 'bing' }, executable = () => advan
 function fakeChecker(...rounds) {
   let next = 0
   return { prepareCall: async config => ({ config, stream: async function* (request) {
+    if (!request.tools.length) {
+      assert.deepEqual(request.messages.map(message => message.role), ['user'])
+      yield { type: 'text-delta', text: '[]' }
+      return
+    }
     assert.deepEqual(request.tools.map(tool => tool.name), ['search_model_docs', 'read_model_doc'])
     const reply = rounds[next++]?.(request)
     if (Array.isArray(reply)) {
@@ -42,19 +47,25 @@ test('only the fixed standalone advanced_search is dispatched; structured HTTPS 
     { url: sourceUrl, title: 'x'.repeat(700), snippet: 'y'.repeat(4000) },
     ...Array.from({ length: 7 }, (_, i) => ({ url: `https://example.com/${i}` })),
   ]
+  let dispatches = 0
   const searchBridge = setup(async input => {
+    dispatches += 1
     assert.deepEqual(Object.keys(input).sort(), ['calls', 'signal'])
     assert.ok(input.signal instanceof AbortSignal)
     assert.equal(input.calls.length, 1)
     const [call] = input.calls
     assert.equal(call.name, 'advanced_search')
-    assert.notEqual(call.id, 'search_model_docs')
+    assert.notEqual(call.id, 'search_model_doc')
     assert.deepEqual(JSON.parse(call.arguments), { query: 'model official specs', maxResults: 5 })
     return success(call, { sources, content: 'z'.repeat(5000) })
   })
   const fetched = []
   const routes = []
-  const llm = fakeChecker(searchRound, request => {
+  const llm = fakeChecker(() => [toolCall('search_model_doc', { query: 'model official specs' })], request => {
+    const [replayed] = request.messages.at(-2).content
+    assert.deepEqual(replayed, { ...toolCall('search_model_doc', { query: 'model official specs' }), name: 'search_model_docs' })
+    assert.equal(request.messages.at(-1).toolCallId, replayed.id)
+    assert.equal(request.messages.at(-1).source.callId, replayed.id)
     const result = JSON.parse(request.messages.at(-1).content[0].text)
     assert.equal(result.untrusted, true)
     assert.equal(result.content.length, 4000)
@@ -64,7 +75,7 @@ test('only the fixed standalone advanced_search is dispatched; structured HTTPS 
     return [
       toolCall('read_model_doc', { url: 'https://rendered.example/ignore' }),
       toolCall('advanced_search', { query: 'arbitrary tool' }),
-      toolCall('search_model_docs', { query: 'model', engine: 'openai' }),
+      toolCall('search_model_doc', { query: 'model', engine: 'openai' }),
       toolCall('read_model_doc', { url: sourceUrl }),
     ]
   }, request => {
@@ -77,20 +88,21 @@ test('only the fixed standalone advanced_search is dispatched; structured HTTPS 
     search() { assert.fail('Host search must not run when Free Search is available') },
     async fetch(request) { fetched.push(request); return { statusCode: 200, body: { content: 'r'.repeat(20_000) } } },
   }, onWebCall: (...args) => routes.push(args) })
+  assert.equal(dispatches, 1, 'the alias must not bypass validation or invoke extra backend searches')
   assert.deepEqual(fetched, [{ url: sourceUrl }])
   assert.deepEqual(routes, [['search', 'dsh-free-search'], ['fetch', 'host-web']])
   assert.deepEqual([...reply.readUrls], [sourceUrl])
-  assert.deepEqual([...reply.allowedUrls], [sourceUrl, ...sources.slice(4, 8).map(source => source.url)])
+  assert.deepEqual([...reply.allowedUrls], [sourceUrl])
 })
 
-test('missing, disabled or incompatible integration uses the configured Host search, without adding selection parameters', async () => {
+test('missing, disabled or incompatible integration uses the checker route for Host search', async () => {
   for (const options of [{ value: null }, { value: { disabledTools: ['advanced_search'] } }, { executable: () => undefined }, { executable: () => ({ name: 'advanced_search' }) }]) {
     const searchBridge = setup(() => assert.fail('Free Search should not dispatch'), options)
     const web = { async search(request, signal) {
-      assert.deepEqual(request, { query: 'model official specs', maxResults: 5 })
+      assert.deepEqual(request, { query: 'model official specs', maxResults: 5, llmProvider: 'r' })
       assert.ok(signal instanceof AbortSignal)
       assert.equal(this, web)
-      return { sources: [{ url: sourceUrl }] }
+      return { sources: [{ url: sourceUrl, snippet: 'fixture specification' }] }
     } }
     const routes = []
     const result = await run(fakeChecker(searchRound, () => {}), { searchBridge, web, onWebCall: (...args) => routes.push(args) })
@@ -145,4 +157,25 @@ test('cancelled Free Search work cannot overlap a new dispatch until the executo
   await assert.rejects(abandoned, { name: 'AbortError' })
   await searchBridge.resolve()(request, new AbortController().signal)
   assert.equal(dispatches, 2)
+})
+
+
+test('a held aborted Free Search dispatch does not increment backend totals again', async () => {
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const searchBridge = setup(async ({ calls: [call] }) => {
+    entered.resolve()
+    await release.promise
+    return success(call, { sources: [{ url: sourceUrl, snippet: 'spec' }] })
+  })
+  const controller = new AbortController()
+  const counters = []
+  const first = run(fakeChecker(searchRound, () => {}), { searchBridge, signal: controller.signal, onWebCall: (...args) => counters.push(args) })
+  await entered.promise
+  controller.abort()
+  await assert.rejects(first, /aborted|cancelled/)
+  try {
+    await assert.rejects(run(fakeChecker(searchRound, () => {}), { searchBridge, onWebCall: (...args) => counters.push(args) }), /still settling/)
+    assert.deepEqual(counters, [['search', 'dsh-free-search']])
+  } finally { release.resolve() }
 })

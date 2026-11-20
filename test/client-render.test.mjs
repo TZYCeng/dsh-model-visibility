@@ -85,7 +85,10 @@ const CATALOG = {
  * @returns the harness: render(), elements collected in the last pass, and every
  *   handler that threw (which the test asserts is empty).
  */
-function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-model'], applyInput: true }, writable = true } = {}) {
+function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-model'], applyInput: true }, writable = true, overrideRead } = {}) {
+  const postedOverrides = []
+  const editorState = []
+  let slots
   const elements = []
   const effects = []
   const state = []
@@ -104,17 +107,22 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
       // Re-seed per render pass is not how React works; this harness keeps one
       // component instance alive across renders, which is what a click needs.
       const slot = cursor++
-      if (state[slot] === undefined) state[slot] = typeof initial === 'function' ? initial() : initial
+      const target = slots
+      if (target[slot] === undefined) target[slot] = typeof initial === 'function' ? initial() : initial
       const setter = (next) => {
-        state[slot] = typeof next === 'function' ? next(state[slot]) : next
+        target[slot] = typeof next === 'function' ? next(target[slot]) : next
       }
-      return [state[slot], setter]
+      return [target[slot], setter]
     },
     useEffect: (fn) => { effects.push(fn) },
     useLayoutEffect: (fn) => { effects.push(fn) },
     useMemo: (factory) => factory(),
     useCallback: (fn) => fn,
-    useRef: (value) => ({ current: value }),
+    useRef: (value) => {
+      const slot = cursor++
+      return slots[slot] ??= { current: value }
+    },
+    useId: () => 'test-id-' + cursor++,
     useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
   }
 
@@ -130,6 +138,8 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
   }
 
   const registrations = { section: null }
+  const remoteEvents = new Map()
+  const fetches = []
   const effectScope = {
     effect: (fn) => {
       const dispose = fn()
@@ -151,7 +161,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
     locale: { register: () => () => {}, bind: () => (key) => key },
     configForms: { get: () => form },
     remote: {
-      $on: () => () => {},
+      $on: (name, handler) => { remoteEvents.set(name, handler); return () => remoteEvents.delete(name) },
       session: { modelCatalog: async () => ({ ok: true, value: { groups: [] } }) },
     },
     slots: {
@@ -188,7 +198,14 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
     clearTimeout,
     setInterval: () => ({ unref() {} }),
     clearInterval: () => {},
-    fetch: async (url) => ({
+    fetch: async (url, init) => {
+      fetches.push(String(url))
+      if (String(url).endsWith('/overrides') && init?.method === 'POST') {
+        postedOverrides.push(JSON.parse(init.body))
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: { overrides: [], revisions: [] } }) }
+      }
+      if (String(url).endsWith('/overrides') && overrideRead) return overrideRead()
+      return ({
       ok: true,
       status: 200,
       json: async () =>
@@ -205,11 +222,11 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
               },
             }
           : String(url).includes('/overrides')
-            ? { ok: true, value: { overrides: [] } }
+            ? { ok: true, value: { overrides: [], revisions: [] } }
             : String(url).includes('/verify')
               ? { ok: true, value: { state: { running: false, done: 0, total: 0 }, learned: { models: 0 } } }
               : catalog,
-    }),
+    }) },
   }
 
   vm.runInNewContext(code, sandbox, { filename: 'client.js' })
@@ -219,10 +236,22 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
   if (typeof Section !== 'function') throw new Error('the settings section did not register')
 
   const t = (key) => key
+  const editorT = (key, values) => values ? `${key}: ${JSON.stringify(values)}`
+    : key.startsWith('effort.') ? key.slice('effort.'.length) : key
   const render = () => {
     elements.length = 0
+    slots = state
     cursor = 0
     return Section({ t })
+  }
+  const renderEditor = () => {
+    render()
+    const editor = elements.find((node) => node.type.name === 'ModelOverrideEditor')
+    assert.ok(editor, 'settings row must open the editor')
+    elements.length = 0
+    slots = editorState
+    cursor = 0
+    return editor.type({ ...editor.props, t: editorT })
   }
 
   /** Every clickable control in the last render pass. */
@@ -234,7 +263,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
         element.props.disabled !== true,
     )
 
-  return { render, effects, elements, controls, writes, exported, formState, t }
+  return { render, renderEditor, effects, elements, controls, writes, postedOverrides, exported, formState, t, remoteEvents, fetches }
 }
 
 /** Run data effects so the section sees a loaded catalog. */
@@ -418,7 +447,7 @@ test('every referenced mvp_ class has a CSS rule and every rule is used', async 
  * nested function components with a per-instance hook frame, which is enough
  * to assert on real markup.
  */
-async function renderVerifyPanel(verifyValue, { pick } = {}) {
+async function renderVerifyPanel(verifyValue, { pick, extraFeatures = [] } = {}) {
   const { readFileSync: read } = await import('node:fs')
   const code = read('client.js', 'utf8')
   const elements = []
@@ -430,6 +459,7 @@ async function renderVerifyPanel(verifyValue, { pick } = {}) {
     Fragment: 'Fragment',
     useCallback: (fn) => fn,
     useMemo: (factory) => factory(),
+    useId: () => `test-id-${currentFrame.cursor++}`,
     useRef: (value) => ({ current: value }),
     useEffect: (fn) => {
       effects.push(fn)
@@ -481,7 +511,7 @@ async function renderVerifyPanel(verifyValue, { pick } = {}) {
       groups: [{ id: 'relay', name: 'Relay', models: [{ id: 'grok-4.7', name: 'grok-4.7', kind: 'chat', sources: {} }] }],
       failures: [],
       providers: [],
-      learned: { models: 1, features: ['applyInput', 'reload', 'overrides', 'verify', 'usage', 'checkerBudget', 'verifyWeb'] },
+      learned: { models: 1, features: ['applyInput', 'reload', 'overrides', 'verify', 'usage', 'checkerBudget', 'verifyWeb', ...extraFeatures] },
       generatedAt: 1,
     },
   }
@@ -617,7 +647,7 @@ const FINISHED_SWEEP = {
 test('the verify panel reports every public catalog source', async () => {
   const panel = await renderVerifyPanel(FINISHED_SWEEP)
   panel.open()
-  const lines = panel.text('mvp_sources')
+  const lines = panel.text('mvp_sourceList')
   assert.ok(lines.some((line) => line.includes('models.dev/models.json')), 'a source name must render')
   assert.ok(lines.some((line) => line.includes('hf-mirror.com')), 'the fallback host must render')
   assert.ok(
@@ -630,15 +660,13 @@ test('the verify panel reports every public catalog source', async () => {
   )
 })
 
-test('the verify panel offers a thread count and shows the active one', async () => {
+test('the verify panel keeps the chosen thread count under advanced options', async () => {
   const panel = await renderVerifyPanel(FINISHED_SWEEP)
   panel.open()
-  const selects = panel.find('mvp_select')
-  const labels = selects.map((element) => element.props['aria-label']).filter(Boolean)
-  assert.ok(labels.includes('checker.concurrency'), 'a concurrency control must exist')
-  const options = panel.find('mvp_select').flatMap((element) => element.props.children).filter(Boolean)
-  void options
-  assert.ok(panel.text('mvp_checkerProgress').some((line) => line.includes('checker.threads(4)')))
+  const concurrency = panel.find('mvp_select').find((element) => element.props['aria-label'] === 'checker.concurrency')
+  assert.ok(concurrency, 'a concurrency control must exist')
+  assert.equal(concurrency.props.value, '4')
+  assert.ok(panel.text('mvp_checkerDetails').includes('checker.advanced'))
 })
 
 test('the verify panel lists failed batch reasons instead of a bare count', async () => {
@@ -652,7 +680,192 @@ test('the verify panel lists failed batch reasons instead of a bare count', asyn
 test('a sweep resolved only from public catalogs is announced', async () => {
   const panel = await renderVerifyPanel(FINISHED_SWEEP)
   panel.open()
-  const hints = panel.text('mvp_usageHint')
-  assert.ok(hints.some((line) => line.includes('checker.publicOnly(2)')))
+  assert.ok(panel.find('mvp_checkerProgressText').some((hint) => hint.props.children.includes('checker.catalogResults(2)')))
 })
 
+test('Settings exposes source modes only when the Host advertises verifySourceModes', async () => {
+  const oldHost = await renderVerifyPanel(FINISHED_SWEEP, { extraFeatures: ['verifyModes'] })
+  oldHost.open()
+  assert.equal(oldHost.find('mvp_checkerModes').length, 0)
+  const newHost = await renderVerifyPanel(FINISHED_SWEEP, { extraFeatures: ['verifyModes', 'verifySourceModes'] })
+  newHost.open()
+  assert.deepEqual(newHost.text('mvp_checkerModes'), ['checker.sourceMode', 'checker.mode.public', 'checker.mode.supplement', 'checker.mode.checker'])
+})
+
+
+
+test('only adapter levels are shown as selectable; unmatched evidence is reference-only', async () => {
+  const catalog = structuredClone(CATALOG)
+  const [active, estimated] = catalog.value.groups[0].models
+  active.requestReasoning = active.reasoning
+  active.reasoningWireDisabled = true
+  active.reasoning = { efforts: [{ id: 'max', name: 'Max' }] }
+  active.sources.reasoning = 'manual'
+  estimated.reasoningSupported = true
+  estimated.reasoning = { efforts: [{ id: 'medium', name: 'Medium' }] }
+  estimated.requestReasoning = null
+  estimated.sources.reasoning = 'snapshot'
+  const harness = createHarness({ catalog })
+  harness.render()
+  await settle(harness)
+  harness.render()
+  const tags = harness.elements.filter(element => String(element.props.className).split(' ').includes('mvp_tag'))
+    .map(element => ({ label: element.props.children.join(''), className: element.props.className }))
+  assert.deepEqual(tags.filter(tag => tag.label.startsWith('tag.effort ')).map(tag => tag.label), ['tag.effort Low/High'])
+  const references = tags.filter(tag => tag.label.startsWith('tag.effortReference '))
+  assert.deepEqual(references.map(tag => tag.label), ['tag.effortReference Max', 'tag.effortReference Medium'])
+  assert.ok(references.every(tag => tag.className.includes('mvp_tag--inferred')))
+  assert.ok(tags.some(tag => tag.label === 'tag.effortWireOff'))
+})
+
+
+test('override editor stays closed until a revisioned list arrives', async () => {
+  const initial = Promise.withResolvers()
+  const row = { provider: 'relay', model: 'grok-4.7', contextWindow: 1234 }
+  const harness = createHarness({ overrideRead: () => initial.promise })
+  const edit = () => harness.elements.find((node) => node.props['aria-label'] === 'row.edit: grok-4.7')
+  const editor = () => harness.elements.find((node) => node.type.name === 'ModelOverrideEditor')
+  harness.render()
+  await settle(harness)
+  harness.render()
+  assert.equal(edit().props.disabled, true)
+  edit().props.onClick()
+  harness.render()
+  assert.equal(editor(), undefined)
+  initial.resolve(Response.json({ ok: true, value: { overrides: [row], revisions: [{ provider: row.provider, model: row.model, revision: 'r1' }] } }))
+  await new Promise(setImmediate)
+  harness.render()
+  assert.equal(edit().props.disabled, false)
+  edit().props.onClick()
+  harness.render()
+  assert.equal(editor().props.entry.contextWindow, 1234)
+  assert.equal(editor().props.revision, 'r1')
+})
+
+async function referenceEditor({ eligible = true, currentHost = true, nonChat = false, allSelected = false } = {}) {
+  const catalog = structuredClone(CATALOG)
+  const [model] = catalog.value.groups[0].models
+  if (nonChat) model.kind = 'embedding'
+  model.standardEffort = eligible
+  model.referenceReasoningSource = 'OpenRouter'
+  model.referenceReasoning = { efforts: ['high', 'medium', 'off', 'none', 'opaque'].map((id) => ({ id, name: id })) }
+  catalog.value.learned.features.push('standardEffort', 'reasoningMappings')
+  if (currentHost) catalog.value.learned.features.push('referencePrefill')
+  const override = { provider: 'relay', model: model.id, contextWindow: 2048, input: ['text'], defaultEffort: 'high',
+    efforts: (allSelected ? ['high', 'medium', 'off', 'none', 'opaque'] : ['high']).map((id) => ({ id })) }
+  const harness = createHarness({ catalog, overrideRead: () => Response.json({ ok: true, value: {
+    overrides: [override], revisions: [{ provider: override.provider, model: override.model, revision: 'r1' }],
+  } }) })
+  harness.render()
+  await settle(harness)
+  harness.render()
+  const focused = []
+  harness.elements.find((node) => node.props['aria-label'] === 'row.edit: grok-4.7').props.onClick({ currentTarget: { focus: () => focused.push('edit') } })
+  const element = (match) => harness.elements.find(match)
+  const text = (key) => element((node) => node.props.children.some((child) => typeof child === 'string' && (child === key || child.startsWith(key + ': '))))
+  const button = (key) => element((node) => node.type === 'button' && node.props.children.includes(key))
+  const check = (key) => element((node) => node.type === 'label' && node.props.children.some((child) => child === key || child?.props?.children?.includes(key)))?.props.children[0]
+  const field = (key) => element((node) => node.props['aria-label'] === key || node.props['aria-label']?.startsWith(key + ': '))
+  const wire = (level) => field(`override.wireValue: {"level":"${level}"}`)
+  const render = () => harness.renderEditor()
+  const click = (key) => { const node = button(key); assert.ok(node && node.props.disabled !== true, key); node.props.onClick(); render() }
+  const toggle = (key, checked) => { const node = check(key); assert.ok(node && node.props.disabled !== true, key); node.props.onChange({ target: { checked } }); render() }
+  render()
+  return { harness, render, element, text, field, wire, button, check, click, toggle, focused }
+}
+
+test('reference preview is reversible; only confirmed levels enter local draft', async () => {
+  const ui = await referenceEditor()
+  ui.click('override.useReference')
+  assert.equal(ui.button('override.useReference').props['aria-expanded'], true)
+  assert.ok(ui.text('override.referenceSource').props.children[0].includes('OpenRouter'))
+  assert.ok(ui.text('override.referenceDraft').props.children[0].includes('opaque'))
+  assert.equal(ui.button('medium').props['aria-pressed'], false)
+  assert.equal(ui.button('override.saveLocal').props.disabled, true)
+  ui.element((node) => node.props.className === 'mvp_editor').props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} })
+  ui.render()
+  assert.equal(ui.button('override.useReference').props['aria-expanded'], false)
+  assert.equal(ui.button('medium').props['aria-pressed'], false)
+  assert.deepEqual(ui.harness.postedOverrides, [])
+  ui.click('override.useReference')
+  ui.click('override.confirmReference')
+  assert.equal(ui.button('medium').props['aria-pressed'], true)
+  assert.equal(ui.field('override.defaultEffort').props.value, 'high')
+  assert.equal(ui.check('override.provider').props.checked, false)
+  assert.match(ui.wire('high').props.placeholder, /referenceWireBlank.*high/)
+  assert.equal(ui.wire('high').props.value, '')
+  assert.equal(ui.wire('off').props.placeholder, 'override.wireKeep')
+  const saveLocal = ui.button('override.saveLocal')
+  saveLocal.props.onClick()
+  assert.deepEqual(ui.harness.postedOverrides, [{ provider: 'relay', model: 'grok-4.7', contextWindow: 2048, input: ['text'],
+    efforts: ['high', 'medium', 'off', 'none', 'opaque'].map((id) => ({ id })), defaultEffort: 'high', applyToProvider: false, expectedRevision: 'r1' }])
+})
+
+test('Provider save reconfirms and sends only explicit wire values plus Host fallback intent', async () => {
+  const ui = await referenceEditor({ allSelected: true })
+  ui.toggle('override.provider', true)
+  ui.wire('high').props.onChange({ target: { value: 'typed-value' } })
+  ui.render()
+  ui.click('override.useReference')
+  assert.match(ui.text('override.referenceFallbacks').props.children[0], /medium/)
+  assert.doesNotMatch(ui.text('override.referenceFallbacks').props.children[0], /high|off|none|opaque/)
+  ui.click('override.confirmReference')
+  assert.equal(ui.wire('high').props.value, 'typed-value')
+  assert.equal(ui.check('override.standardWire').props.checked, false)
+  ui.toggle('override.standardWire', true)
+  ui.click('override.saveProvider')
+  assert.equal(ui.button('override.saveProvider').props['aria-expanded'], true)
+  assert.match(ui.text('override.providerMappings').props.children[0], /typed-value/)
+  assert.ok(ui.text('override.providerContext'))
+  assert.ok(ui.text('override.providerInput'))
+  assert.ok(ui.text('override.providerLocalDefault'))
+  assert.ok(ui.text('override.providerStandardEnable'))
+  assert.deepEqual(ui.harness.postedOverrides, [])
+  ui.click('override.backToDraft')
+  assert.equal(ui.wire('high').props.value, 'typed-value')
+  ui.click('override.saveProvider')
+  ui.button('override.confirmProviderSave').props.onClick()
+  assert.equal(ui.harness.postedOverrides.length, 1)
+  assert.deepEqual(ui.harness.postedOverrides[0].reasoningEffortMappings, { high: 'typed-value' })
+  assert.equal(ui.harness.postedOverrides[0].applyToProvider, true)
+  assert.equal(ui.harness.postedOverrides[0].referencePrefill, true)
+  assert.equal(ui.harness.postedOverrides[0].standardEffort, true)
+})
+
+test('opaque routes have no standard mapping suggestion; old Host and non-chat fall back safely', async () => {
+  const opaque = await referenceEditor({ eligible: false })
+  opaque.click('override.useReference')
+  assert.ok(opaque.text('override.referenceManualScope'))
+  assert.equal(opaque.text('override.referenceFallbacks'), undefined)
+  opaque.click('override.confirmReference')
+  opaque.toggle('override.provider', true)
+  assert.equal(opaque.check('override.standardWire'), undefined)
+  assert.equal(opaque.wire('opaque'), undefined)
+  opaque.click('override.saveProvider')
+  opaque.button('override.confirmProviderSave').props.onClick()
+  const [payload] = opaque.harness.postedOverrides
+  assert.equal(payload.referencePrefill, true)
+  assert.equal(payload.standardEffort, undefined)
+  assert.equal(payload.reasoningEffortMappings, undefined)
+
+  const old = await referenceEditor({ currentHost: false })
+  old.toggle('override.provider', true)
+  old.click('override.useReference')
+  assert.ok(old.text('override.referenceOldHost'))
+  old.click('override.confirmReference')
+  assert.equal(old.check('override.provider').props.checked, false)
+  assert.equal(old.check('override.provider').props.disabled, true)
+  assert.ok(old.button('override.saveLocal'))
+
+  const nonChat = await referenceEditor({ nonChat: true })
+  assert.equal(nonChat.button('override.useReference'), undefined)
+  assert.ok(nonChat.field('override.kind'), 'manual kind editing is still available')
+})
+
+test('the browser observes llm/models-updated and requests a fresh catalog', async () => {
+  const harness = createHarness()
+  assert.equal(typeof harness.remoteEvents.get('llm/models-updated'), 'function')
+  harness.remoteEvents.get('llm/models-updated')()
+  await new Promise(setImmediate)
+  assert.deepEqual(harness.fetches.map((url) => url.slice(url.lastIndexOf('/'))), ['/models?fresh=1'])
+})

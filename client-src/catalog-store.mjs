@@ -1,5 +1,10 @@
 import { API } from './constants.mjs'
 
+/** A separate key space from the composer visibility keys. */
+export function overrideIdentity(provider, model) {
+  return JSON.stringify([provider, model])
+}
+
 export function createCatalog(ctx) {
   const listeners = new Set()
   let state = {
@@ -7,15 +12,13 @@ export function createCatalog(ctx) {
     groups: [],
     failures: [],
     providers: [],
-    catalog: null,
+    learned: null,
     error: null,
     detailsError: null,
     source: null,
     generatedAt: 0,
   }
   let inflight = null
-  // A hard reload starts a new run even while `inflight` is set; the token
-  // keeps the older run from publishing its now-stale result afterwards.
   let generation = 0
 
   const publish = (next) => {
@@ -44,10 +47,10 @@ export function createCatalog(ctx) {
       cache: 'no-store',
       redirect: 'error',
     })
-    if (!response.ok) throw new Error('HTTP ' + response.status)
+    if (!response.ok) throw await httpFailure(response)
     const body = await response.json()
     const value = body && body.ok === true ? body.value : null
-    if (value === null || !Array.isArray(value.groups)) {
+    if (!Array.isArray(value?.groups)) {
       throw new Error('malformed capability catalog')
     }
     return value
@@ -59,24 +62,29 @@ export function createCatalog(ctx) {
     if (!response || response.ok !== true) throw new Error(failureMessage(response))
     const value = response.value || {}
     return {
-      groups: Array.isArray(value.groups) ? value.groups : [],
+      // Only the official Session catalog's reasoning ladder comes from the
+      // adapter. Do not infer request settings from enriched reference data.
+      groups: Array.isArray(value.groups) ? value.groups.map((group) => ({
+        ...group,
+        models: Array.isArray(group.models) ? group.models.map((model) =>
+          Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0
+            ? { ...model, requestReasoning: model.reasoning }
+            : model) : [],
+      })) : [],
       failures: Array.isArray(value.failures) ? value.failures : [],
       generatedAt: 0,
     }
   }
 
   const load = (options) => {
-    const fresh = options !== null && typeof options === 'object' && options.fresh === true
-    const reload = options !== null && typeof options === 'object' && options.reload === true
-    // A soft load joins whatever is already running. A hard reload has to
-    // start its own run, otherwise it would receive the very stale result
-    // it is meant to replace.
-    if (inflight !== null && !reload) return inflight
-    if (state.status !== 'ready') {
-      publish({ ...state, status: 'loading', error: null })
-    }
+    const fresh = options?.fresh === true
+    const reload = options?.reload === true
+    const priority = reload ? 2 : fresh ? 1 : 0
+    // A fresh read must not join an older browser GET. A known Host change
+    // can also supersede a read of equal priority, without another hard purge.
+    if (inflight !== null && !reload && !options?.supersede && priority <= inflight.priority) return inflight.run
     const token = ++generation
-    const run = (async () => {
+    const run = Promise.resolve().then(async () => {
       try {
         const value = await fetchHostCatalog(fresh, reload)
         if (token !== generation) return
@@ -96,6 +104,7 @@ export function createCatalog(ctx) {
         })
         return
       } catch (detailError) {
+        if (token !== generation) return
         const detail = String(detailError && detailError.message ? detailError.message : detailError)
         try {
           const value = await fetchOfficialCatalog()
@@ -120,10 +129,11 @@ export function createCatalog(ctx) {
           })
         }
       } finally {
-        if (inflight === run) inflight = null
+        if (inflight?.run === run) inflight = null
       }
-    })()
-    inflight = run
+    })
+    inflight = { priority, run }
+    if (state.status !== 'ready') publish({ ...state, status: 'loading', error: null })
     return run
   }
 
@@ -142,7 +152,10 @@ export function createCatalog(ctx) {
       return load({ fresh: true })
     },
     reload() {
-      return load({ fresh: true, reload: true })
+      return load({ reload: true })
+    },
+    afterChange({ fresh = true } = {}) {
+      return load({ supersede: true, fresh })
     },
   }
 }
@@ -157,46 +170,47 @@ export function createCatalog(ctx) {
  */
 export function createOverrides() {
   const listeners = new Set()
-  let state = { status: 'idle', entries: [], available: null, error: null }
+  const unavailable = { status: 'ready', entries: [], revisions: null, available: false, error: null, pending: false, refreshing: false }
+  let state = { ...unavailable, status: 'idle', available: null }
   let inflight = null
+  let generation = 0
 
   const publish = (next) => {
     state = next
     for (const listener of listeners) listener()
   }
 
-  /** Error text for a failed envelope or HTTP response. */
-  const failureOf = async (response) => {
-    let detail = ''
-    try {
-      const body = await response.json()
-      if (body && body.error) {
-        detail = ' (' + String(body.error.code) + ': ' + String(body.error.message) + ')'
-      }
-    } catch (_error) {
-      // A proxy error page is not JSON; the status code is still useful.
-    }
-    return new Error('HTTP ' + response.status + detail)
+  const readValue = async (response) => {
+    if (!response.ok) throw await httpFailure(response)
+    const body = await response.json()
+    const value = body?.ok === true ? body.value : null
+    if (!Array.isArray(value?.overrides)) throw new Error('malformed override list')
+    return value
   }
 
-  const readEntries = async (response) => {
-    if (response.status === 404) {
-      publish({ status: 'ready', entries: [], available: false, error: null })
-      return null
+  const readyState = (value) => {
+    // A legacy Host cannot guard a full-entry replacement against lost edits.
+    if (!Array.isArray(value.revisions)) return unavailable
+    const revisions = new Map()
+    for (const item of value.revisions) {
+      if (typeof item?.provider !== 'string' || typeof item.model !== 'string' ||
+          typeof item.revision !== 'string' || item.revision === '') throw new Error('malformed override revisions')
+      const key = overrideIdentity(item.provider, item.model)
+      if (revisions.has(key)) throw new Error('duplicate override revision')
+      revisions.set(key, item.revision)
     }
-    if (!response.ok) throw await failureOf(response)
-    const body = await response.json()
-    const value = body && body.ok === true ? body.value : null
-    if (value === null || !Array.isArray(value.overrides)) {
-      throw new Error('malformed override list')
+    if (value.overrides.length !== revisions.size || value.overrides.some((entry) =>
+      !revisions.has(overrideIdentity(entry?.provider, entry?.model)))) {
+      throw new Error('missing override revision')
     }
-    return value.overrides
+    return { ...unavailable, available: true, entries: value.overrides, revisions }
   }
 
   const load = () => {
+    if (state.pending) return Promise.resolve()
     if (inflight !== null) return inflight
-    if (state.status !== 'ready') publish({ ...state, status: 'loading', error: null })
-    const run = (async () => {
+    const token = ++generation
+    const run = Promise.resolve().then(async () => {
       try {
         const response = await fetch(API + '/overrides', {
           method: 'GET',
@@ -205,46 +219,48 @@ export function createOverrides() {
           cache: 'no-store',
           redirect: 'error',
         })
-        const entries = await readEntries(response)
-        if (entries !== null) {
-          publish({ status: 'ready', entries, available: true, error: null })
-        }
+        const next = response.status === 404 ? unavailable : readyState(await readValue(response))
+        if (token === generation) publish(next)
       } catch (error) {
-        publish({
-          ...state,
-          status: 'error',
-          error: String(error && error.message ? error.message : error),
-        })
+        if (token === generation) publish({ ...state, status: 'error', error: failureText(error), refreshing: false })
       } finally {
         if (inflight === run) inflight = null
       }
-    })()
+    })
     inflight = run
+    publish({ ...state, status: state.status === 'ready' ? 'ready' : 'loading', error: null, refreshing: true })
     return run
   }
 
-  /** POST one entry (or `{remove:true}`) and adopt the returned list. */
-  const write = async (payload) => {
-    const response = await fetch(API + '/overrides', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      credentials: 'same-origin',
-      cache: 'no-store',
-      redirect: 'error',
-      body: JSON.stringify(payload),
-    })
-    if (response.status === 404) {
-      publish({ status: 'ready', entries: [], available: false, error: null })
-      throw new Error('HTTP 404')
+  /** Send the revision captured when the draft opened, not the latest one. */
+  const write = async (payload, expectedRevision) => {
+    if (state.status !== 'ready' || state.available !== true || state.pending) {
+      throw new Error('Override list is not ready.')
     }
-    if (!response.ok) throw await failureOf(response)
-    const body = await response.json()
-    const value = body && body.ok === true ? body.value : null
-    if (value === null || !Array.isArray(value.overrides)) {
-      throw new Error('malformed override list')
+    const key = overrideIdentity(payload.provider, payload.model)
+    if ((state.revisions.get(key) ?? null) !== expectedRevision) {
+      throw Object.assign(new Error('Override changed.'), { status: 409 })
     }
-    publish({ status: 'ready', entries: value.overrides, available: true, error: null })
-    return value
+    generation += 1
+    inflight = null
+    publish({ ...state, pending: true, refreshing: false })
+    try {
+      const response = await fetch(API + '/overrides', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        credentials: 'same-origin',
+        cache: 'no-store',
+        redirect: 'error',
+        body: JSON.stringify({ ...payload, expectedRevision }),
+      })
+      const value = await readValue(response)
+      publish(readyState(value))
+      return value
+    } catch (error) {
+      if (error.status === 404) publish(unavailable)
+      else publish({ ...state, status: 'error', error: failureText(error), pending: false })
+      throw error
+    }
   }
 
   return {
@@ -258,11 +274,11 @@ export function createOverrides() {
       return state
     },
     load,
-    save(entry) {
-      return write(entry)
+    save(entry, expectedRevision) {
+      return write(entry, expectedRevision)
     },
-    remove(provider, model) {
-      return write({ remove: true, provider, model })
+    remove(provider, model, expectedRevision) {
+      return write({ remove: true, provider, model }, expectedRevision)
     },
   }
 }
@@ -272,6 +288,17 @@ export function createOverrides() {
 /** Common failure text for envelopes and HTTP errors. */
 function failureText(error) {
   return String(error && error.message ? error.message : error)
+}
+
+async function httpFailure(response) {
+  let detail = ''
+  try {
+    const { error } = await response.json()
+    if (error) detail = ' (' + String(error.code) + ': ' + String(error.message) + ')'
+  } catch (_error) {
+    // The status is still useful when a proxy returns a non-JSON body.
+  }
+  return Object.assign(new Error('HTTP ' + response.status + detail), { status: response.status })
 }
 
 /**
@@ -295,7 +322,7 @@ export function createUsageApi() {
 
   const read = async () => {
     if (inflight !== null) return inflight
-    const run = (async () => {
+    const run = Promise.resolve().then(async () => {
       try {
         const response = await fetch(API + '/usage', {
           headers: { accept: 'application/json' },
@@ -303,17 +330,17 @@ export function createUsageApi() {
           cache: 'no-store',
           redirect: 'error',
         })
-        if (!response.ok) throw new Error('HTTP ' + response.status)
+        if (!response.ok) throw await httpFailure(response)
         const body = await response.json()
         const value = body && body.ok === true ? body.value : null
-        if (value === null || typeof value !== 'object') throw new Error('malformed usage snapshot')
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('malformed usage snapshot')
         publish({ status: 'ready', snapshot: value, error: null })
       } catch (error) {
         publish({ ...state, status: 'error', error: failureText(error) })
       } finally {
         if (inflight === run) inflight = null
       }
-    })()
+    })
     inflight = run
     return run
   }
@@ -487,7 +514,7 @@ export function createVerifyApi() {
       stopTimer()
       return
     }
-    const wantFast = state.snapshot?.state?.running === true
+    const wantFast = state.snapshot?.state?.running === true || state.snapshot?.state?.pendingWrite != null
     const wantMs = wantFast ? SWEEP_POLL_MS : IDLE_POLL_MS
     if (timer !== null && timerMs === wantMs) return
     if (timer !== null) clearInterval(timer)

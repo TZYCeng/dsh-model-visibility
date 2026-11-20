@@ -37,25 +37,26 @@ test('the pure merge never reads the machine’s real learned snapshot', () => {
   assert.equal(fs.existsSync(FALLBACK_FILE), false)
 })
 
-test('normalizeModelId strips aggregator prefixes and request suffixes', () => {
+test('normalizeModelId cleans up structural prefixes, case and only terminal fast/free markers', () => {
   assert.equal(normalizeModelId('openai/gpt-image-2'), 'gpt-image-2')
   assert.equal(normalizeModelId('~anthropic/claude-fable-latest'), 'claude-fable-latest')
   assert.equal(normalizeModelId('anthropic.claude-fable-5'), 'claude-fable-5')
   assert.equal(normalizeModelId('global.xai.grok-4.7'), 'grok-4.7')
-  assert.equal(normalizeModelId('deepseek-v4-pro:free'), 'deepseek-v4-pro')
-  assert.equal(normalizeModelId('gpt-4:free:batch'), 'gpt-4')
-  assert.equal(normalizeModelId('gpt-4-free:thinking'), 'gpt-4')
-  assert.equal(normalizeModelId('  GPT-6-SOL  '), 'gpt-6-sol')
+  assert.equal(normalizeModelId('deepseek-v4-pro:FREE'), 'deepseek-v4-pro')
+  assert.equal(normalizeModelId('  GPT-6-SOL-fast:free  '), 'gpt-6-sol')
+  assert.equal(normalizeModelId('gpt-4:batch:free'), 'gpt-4:batch')
+  assert.equal(normalizeModelId('gpt-4:free:batch'), 'gpt-4:free:batch')
+  assert.equal(normalizeModelId('gpt-4-free:thinking'), 'gpt-4-free:thinking')
 })
 
-test('modelIdVariants falls back through resolution and compact forms', () => {
-  const variants = modelIdVariants('openai/gpt-image-2.5-flare-4k')
-  assert.deepEqual(variants, [
-    'gpt-image-2.5-flare-4k',
-    'gpt-image-2.5-flare',
-    'gptimage25flare4k',
-  ])
-  assert.equal(variants[0], 'gpt-image-2.5-flare-4k')
+test('modelIdVariants preserves parameter counts, suffixes, dimensions and spelling', () => {
+  for (const id of [
+    'qwen3.6-27b', 'qwen4-max-preview', 'qwen4-max-latest', 'qwen4-max-new',
+    'gpt-image-2.5-flare-4k', 'gpt-image-2.5-flare-2k', 'gpt-image-2.5-1024x1536',
+    'gpt-5.1', 'gpt-5-1', 'gpt_5_1', 'foo.fast', 'foo_free',
+    'glm-5.3:batch', 'glm-5.3-batch', 'glm-5.3:thinking', 'glm-5.3:online',
+    'glm-5.3:extended', 'glm-5.3:nitro',
+  ]) assert.deepEqual(modelIdVariants(`relay/${id}`), [id], id)
 })
 
 test('the learned store resolves every alias spelling of one id', () => {
@@ -84,6 +85,9 @@ test('the learned store resolves every alias spelling of one id', () => {
 test('inferModelKind recognizes generation and infrastructure models', () => {
   assert.equal(inferModelKind('gpt-image-2.5-flare'), 'image')
   assert.equal(inferModelKind('gemini-3.1-flash-image'), 'image')
+  assert.equal(inferModelKind('google/gemini-3-pro-image-preview', 'Gemini 3 Pro'), 'image')
+  assert.equal(inferModelKind('vendor/image-embedding-v2', 'Video Vision'), 'embedding')
+  assert.equal(inferModelKind('image-host/gemini-3.1-pro-preview'), 'chat')
   assert.equal(inferModelKind('grok-imagine-video-1.5'), 'video')
   assert.equal(inferModelKind('sora-2'), 'video')
   assert.equal(inferModelKind('nemotron-3.5-embed-1b'), 'embedding')
@@ -310,7 +314,10 @@ test('lookupCorrection targets the exact catalog row, not its variants', () => {
   assert.equal(glm.code, 'glm-5.3-text-only')
   assert.deepEqual(glm.input, ['text'])
   assert.equal(glm.source, 'https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3')
-  assert.equal(lookupCorrection('glm-5.3-flash'), undefined)
+  assert.equal(lookupCorrection('Z-AI/GLM-5.3-fast')?.code, glm.code)
+  for (const id of ['glm-5.3-flash', 'glm-5.3-preview', 'glm-5.3:batch', 'glm-5.3:thinking', 'glm-53', 'glm-5-3', 'other/glm-5.3', 'openai.glm-5.3']) {
+    assert.equal(lookupCorrection(id), undefined, id)
+  }
   assert.equal(lookupCorrection('glm-5p3'), undefined)
   assert.equal(lookupCorrection('grok-4.7'), undefined)
 })

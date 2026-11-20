@@ -145,24 +145,42 @@ export const CSS = `
 
 /* --------------------------------------------------------------- checker */
 .mvp_checker{flex:none;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);margin-top:12px;overflow:hidden}
-.mvp_checker--closed{background:transparent}
-.mvp_checkerHead{box-sizing:border-box;width:100%;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;background:0 0;border:0;align-items:baseline;gap:8px;padding:7px 10px;font-family:inherit;font-size:12px;line-height:18px;display:flex;flex-wrap:wrap}
-.mvp_checkerHead:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.08))}
+.mvp_checkerBar{display:flex;align-items:center;gap:6px;padding-right:4px}
+.mvp_checkerBar .mvp_button{flex-shrink:0}
+.mvp_checkerHead{box-sizing:border-box;flex:1;min-width:0;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;background:0 0;border:0;align-items:baseline;gap:4px 8px;padding:7px 10px;font-family:inherit;font-size:12px;line-height:18px;display:flex;flex-wrap:wrap}
+.mvp_checkerHead:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .mvp_checkerHead:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
 .mvp_checkerTitle{font-weight:500;flex:none}
-.mvp_checkerSummary{color:var(--dsw-alias-label-tertiary);flex:1;min-width:0;font-size:11px}
+.mvp_checkerSummary{color:var(--dsw-alias-label-secondary);flex:1 1 120px;min-width:0;font-size:11px;font-variant-numeric:tabular-nums}
 .mvp_badge{flex:none;color:var(--dsw-alias-state-warn-primary);border:.5px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent);border-radius:999px;padding:0 6px;font-size:10px;line-height:15px}
 .mvp_checkerBody{border-top:.5px solid var(--dsw-alias-border-l2);padding:10px}
-.mvp_checkerHint{color:var(--dsw-alias-label-tertiary);margin:0 0 8px;font-size:11px;line-height:16px}
-.mvp_checkerForm{align-items:flex-end;gap:10px;display:flex;flex-wrap:wrap}
-.mvp_checkerProgress{align-items:center;gap:10px;margin-top:10px;display:flex;flex-wrap:wrap}
+.mvp_checkerModes{min-inline-size:0;border:0;margin:0 0 6px;padding:0;display:flex;flex-wrap:wrap;gap:4px 6px}
+.mvp_checkerModes legend{margin-bottom:4px;padding:0}
+.mvp_checkerMode{align-items:center;gap:5px;display:inline-flex;padding:4px 8px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);cursor:pointer;font-size:12px;line-height:16px}
+.mvp_checkerMode input{margin:0;accent-color:var(--dsw-alias-brand-primary)}
+.mvp_checkerMode:has(input:checked){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary) 8%, transparent)}
+.mvp_checkerMode:has(input:disabled){cursor:default;opacity:.75}
+.mvp_checkerMode:has(input:focus-visible){outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.mvp_checkerHint{color:var(--dsw-alias-label-secondary);margin:0 0 8px;font-size:11px;line-height:16px}
+.mvp_checkerForm,.mvp_checkerAdvanced{align-items:flex-end;gap:8px;display:flex;flex-wrap:wrap}
+.mvp_checkerForm .mvp_field,.mvp_checkerAdvanced .mvp_field{min-width:0;max-width:100%}
+.mvp_checkerForm .mvp_select,.mvp_checkerAdvanced .mvp_select{min-width:120px;max-width:100%}
+.mvp_checkerAdvanced{padding:6px 0}
+.mvp_checkerAdvanced .mvp_check{min-height:26px}
+.mvp_checkerDetails{margin-top:8px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
+.mvp_checkerDetails summary{cursor:pointer;width:fit-content;max-width:100%}
+.mvp_checkerDetails summary:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.mvp_checkerOptionNote{color:var(--dsw-alias-state-warn-primary)}
+.mvp_checkerNotice{box-sizing:border-box;margin-top:5px;overflow-wrap:anywhere}
+.mvp_checkerBar + .mvp_checkerNotice{margin:0;padding:0 10px 6px}
+.mvp_checkerProgress{align-items:center;gap:5px 10px;margin-top:8px;display:flex;flex-wrap:wrap}
 .mvp_progressBar{flex:1 1 160px;min-width:120px;height:4px;border-radius:999px;background:var(--dsw-alias-border-l2);overflow:hidden}
 .mvp_progressFill{height:100%;background:var(--dsw-alias-brand-primary);transition:width .2s ease;display:block}
-.mvp_checkerProgressText{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.mvp_checkerProgressText{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
 .mvp_checkerErrors{margin-top:10px}
 .mvp_checkerErrorsTitle{color:var(--dsw-alias-state-warn-primary);margin-bottom:4px;font-size:11px;line-height:16px}
 .mvp_errorList{max-height:150px;color:var(--dsw-alias-label-secondary);margin:0;padding-left:18px;font-size:11px;line-height:16px;overflow-y:auto}
-.mvp_errorList li{margin-bottom:3px;word-break:break-word}
+.mvp_errorList li{margin-bottom:3px;overflow-wrap:anywhere}
 .mvp_sources{margin-top:10px}
 .mvp_sourcesTitle{color:var(--dsw-alias-label-tertiary);margin-bottom:4px;font-size:11px;line-height:16px}
 .mvp_sourceList{max-height:150px;margin:0;padding:0;list-style:none;font-size:11px;line-height:16px;overflow-y:auto}

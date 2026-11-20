@@ -155,7 +155,36 @@ test('learned evidence survives reopening with only safe fields and HTTPS URLs',
   assert.deepEqual(createLearnedCatalog({ file }).get('a').evidence, [{ url: 'https://vendor.example/spec', fields: ['input'] }])
 })
 
-test('exact learned identities win over compact aliases in either insertion order', () => {
+test('each learned field keeps only the citation for its winning declaration', () => {
+  const file = path.join(tempHome(), 'learned.json')
+  const store = createLearnedCatalog({ file })
+  const input = { url: 'https://vendor.example/modalities', fields: ['input'] }
+  const context = { url: 'https://vendor.example/limits', fields: ['contextWindow'] }
+  store.upsertEntries({ id: 'a', input: ['image'], evidence: [input] }, { verifiedAt: 20 })
+  store.upsertEntries({ id: 'a', contextWindow: 42, evidence: [context] }, { verifiedAt: 30 })
+  store.upsertEntries({ id: 'a', input: ['text'], evidence: [input] }, { verifiedAt: 10 })
+  assert.deepEqual(store.getExact('a').evidence, [input, context])
+  store.upsertEntries({ id: 'a', input: ['text'] }, { verifiedAt: 40 })
+  const reopened = createLearnedCatalog({ file }).getExact('a')
+  assert.deepEqual(reopened.input, ['text'])
+  assert.deepEqual(reopened.evidence, [context])
+})
+
+test('snapshot publication commits memory and footer metadata only after disk succeeds', () => {
+  const home = tempHome()
+  const file = path.join(home, 'learned.json')
+  const checker = { provider: 'relay', model: 'checker' }
+  const store = createLearnedCatalog({ file, now: () => 50 })
+  fs.mkdirSync(`${file}.${process.pid}.tmp`)
+  assert.throws(() => store.upsertEntries({ id: 'a', input: ['text'] }, { checker }), /Could not save/)
+  assert.equal(store.meta().models, 0)
+  fs.rmdirSync(`${file}.${process.pid}.tmp`)
+  store.upsertEntries({ id: 'a', input: ['text'] }, { checker })
+  assert.deepEqual(store.meta(), { file, models: 1, updatedAt: 50, checker })
+  assert.deepEqual(createLearnedCatalog({ file }).meta(), store.meta())
+})
+
+test('exact learned identities do not share punctuation variants in either insertion order', () => {
   const files = ['alias', 'alias-reverse'];
   const facts = [{ id: 'foo-bar', type: 'chat' }, { id: 'foobar', type: 'image' }];
   for (const suffix of files) {
@@ -167,3 +196,94 @@ test('exact learned identities win over compact aliases in either insertion orde
     assert.equal(store.get('foo.bar'), undefined);
   }
 });
+
+
+test('newer reasoning disable clears old levels and stale replies cannot resurrect them', () => {
+  const file = path.join(tempHome(), 'learned.json')
+  const store = createLearnedCatalog({ file })
+  const id = 'test-reasoning-disabled'
+  store.upsertEntries({ id, reasoning: true, reasoningEfforts: ['high'], defaultEffort: 'high' }, { verifiedAt: 2 })
+  store.upsertEntries({ id, reasoning: false }, { verifiedAt: 3 })
+  store.upsertEntries({ id, reasoningEfforts: ['low'], defaultEffort: 'low' }, { verifiedAt: 1 })
+  const reopened = createLearnedCatalog({ file }).get(id)
+  assert.equal(reopened.reasoning, false)
+  assert.equal(reopened.reasoningEfforts, undefined)
+  assert.equal(reopened.defaultEffort, undefined)
+})
+
+test('a new ladder never inherits the default from a previous ladder', () => {
+  const store = createLearnedCatalog({ file: path.join(tempHome(), 'learned.json') })
+  const id = 'test-ladder-replaced'
+  store.upsertEntries({ id, reasoningEfforts: ['high'], defaultEffort: 'high' }, { verifiedAt: 1 })
+  store.upsertEntries({ id, reasoningEfforts: ['low', 'high'] }, { verifiedAt: 2 })
+  const row = store.get(id)
+  assert.equal(row.reasoning, true)
+  assert.deepEqual(row.reasoningEfforts.map(level => level.id), ['low', 'high'])
+  assert.equal(row.defaultEffort, undefined)
+})
+
+
+test('qualified identities survive reopening and ambiguous siblings never share facts', () => {
+  const file = path.join(tempHome(), 'learned.json')
+  const store = createLearnedCatalog({ file })
+  store.upsertEntries([{ id: 'vendorA/shared', contextWindow: 999 }, { id: 'vendorB/shared', contextWindow: 123 }], { origins: ['public'] })
+  const reopened = createLearnedCatalog({ file })
+  assert.equal(reopened.getExact('vendorA/shared').contextWindow, 999)
+  assert.equal(reopened.getExact('vendorB/shared').contextWindow, 123)
+  assert.equal(reopened.get('vendorC/shared'), undefined)
+  assert.equal(reopened.get('shared'), undefined)
+})
+
+test('learned lookups prioritize full case folds, scope aliases, and retain variant spelling', () => {
+  const file = path.join(tempHome(), 'learned.json')
+  const store = createLearnedCatalog({ file })
+  store.upsertEntries([
+    { id: 'Qwen/qwen4-max', contextWindow: 100 },
+    { id: 'qwen/qwen4-max:free', contextWindow: 200 },
+    { id: 'Qwen/qwen4-max-preview', contextWindow: 300 },
+    { id: 'other/qwen4-max-preview', contextWindow: 400 },
+    { id: 'qwen/qwen3.6-27b', contextWindow: 500 },
+    { id: 'qwen/img-2-4k', contextWindow: 600 },
+  ], { origins: ['checker'] })
+  const reopened = createLearnedCatalog({ file })
+  assert.equal(reopened.get('QWEN/QWEN4-MAX').contextWindow, 100)
+  assert.equal(reopened.get('qwen/qwen4-max:free').contextWindow, 200)
+  assert.equal(reopened.get('qwen/qwen4-max-preview:fast').contextWindow, 300)
+  assert.equal(reopened.get('other/qwen4-max-preview:fast').contextWindow, 400)
+  for (const id of ['qwen/qwen4-max:fast', 'qwen4-max-preview', 'x/qwen4-max-preview', 'openai.qwen4-max-preview',
+    'qwen/qwen3.6', 'qwen/qwen36-27b', 'qwen/img-2-2k', 'qwen/img-2', 'qwen/qwen4-max:batch', 'qwen/qwen4-max:thinking']) {
+    assert.equal(reopened.get(id), undefined, id)
+  }
+  assert.equal(reopened.getExact('qwen/qwen4-max-preview:fast'), undefined)
+})
+
+test('older public aliases require matching again but do not invalidate exact public rows', () => {
+  const file = path.join(tempHome(), 'learned.json')
+  const alias = { id: 'vendor/model:batch', input: ['image'], origins: ['public'], publicAlias: true }
+  const exact = { id: 'vendor/model', input: ['image'], origins: ['public'] }
+  fs.writeFileSync(file, JSON.stringify({ version: 2, models: { alias, exact } }))
+  const store = createLearnedCatalog({ file })
+  assert.equal(store.getExact(alias.id).legacyPublic, true, 'a fresh verification should not skip a stale alias')
+  assert.equal(store.get(alias.id), undefined)
+  assert.equal(store.get(exact.id).legacyPublic, undefined)
+  const newAlias = 'vendor/model:free'
+  store.upsertEntries({ ...alias, id: newAlias })
+  const reopened = createLearnedCatalog({ file })
+  assert.equal(reopened.get(newAlias).publicAlias, true)
+  assert.equal(reopened.get(newAlias).legacyPublic, undefined)
+  assert.equal(reopened.get('VENDOR/MODEL:FREE'), undefined, 'a public alias cannot propagate again')
+  store.upsertEntries({ id: alias.id, input: ['text'], origins: ['public'] })
+  assert.deepEqual(store.get(alias.id).input, ['text'])
+  assert.equal(store.get(alias.id).publicAlias, undefined)
+})
+
+test('legacy public matches require a fresh exact result instead of being displayed', () => {
+  const file = path.join(tempHome(), 'learned.json')
+  fs.writeFileSync(file, JSON.stringify({ version: 1, models: { shared: { id: 'vendorB/shared', input: ['image'], origins: ['public'] } } }))
+  const store = createLearnedCatalog({ file })
+  assert.equal(store.getExact('vendorB/shared').legacyPublic, true)
+  assert.equal(store.get('vendorB/shared'), undefined)
+  store.upsertEntries({ id: 'vendorB/shared', input: ['text'] }, { origins: ['public'] })
+  assert.deepEqual(store.get('vendorB/shared').input, ['text'])
+  assert.equal(store.get('vendorB/shared').legacyPublic, undefined)
+})

@@ -83,7 +83,7 @@ test('evidence gate discards fabricated sources and uncited fields', () => {
   assert.equal(rows[0].contextWindow, null)
 })
 
-test('checker really searches, reads and receives tool history before returning JSON', async () => {
+test('checker searches and reads during lookup, then returns JSON in an isolated final call', async () => {
   let round = 0
   const webCalls = []
   const activity = []
@@ -95,9 +95,15 @@ test('checker really searches, reads and receives tool history before returning 
       assert.equal(request.messages.at(-1).role, 'tool')
       assert.match(request.messages.at(-1).content[0].text, /vendor.example/)
       yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'f1', name: 'read_model_doc', arguments: '{"url":"https://vendor.example/a"}' } }
-    } else {
+    } else if (round === 3) {
       assert.match(request.messages.at(-1).content[0].text, /accepts images/)
-      yield { type: 'text-delta', text: JSON.stringify([{ ...unknown('a'), input: ['text', 'image'], evidence: [{ url: 'https://vendor.example/a', fields: ['input'] }] }]) }
+      yield { type: 'text-delta', text: JSON.stringify([{ id: 'a', contextWindow: 1 }]) }
+    } else {
+      assert.deepEqual(request.tools, [])
+      assert.deepEqual(request.messages.map(message => message.role), ['user'])
+      assert.doesNotMatch(request.messages[0].content[0].text, /contextWindow/)
+      assert.match(request.messages[0].content[0].text, /accepts images/)
+      yield { type: 'text-delta', text: JSON.stringify([{ id: 'a', input: ['text', 'image'], evidence: { input: 'https://vendor.example/a' } }]) }
     }
     yield { type: 'finish', reason: { kind: 'stop' } }
   } }) }
@@ -106,7 +112,9 @@ test('checker really searches, reads and receives tool history before returning 
     fetch: async request => { webCalls.push(request); return { statusCode: 200, body: { kind: 'text', content: 'a accepts images' } } },
   }
   const reply = await callChecker({ llm, web, checker: { provider: 'relay', model: 'checker' }, system: checkerSystemPrompt(true), input: 'a', webSearch: true, timeoutMs: 1000, onActivity: value => activity.push(value) })
+  assert.equal(round, 4)
   assert.equal(webCalls.length, 2)
+  assert.deepEqual(JSON.parse(reply.text)[0].input, ['text', 'image'])
   assert.ok(reply.allowedUrls.has('https://vendor.example/a'))
   assert.ok(reply.readUrls.has('https://vendor.example/a'))
   assert.ok(activity.includes('search'))
@@ -130,6 +138,32 @@ test('web tools refuse arbitrary reads and never execute other tool names', asyn
   } }) }
   await assert.rejects(callChecker({ llm, web: { fetch: async () => { fetches++ } }, checker: { provider: 'r', model: 'm' }, system: '', input: '', webSearch: true, timeoutMs: 1000 }), /did not call/)
   assert.equal(fetches, 0)
+})
+
+test('only the exact search alias is supported; duplicate diagnostics keep each tool result', async () => {
+  const spellings = ['Search_model_doc', 'search_model_doc ', 'search_model_docss', 'Search_model_doc']
+  let round = 0
+  let searches = 0
+  const llm = { prepareCall: async config => ({ config, stream: async function* (request) {
+    if (round++ === 0) {
+      for (const [index, name] of spellings.entries()) {
+        yield { type: 'block-end', index, block: { type: 'tool-call', id: 'denied-' + index, name, arguments: '{"query":"a spec"}' } }
+      }
+    } else {
+      const results = request.messages.slice(-spellings.length)
+      assert.deepEqual(request.messages.at(-5).content.map(call => call.name), spellings)
+      assert.deepEqual(results.map(result => result.toolCallId), spellings.map((_, index) => 'denied-' + index))
+      assert.ok(results.every(result => result.isError))
+      yield { type: 'text-delta', text: '[]' }
+    }
+  } }) }
+  await assert.rejects(callChecker({ llm, web: { search: async () => { searches++ } }, checker: { provider: 'r', model: 'm' }, system: '', input: '', webSearch: true, timeoutMs: 1000 }), (error) => {
+    assert.match(error.message, /did not call a successful web search/)
+    assert.equal(error.message.match(/unsupported checker tool: Search_model_doc/g)?.length, 1)
+    assert.match(error.message, /unsupported checker tool: search_model_docss/)
+    return true
+  })
+  assert.equal(searches, 0)
 })
 
 test('non-reasoning checkers never receive an unsupported explicit effort', async () => {

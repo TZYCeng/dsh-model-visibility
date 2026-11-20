@@ -147,11 +147,6 @@ export function effortLabel(id, t) {
   return label === key ? id : label
 }
 
-/** Identity of a manual override entry; same shape as the row key. */
-export function overrideKeyOf(entry) {
-  return entry ? keyOf(entry.provider, entry.model) : null
-}
-
 /** Model fields whose provenance can be manual. */
 export function manualFieldsOf(model) {
   const sources = model && model.sources ? model.sources : {}

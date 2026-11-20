@@ -29,7 +29,7 @@ import z from '@deepseek-ai/schemastery'
 import { createModelInfoService } from './lib/model-info.js'
 import { createLearnedCatalog } from './lib/learned-catalog.js'
 import { createOverrideStore } from './lib/model-overrides.js'
-import { createCapabilityVerifier } from './lib/check-catalog.js'
+import { createCapabilityVerifier, VERIFY_SOURCE_MODES } from './lib/check-catalog.js'
 import { createCheckerSearchBridge } from './lib/checker-search-bridge.js'
 import { toModelListCsv, toUsageCsv } from './lib/export-csv.js'
 import { createUsageLedger } from './lib/usage-ledger.js'
@@ -106,7 +106,7 @@ export const Config = z.object({
  */
 export function apply(ctx, config) {
   ctx.inject(['settings'], (child) => {
-    child.effect(() => child.settings.configure({ auto: false }))
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
 
   const logger = ctx.logger ?? console
@@ -226,12 +226,13 @@ export function apply(ctx, config) {
 
     // Optional services: without them the page still renders adapter + catalog
     // facts, it just cannot probe relay endpoints.
-    const settings = typeof scope.get === 'function' ? scope.get('settings') : undefined
-    const credentials = typeof scope.get === 'function' ? scope.get('credentials') : undefined
+    const settings = scope.get?.('settings')
+    const credentials = scope.get?.('credentials')
+    const configEditor = scope.get?.('configEditor')
     const probeEnabled = config?.probe !== false && process.env.MODEL_VISIBILITY_PROBE !== '0'
     const probe =
       probeEnabled && settings !== undefined
-        ? createProviderProbe({ settings, credentials, logger })
+        ? createProviderProbe({ settings, llm: scope.llm, configEditor, credentials, logger })
         : null
 
     // Even with the relay probe disabled, the request-side gate still needs the
@@ -242,7 +243,7 @@ export function apply(ctx, config) {
       if (fallbackProfiles !== null) return fallbackProfiles
       if (typeof settings?.describe !== 'function') return new Map()
       try {
-        fallbackProfiles = readProviderProfiles(settings.describe())
+        fallbackProfiles = readProviderProfiles(settings.describe(), { llm: scope.llm, configEditor })
       } catch (_error) {
         fallbackProfiles = new Map()
       }
@@ -255,26 +256,29 @@ export function apply(ctx, config) {
     const learnedService =
       (typeof scope.get === 'function' ? scope.get('learned') : undefined) ?? learnedFor()
 
+    // Use the same exact declarations for the catalog's degradation path and
+    // the synchronous request-side gate. Do not wait for network enrichment to
+    // see a Provider's explicit configuration.
+    const localEnrichment = () => ({
+      ...probe?.peek(),
+      profiles: probe === null ? profilesForGate() : probe.profiles(),
+    })
     const service = createModelInfoService(scope.llm, {
-      enrichment: probe === null ? () => ({ profiles: profilesForGate() }) : ({ fresh }) => probe.read({ fresh }),
+      settings,
+      configEditor,
+      enrichment: probe === null ? localEnrichment : ({ fresh }) => probe.read({ fresh }),
+      fallbackEnrichment: localEnrichment,
       overrides,
       learned: learnedService,
-      // Synchronous evidence for the request-side image gate: provider profiles
-      // from the settings document plus the last completed relay probe.
-      context: () => ({
-        profiles: probe === null ? profilesForGate() : probe.profiles(),
-        discovered: probe?.peek()?.discovered,
-        overrides,
-        learned: learnedService,
-      }),
+      context: () => ({ ...localEnrichment(), overrides, learned: learnedService }),
     })
 
     // Make the relay adapter admit images for models the page displays as
     // multimodal. The patch is read-only: an explicit provider declaration
     // still wins, and the settings switch can turn the behaviour off.
     const imageInput = installImageInputGate(scope.llm, {
-      allow: (provider, model) =>
-        liveConfig('applyInput', true) !== false && service.imageInputAllowed(provider, model),
+      allow: (provider, model, name, snapshotRoute) =>
+        liveConfig('applyInput', true) !== false && service.imageInputAllowed(provider, model, name, snapshotRoute),
       warn: (error) => {
         if (typeof logger.warn === 'function') {
           logger.warn('model-visibility: image input gate failed')
@@ -287,7 +291,7 @@ export function apply(ctx, config) {
     // Token-usage ledger behind the page's stats strip: session logs are read
     // incrementally in a background pass, the check sweep records its own
     // spend into the same buckets.
-    const usageLedger = createUsageLedger({ logger })
+    const usageLedger = createUsageLedger({ logger, sessionPersistence: scope.get?.('sessionPersistence') })
     let lastRescanAt = -Infinity
     const nowMs = () => Date.now()
     const maybeRescan = () => {
@@ -303,6 +307,8 @@ export function apply(ctx, config) {
     const verifier = createCapabilityVerifier({
       llm: scope.llm,
       settings,
+      configEditor,
+      onSettled: () => service.invalidate(),
       web: typeof scope.get === 'function' ? scope.get('web') : undefined,
       searchBridge: createCheckerSearchBridge({
         getTools: () => scope.get?.('tools'),
@@ -390,9 +396,6 @@ export function apply(ctx, config) {
       'model-visibility: capability route',
     )
 
-    // Manual capability overrides: the page reads the current entries and
-    // writes one model at a time. Both calls are same-origin authenticated by
-    // the connection layer, like the capability route above.
     scope.effect(
       () =>
         connection.fetch.register({
@@ -403,7 +406,7 @@ export function apply(ctx, config) {
             const method = String(request.method || 'GET').toUpperCase()
             if (method === 'GET') {
               try {
-                return json({ ok: true, value: { overrides: overrides.list() } })
+                return json({ ok: true, value: overrides.read() })
               } catch (error) {
                 if (typeof logger.warn === 'function') {
                   logger.warn('model-visibility: could not read model overrides')
@@ -444,27 +447,35 @@ export function apply(ctx, config) {
             // same facts as this page. A refusal is not an error: the local
             // override still applies, and the response explains the reason.
             let provider = { written: false, fields: [], reason: 'skipped' }
+            const providerId = typeof body?.provider === 'string' ? body.provider.trim() : ''
+            const modelId = typeof body?.model === 'string' ? body.model.trim() : ''
+            if (!providerId || !modelId || (Object.hasOwn(body, 'expectedRevision')
+              && body.expectedRevision !== null && typeof body.expectedRevision !== 'string')) {
+              return json({ ok: false, error: { code: 'overrides/params', message: 'a provider, model and valid revision are required' } }, 400)
+            }
             try {
-              if (body !== null && typeof body === 'object' && body.remove === true) {
-                overrides.remove(
-                  typeof body.provider === 'string' ? body.provider : '',
-                  typeof body.model === 'string' ? body.model : '',
-                )
-              } else {
-                const saved = overrides.upsert(body)
-                if (saved !== undefined && body.applyToProvider !== false) {
-                  provider = await writeCapabilities(settings, saved)
-                  if (provider.written) {
-                    const remaining = stripWrittenFields(saved, provider.fields)
-                    const local = Object.keys(remaining).filter(
-                      (key) => key !== 'provider' && key !== 'model',
-                    )
-                    if (local.length === 0) {
-                      overrides.remove(saved.provider, saved.model)
-                    } else {
-                      overrides.upsert(remaining)
-                    }
-                  }
+              // Old clients did not send a revision; acquire the current one
+              // for this request. Current clients submit the editor's revision,
+              // including null for a previously absent override.
+              const expected = Object.hasOwn(body, 'expectedRevision') ? body.expectedRevision : overrides.snapshot(providerId, modelId).revision
+              const local = overrides.compareAndCommit(body.remove === true ? { provider: providerId, model: modelId } : body, expected)
+              if (!local.ok) {
+                return json({ ok: false, error: { code: 'overrides/conflict', message: 'this model override changed; reopen the editor and review the current values' } }, 409)
+              }
+              service.invalidate()
+              if (local.entry && body.applyToProvider === true) {
+                provider = await writeCapabilities(settings, local.entry, {
+                  llm: scope.llm,
+                  configEditor,
+                  reasoningEffortMappings: body.reasoningEffortMappings,
+                  standardEffort: body.standardEffort === true,
+                  referencePrefill: body.referencePrefill === true,
+                })
+                if (provider.written) {
+                  const remaining = stripWrittenFields(local.entry, provider.fields, provider.localOnly)
+                  // Do not prune an independently edited file after an async
+                  // settings write; the same CAS protects concurrent POSTs.
+                  overrides.compareAndCommit(remaining, local.revision)
                 }
               }
             } catch (error) {
@@ -493,7 +504,11 @@ export function apply(ctx, config) {
               clearFallbackProfiles()
               probe?.noteSettingsChanged()
             }
-            return json({ ok: true, value: { overrides: overrides.list(), provider } })
+            try {
+              return json({ ok: true, value: { ...overrides.read(), provider } })
+            } catch (error) {
+              return json({ ok: false, error: { code: 'overrides/read-after-save', message: String(error?.message ?? error) } }, 500)
+            }
           },
         }),
       'model-visibility: override route',
@@ -546,7 +561,11 @@ export function apply(ctx, config) {
             let name
             try {
               if (which === 'usage') {
-                body = toUsageCsv(usageLedger.read())
+                // Join an active scan or finish the first scan before creating
+                // a CSV. Do not silently download a cold, all-zero snapshot.
+                await usageLedger.ensureScanned()
+                const usage = usageLedger.read()
+                body = toUsageCsv(usage)
                 name = `model-visibility-usage-${new Date().toISOString().slice(0, 10)}.csv`
               } else {
                 const catalog = await service.read()
@@ -603,7 +622,12 @@ export function apply(ctx, config) {
             }
             const provider = typeof body?.provider === 'string' ? body.provider : undefined
             const model = typeof body?.model === 'string' ? body.model : undefined
-            if (provider === undefined || model === undefined) {
+            const mode = body?.mode
+            if (mode !== undefined && !VERIFY_SOURCE_MODES.includes(mode)) {
+              return json({ ok: false, error: { code: 'verify/params', message: 'invalid verification mode' } }, 400)
+            }
+            const useChecker = mode === undefined ? body?.useChecker !== false : mode !== 'public'
+            if (useChecker && (!provider?.trim() || !model?.trim())) {
               return json(
                 { ok: false, error: { code: 'verify/params', message: 'provider and model are required' } },
                 400,
@@ -614,16 +638,14 @@ export function apply(ctx, config) {
             // `concurrency` is a per-run choice (how many checker calls may be
             // in flight), so a fast relay can use more threads than the default.
             const concurrency = Number.isFinite(body?.concurrency) ? body.concurrency : undefined
-            if (!verifier.isRunning()) {
-              verifier
-                .start({ checker: { provider, model }, writeBack: body?.writeBack === true, webSearch: body?.webSearch !== false, fullScan: body?.fullScan === true, concurrency })
-                .then(() => {
-                  // Learned facts (and possibly provider settings) changed.
-                  service.invalidate()
-                  imageInput.refresh()
-                })
-                .catch(() => {})
+            if (verifier.isRunning()) {
+              return json({ ok: false, error: { code: 'verify/running', message: 'a verification run is already active' } }, 409)
             }
+            void verifier.start({
+              mode, checker: useChecker ? { provider, model } : undefined, useChecker,
+              fuzzyMatch: typeof body?.fuzzyMatch === 'boolean' ? body.fuzzyMatch : undefined, writeBack: body?.writeBack === true,
+              webSearch: useChecker && body?.webSearch !== false, fullScan: body?.fullScan === true, concurrency,
+            }).catch(error => logger.warn?.('model-visibility: could not start verification', error))
             return json({ ok: true, value: { state: verifier.snapshot(), accepted: true } })
           },
         }),
@@ -649,6 +671,7 @@ export function apply(ctx, config) {
       }
       if (typeof scope.on === 'function') {
         offs.push(scope.on('llm/adapters-updated', invalidateAll))
+        offs.push(scope.on('llm/models-updated', invalidateAll))
         offs.push(scope.on('settings/document-updated', noteSettings))
         for (const event of ['credentials/record-updated', 'credentials/reference-updated']) {
           try {

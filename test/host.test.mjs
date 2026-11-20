@@ -37,7 +37,6 @@ function createHarness() {
     relay: {
       baseURL: 'https://relay.example/v1',
       apiKeyEnv: 'RELAY_API_KEY',
-      defaultInput: ['text'],
       models: [
         { id: 'deepseek/deepseek-v4.1-flash', input: [] },
         { id: 'deepseek/deepseek-v4.1-pro', input: ['text'] },
@@ -51,18 +50,27 @@ function createHarness() {
   /** Set one path on the fake settings document (same contract as the Host). */
   const applyOp = (path, value) => {
     let current = { providers }
-    for (let index = 0; index < path.length - 1; index += 1) current = current[path[index]]
+    for (let index = 0; index < path.length - 1; index += 1) {
+      const key = path[index]
+      current = current[key] ?? (current[key] = {})
+    }
     current[path[path.length - 1]] = value
   }
 
+  const profile = providers.relay
+  Object.defineProperty(profile, 'provider', { value: 'relay', enumerable: false })
+  const adapterSnapshot = { profiles: new Map([['relay', profile]]) }
   const adapter = Object.create({
-    current: () => ({}),
-    profileOf: () => ({}),
+    current: () => adapterSnapshot,
+    profileOf: (snapshot, provider) => snapshot.profiles.get(provider),
     modelOf: (_snapshot, provider, model) => ({
       provider,
       id: model,
       name: model,
-      input: ['text'],
+      api: profile.api ?? 'openai-completions',
+      baseUrl: profile.baseURL,
+      input: profile.models.find(entry => entry.id === model)?.input?.length
+        ? profile.models.find(entry => entry.id === model).input : (profile.defaultInput ?? ['text']),
       contextWindow: 262144,
     }),
   })
@@ -71,15 +79,21 @@ function createHarness() {
   const llm = {
     adapters: new Map([['relay', { adapter }]]),
     listProviders: () => [{ id: 'relay', name: 'Relay' }],
+    listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }],
     listModels: async () => providers.relay.models.map((entry) => ({ id: entry.id, name: entry.id })),
     resolveModelInfo: async (provider, model) => {
       resolveCalls += 1
-      return adapter.modelOf({}, provider, model)
+      return adapter.modelOf(adapter.current(), provider, model)
     },
   }
 
+  const providerDocument = { providers }
+  const configEditor = { configuration: () => [{
+    entry: { options: { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: providerDocument } },
+    override: providerDocument, inherited: {},
+  }] }
   const settings = {
-    describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers } }],
+    describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: providerDocument, user: providerDocument, base: {} }],
     configure: () => {},
     calls: [],
     async mutate(ns, ops) {
@@ -118,7 +132,7 @@ function createHarness() {
         },
       },
     },
-    get: (name) => (name === 'settings' ? settings : name === 'learned' ? learned : undefined),
+    get: (name) => ({ settings, learned, configEditor })[name],
     on: () => () => {},
     effect(fn) {
       fn()
@@ -171,7 +185,7 @@ test('the Host route exposes the vendor correction and the gate aligns images', 
   assert.deepEqual(models.get('deepseek/deepseek-v4.1-flash').inputModalities, ['text', 'image'])
   assert.deepEqual(models.get('deepseek/deepseek-v4.1-pro').inputModalities, ['text'])
 
-  const inputOf = (id) => harness.adapter.modelOf({}, 'relay', id).input
+  const inputOf = (id) => harness.adapter.modelOf(harness.adapter.current(), 'relay', id).input
   assert.deepEqual(inputOf('deepseek/deepseek-v4.1-flash'), ['text', 'image'])
   assert.deepEqual(inputOf('deepseek/deepseek-v4.1-pro'), ['text'])
   assert.deepEqual(inputOf('glm-5.3'), ['text'])
@@ -251,12 +265,12 @@ test('the override route persists manual capabilities and feeds the gate', async
   assert.equal(model.sources.modalities, 'manual')
   assert.equal(model.sources.context, 'manual')
 
-  assert.deepEqual(harness.adapter.modelOf({}, 'relay', 'mystery-model').input, ['text', 'image'])
+  assert.deepEqual(harness.adapter.modelOf(harness.adapter.current(), 'relay', 'mystery-model').input, ['text', 'image'])
 
   const removed = await call(base, { remove: true, provider: 'relay', model: 'mystery-model' })
   assert.equal(removed.ok, true)
   assert.deepEqual(removed.value.overrides, [])
-  assert.deepEqual(harness.adapter.modelOf({}, 'relay', 'mystery-model').input, ['text'])
+  assert.deepEqual(harness.adapter.modelOf(harness.adapter.current(), 'relay', 'mystery-model').input, ['text'])
 })
 
 test('a manual override is written through to the provider settings', async () => {
@@ -278,6 +292,8 @@ test('a manual override is written through to the provider settings', async () =
         input: ['text', 'image'],
         contextWindow: 400000,
         efforts: [{ id: 'off' }, { id: 'high' }],
+        reasoningEffortMappings: { off: null, high: 'vendor-high' },
+        applyToProvider: true,
       }),
     }),
   )
@@ -294,7 +310,7 @@ test('a manual override is written through to the provider settings', async () =
   const entry = harness.providers.relay.models.find((model) => model.id === 'mystery-model')
   assert.deepEqual(entry.input, ['text', 'image'])
   assert.equal(entry.contextWindow, 400000)
-  assert.deepEqual(entry.reasoningEfforts, { off: null, high: 'high' })
+  assert.deepEqual(entry.reasoningEfforts, { off: null, high: 'vendor-high' })
   assert.equal(harness.settings.calls.length, 1)
 
   const models = await (
@@ -310,7 +326,7 @@ test('a manual override is written through to the provider settings', async () =
 
   // The request-side gate reads the provider declaration, so the composer sees
   // the image modality even though the manual override file is empty.
-  assert.deepEqual(harness.adapter.modelOf({}, 'relay', 'mystery-model').input, ['text', 'image'])
+  assert.deepEqual(harness.adapter.modelOf(harness.adapter.current(), 'relay', 'mystery-model').input, ['text', 'image'])
 })
 
 test('write-through keeps fields with no provider equivalent in the local override', async () => {
@@ -330,6 +346,7 @@ test('write-through keeps fields with no provider equivalent in the local overri
         model: 'mystery-model',
         kind: 'image',
         input: ['text', 'image'],
+        applyToProvider: true,
       }),
     }),
   )
@@ -357,7 +374,7 @@ test('write-through keeps fields with no provider equivalent in the local overri
   assert.equal(model.sources.kind, 'manual')
 })
 
-test('applyToProvider:false keeps the override local', async () => {
+test('manual write-through requires an explicit boolean opt-in', async () => {
   resetShadowStore()
   const harness = createHarness()
   apply(harness.ctx, {
@@ -367,22 +384,101 @@ test('applyToProvider:false keeps the override local', async () => {
   })
 
   const base = 'http://local/api/dsh-model-visibility/overrides'
-  const response = await harness.route.overrides.fetch(
-    new Request(base, {
+  for (const applyToProvider of [undefined, false, 'true']) {
+    const response = await harness.route.overrides.fetch(new Request(base, {
       method: 'POST',
-      body: JSON.stringify({
-        provider: 'relay',
-        model: 'mystery-model',
-        input: ['text', 'image'],
-        applyToProvider: false,
-      }),
-    }),
-  )
-  const saved = await response.json()
-  assert.equal(saved.value.provider.written, false)
-  assert.equal(saved.value.provider.reason, 'skipped')
-  assert.equal(saved.value.overrides.length, 1)
+      body: JSON.stringify({ provider: 'relay', model: 'mystery-model', input: ['text', 'image'], applyToProvider }),
+    }))
+    const saved = await response.json()
+    assert.equal(saved.value.provider.written, false)
+    assert.equal(saved.value.provider.reason, 'skipped')
+    assert.equal(saved.value.overrides.length, 1)
+  }
   assert.equal(harness.settings.calls.length, 0)
+})
+
+test('an earlier delayed write-through cannot rewrite or delete a newer local edit', { timeout: 2000 }, async () => {
+  for (const oldKind of [undefined, 'chat']) {
+    for (const remove of [false, true]) {
+      resetShadowStore()
+      const harness = createHarness()
+      apply(harness.ctx, { hidden: { get: () => [] }, probe: false })
+      const entered = Promise.withResolvers()
+      const complete = Promise.withResolvers()
+      const write = harness.settings.mutate
+      harness.settings.mutate = async (...args) => {
+        entered.resolve()
+        await complete.promise
+        await write(...args)
+      }
+      const url = 'http://local/api/dsh-model-visibility/overrides'
+      const post = (body) => harness.route.overrides.fetch(new Request(url, { method: 'POST', body: JSON.stringify(body) })).then((reply) => reply.json())
+      const identity = { provider: 'relay', model: 'mystery-model' }
+      const first = post({ ...identity, kind: oldKind, contextWindow: 400000, applyToProvider: true })
+      await entered.promise
+      try {
+        const latest = await post({ ...identity, ...(remove ? { remove: true } : { kind: 'embedding', contextWindow: 500000 }) })
+        assert.equal(latest.ok, true)
+        assert.equal(latest.value.overrides.length, remove ? 0 : 1)
+      } finally {
+        complete.resolve()
+      }
+      const result = await first
+      assert.equal(result.value.provider.written, true)
+      assert.equal(result.value.overrides.length, remove ? 0 : 1)
+      if (!remove) {
+        assert.equal(result.value.overrides[0].kind, 'embedding')
+        assert.equal(result.value.overrides[0].contextWindow, 500000)
+      }
+    }
+  }
+})
+
+test('Host rejects stale editor revisions and preserves independent edits during a write-through', { timeout: 2000 }, async () => {
+  resetShadowStore()
+  const harness = createHarness()
+  apply(harness.ctx, { hidden: [], probe: false })
+  const url = 'http://local/api/dsh-model-visibility/overrides'
+  const identity = { provider: 'relay', model: 'mystery-model' }
+  const post = body => harness.route.overrides.fetch(new Request(url, { method: 'POST', body: JSON.stringify({ ...identity, ...body }) }))
+  const first = await (await post({ expectedRevision: null, input: ['text', 'image'] })).json()
+  const token = first.value.revisions[0].revision
+  assert.equal(typeof token, 'string')
+  assert.equal((await post({ expectedRevision: null, contextWindow: 1024 })).status, 409)
+  const entered = Promise.withResolvers()
+  const complete = Promise.withResolvers()
+  const write = harness.settings.mutate
+  harness.settings.mutate = async (...args) => { entered.resolve(); await complete.promise; await write(...args) }
+  const pending = post({ expectedRevision: token, contextWindow: 2000, applyToProvider: true })
+  await entered.promise
+  try {
+    const file = path.join(process.env.DSH_HOME, 'dsh-model-visibility', 'overrides.json')
+    fs.writeFileSync(file, JSON.stringify({ version: 1, overrides: [{ ...identity, contextWindow: 3000, kind: 'chat' }] }))
+  } finally { complete.resolve() }
+  const result = await (await pending).json()
+  assert.equal(result.value.provider.written, true)
+  assert.equal(result.value.overrides[0].contextWindow, 3000)
+  assert.equal(result.value.overrides[0].kind, 'chat')
+})
+
+test('manual write-through retains an unsupported input list and writes valid other fields', async () => {
+  resetShadowStore()
+  const harness = createHarness()
+  apply(harness.ctx, { hidden: { get: () => [] }, probe: false })
+  const input = ['text', 'image', 'audio', 'video', 'file']
+  const response = await harness.route.overrides.fetch(new Request('http://local/api/dsh-model-visibility/overrides', {
+    method: 'POST',
+    body: JSON.stringify({ provider: 'relay', model: 'mystery-model', input, contextWindow: 45000, applyToProvider: true }),
+  }))
+  const saved = await response.json()
+  assert.equal(saved.ok, true)
+  assert.deepEqual(saved.value.provider.fields, ['contextWindow'])
+  assert.deepEqual(saved.value.provider.localOnly, ['input'])
+  assert.deepEqual(saved.value.overrides[0].input, input)
+  assert.equal(saved.value.overrides[0].contextWindow, undefined)
+  const configured = harness.providers.relay.models.find((item) => item.id === 'mystery-model')
+  assert.deepEqual(configured.input, [])
+  assert.equal(configured.contextWindow, 45000)
 })
 
 test('Host verify route forwards web access and defaults to read-only provider settings', async () => {
@@ -400,9 +496,10 @@ test('Host verify route forwards web access and defaults to read-only provider s
   })
   harness.llm.listModels = async () => [{ id: 'mystery-model' }]
   let round = 0
-  harness.llm.prepareCall = async (config, signal, configure) => ({ config: { ...config, ...configure(config, {}) }, stream: async function* () {
+  harness.llm.prepareCall = async (config, signal, configure) => ({ config: { ...config, ...configure(config, {}) }, stream: async function* (request) {
     if (round++ === 0) yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 's', name: 'search_model_docs', arguments: '{"query":"mystery-model official input"}' } }
-    else yield { type: 'text-delta', text: JSON.stringify([{ id: 'mystery-model', kind: 'chat', input: ['text','image'], output: null, contextWindow: null, maxTokens: null, reasoning: null, reasoningEfforts: null, defaultEffort: null, evidence: [{ url: 'https://vendor.example/spec', fields: ['kind','input'] }] }]) }
+    else if (!request.tools.length) yield { type: 'text-delta', text: JSON.stringify([{ id: 'mystery-model', kind: 'chat', input: ['text','image'], output: null, contextWindow: null, maxTokens: null, reasoning: null, reasoningEfforts: null, defaultEffort: null, evidence: [{ url: 'https://vendor.example/spec', fields: ['kind','input'] }] }]) }
+    yield { type: 'finish', reason: { kind: 'stop' } }
   } })
   try {
     apply(harness.ctx, { hidden: { get: () => [] }, probe: false })
@@ -437,8 +534,47 @@ test('Host verify route forwards web access and defaults to read-only provider s
     assert.equal(full.fullScan, true)
     assert.equal(full.skippedKnown, 0)
     assert.equal(full.total, 1)
+    const checkerCalls = round
+    const publicOnly = await harness.route.verify.fetch(new Request('http://local/api/dsh-model-visibility/verify', {
+      method: 'POST', body: JSON.stringify({ useChecker: false, fuzzyMatch: true, writeBack: true, webSearch: true, fullScan: true }),
+    }))
+    assert.equal(publicOnly.status, 200)
+    const publicState = (await publicOnly.json()).value.state
+    assert.equal(publicState.useChecker, false)
+    assert.equal(publicState.webSearch, false)
+    assert.equal(publicState.writeBack, false)
+    assert.equal(publicState.fuzzyMatch, true)
+    for (let i = 0; i < 30; i++) {
+      const { value } = await (await harness.route.verify.fetch(new Request('http://local/api/dsh-model-visibility/verify'))).json()
+      if (!value.state.running) break
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal(round, checkerCalls)
   } finally {
     for (const dispose of disposers.reverse()) await dispose()
     globalThis.fetch = originalFetch
   }
+})
+
+
+test('model editor exposes the opt-in and applies request settings only after explicit write-back', async () => {
+  resetShadowStore()
+  const harness = createHarness()
+  const profile = harness.providers.relay
+  profile.api = 'openai-completions'
+  apply(harness.ctx, { hidden: [], probe: false, applyInput: false })
+  const settingsCatalog = await (await harness.route.models.fetch(new Request('http://localhost/models'))).json()
+  const row = settingsCatalog.value.groups[0].models.find((candidate) => candidate.id === 'mystery-model')
+  assert.equal(row.standardEffort, true)
+  assert.equal(row.requestReasoning, null)
+  const post = async applyToProvider => (await harness.route.overrides.fetch(new Request('http://localhost/overrides', {
+    method: 'POST', body: JSON.stringify({ provider: 'relay', model: 'mystery-model', efforts: ['high', 'xhigh', 'max'], standardEffort: true, applyToProvider }),
+  }))).json()
+  assert.equal((await post(false)).value.provider.written, false)
+  assert.equal(profile.models.at(-1).compat, undefined)
+  const saved = await post(true)
+  assert.deepEqual(saved.value.provider.fields, ['reasoningEfforts', 'supportsReasoningEffort'])
+  assert.deepEqual(profile.models.at(-1).reasoningEfforts, { high: 'high', xhigh: 'xhigh', max: 'max' })
+  assert.equal(profile.models.at(-1).compat.supportsReasoningEffort, true)
+  assert.equal(profile.models[0].compat, undefined)
 })

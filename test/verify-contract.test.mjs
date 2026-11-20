@@ -94,7 +94,7 @@ test('the checker budget is generous enough for a batch of JSON objects', () => 
   // A batch asks for six short objects; 2 048 was not enough once a thinking
   // model spent the allowance before answering.
   assert.ok(CHECKER_MAX_TOKENS >= 4096, 'the checker output budget must leave room for reasoning')
-  assert.equal(CHECKER_REASONING_EFFORT, 'low')
+  assert.equal(CHECKER_REASONING_EFFORT, 'off')
 })
 
 test('a thinking checker that eats the budget reports truncation, not "no JSON"', async () => {
@@ -105,7 +105,7 @@ test('a thinking checker that eats the budget reports truncation, not "no JSON"'
   assert.equal(snapshot.batches.every((batch) => batch.status === 'failed'), true)
   const joined = snapshot.errors.join('\n')
   assert.match(joined, /truncated at \d+ output tokens/)
-  assert.match(joined, /spent them on reasoning/)
+  assert.match(joined, /no final text; reasoning observed/)
   assert.doesNotMatch(joined, /contained no JSON object/)
 })
 
@@ -113,7 +113,7 @@ test('the sweep pins a low reasoning effort so a thinking checker can answer', a
   const llm = scriptedLlm({ reply: '{"models":[{"id":"model-a","kind":"chat","contextWindow":1000}]}' })
   await run({ llm })
   assert.ok(llm.calls.length >= 1)
-  assert.equal(llm.calls[0].config.reasoningEffort, CHECKER_REASONING_EFFORT)
+  assert.equal(llm.calls[0].config.reasoningEffort, 'low', 'fallback to the smallest advertised effort when off is not supported')
   assert.equal(llm.calls[0].config.maxTokens, CHECKER_MAX_TOKENS)
 })
 

@@ -37,11 +37,11 @@ function endSeed(time, data = {}) {
   return JSON.stringify({ type: 'session/end-seed', time, data })
 }
 
-function writeLog(home, id, lines) {
+function writeLog(home, id, lines, filename = 'session.v4.jsonl') {
   const dir = path.join(home, 'sessions', 'proj', id)
   fs.mkdirSync(dir, { recursive: true })
-  const log = path.join(dir, 'session.v4.jsonl')
-  fs.writeFileSync(log, `${lines.join('\n')}\n`)
+  const log = path.join(dir, filename)
+  fs.writeFileSync(log, filename.endsWith('.zstd') ? Buffer.concat(lines.map(frame)) : `${lines.join('\n')}\n`)
   return log
 }
 
@@ -65,7 +65,7 @@ function messageEvent({ time, turn, step, input, output, cacheRead = 0, provider
   })
 }
 
-const attemptEvent = ({ time, turn, step, input, output, provider = 'relay', model = 'gpt-x' }) =>
+const attemptEvent = ({ time, turn, step, input, output, headerSeq }) =>
   JSON.stringify({
     type: 'assistant/attempt',
     seq: time,
@@ -73,6 +73,7 @@ const attemptEvent = ({ time, turn, step, input, output, provider = 'relay', mod
     data: {
       turn,
       step,
+      headerSeq,
       stream: [
         { type: 'chunk', time, chunk: { type: 'text-delta', text: 'hi' } },
         { type: 'chunk', time, chunk: { type: 'usage', usage: { inputTokens: input, outputTokens: output } } },
@@ -161,14 +162,60 @@ test('attempt streams contribute their last usage chunk', () => {
   assert.deepEqual(Object.values(folded.buckets)[0]['*'], [7, 8, 0, 0])
 })
 
-test('older months are attributed to the session creation day, newer months exactly', () => {
-  const oldTime = 1_000_000 // far in the past
+test('message settlement prefers top-level usage, otherwise uses the last stream sample', () => {
+  const time = new Date(2026, 11, 2, 12).getTime()
+  const stream = JSON.parse(attemptEvent({ time, turn: 0, step: 0, input: 7, output: 8 })).data.stream
+  stream.unshift({ type: 'chunk', chunk: { type: 'usage', usage: { inputTokens: 99, outputTokens: 99 } } })
+  const streamOnly = JSON.parse(messageEvent({ time, turn: 0, step: 0, provider: 'relay', model: 'stream' }))
+  streamOnly.data.stream = stream
+  delete streamOnly.data.usage
+  const direct = JSON.parse(messageEvent({ time, turn: 0, step: 1, input: 3, output: 4, model: 'direct' }))
+  direct.data.stream = stream
+  const { buckets } = foldLogToBuckets([JSON.stringify(streamOnly), JSON.stringify(direct)])
+  assert.deepEqual(buckets[dayKeyOf(time)]['relay/stream'], [7, 8, 0, 0])
+  assert.deepEqual(buckets[dayKeyOf(time)]['relay/direct'], [3, 4, 0, 0])
+})
+
+test('an attempt takes the exact header when referenced and otherwise uses the current request', () => {
+  const time = new Date(2026, 11, 2, 12).getTime()
+  const header = (seq, model) => JSON.stringify({ type: 'request/header', seq, time, data: { header: { config: { provider: 'r', model } }, reason: 'change' } })
+  const context = (model) => JSON.stringify({ type: 'request/context', time, data: { provider: 'r', model } })
+  const attempt = (step, input, headerSeq) => attemptEvent({ time, turn: 0, step, input, output: 1, headerSeq })
   const lines = [
-    `{"type":"session","id":"s","createdAt":${oldTime + 1}}`,
-    messageEvent({ time: oldTime, turn: 0, step: 0, input: 30, output: 3 }),
+    header(0, 'exact'), context('exact'), header(5, 'latest'), context('latest'),
+    attempt(0, 1, 0), attempt(1, 2), attempt(2, 4, 999),
+    '{"type":"developer/message","data":{"turn":0,"step":3,"headerSeq":0}}', attempt(3, 8),
+    '{"type":"llm/retry-started","data":{"turn":0,"step":3}}', header(9, 'retry'), attempt(3, 16),
   ]
-  const folded = foldLogToBuckets(lines, { preciseFrom: dayKeyOf(Date.now()) })
-  assert.deepEqual(Object.values(folded.buckets)[0]['*'], [30, 3, 0, 0])
+  const { buckets } = foldLogToBuckets(lines)
+  assert.deepEqual(buckets[dayKeyOf(time)]['r/exact'], [9, 2, 0, 0])
+  assert.deepEqual(buckets[dayKeyOf(time)]['r/latest'], [2, 1, 0, 0])
+  assert.deepEqual(buckets[dayKeyOf(time)]['r/retry'], [16, 1, 0, 0])
+  assert.deepEqual(buckets[dayKeyOf(time)].unknown, [4, 1, 0, 0])
+})
+
+test('month-end retention keeps exact event dates even for very old sessions', async (t) => {
+  const home = tempDir(t)
+  const date = (year, month, day) => new Date(year, month - 1, day, 12).getTime()
+  let now = date(2026, 4, 30)
+  const ledger = createUsageLedger({ home, now: () => now })
+  const event = (time, step, input) => messageEvent({ time, turn: 0, step, input, output: 1 })
+  writeLog(home, 'old', seedLog({ id: 'old', time: date(2022, 1, 1) }, [
+    event(date(2025, 2, 27), 0, 1), event(date(2025, 2, 28), 1, 2),
+    event(date(2025, 9, 3), 2, 4), event(date(2026, 4, 29), 3, 8), event(date(2026, 5, 1), 4, 16),
+  ]))
+  await ledger.rescan()
+  const summary = ledger.read()
+  assert.equal(summary.retainedFrom, '2025-02-28')
+  assert.deepEqual(summary.ranges.total, [14, 3, 0, 0])
+  assert.deepEqual(summary.ranges.month, [8, 1, 0, 0])
+  assert.deepEqual(Object.keys(summary.days), ['2025-02-28', '2025-09-03', '2026-04-29'])
+  assert.equal(summary.byModelRange, '2026-04-01 through 2026-04-30 (local dates, inclusive)')
+  now = date(2026, 5, 1)
+  assert.equal(ledger.read().retainedFrom, '2025-03-01')
+  assert.deepEqual(ledger.read().ranges.total, [28, 3, 0, 0])
+  await ledger.rescan()
+  assert.equal(JSON.parse(fs.readFileSync(ledger.file, 'utf8')).files['proj/old'].buckets['2025-02-28'], undefined)
 })
 
 test('nested forks count only work after their last tagged seed marker', async (t) => {
@@ -206,7 +253,7 @@ test('nested forks count only work after their last tagged seed marker', async (
   })
 })
 
-test('opening a v1 cache invalidates unchanged file aggregates but keeps plugin usage', async (t) => {
+for (const version of [1, 2]) test(`opening a v${version} cache invalidates unchanged file aggregates but keeps plugin usage`, async (t) => {
   const home = tempDir(t)
   const time = new Date(2026, 10, 10, 12).getTime()
   const today = dayKeyOf(time)
@@ -220,7 +267,7 @@ test('opening a v1 cache invalidates unchanged file aggregates but keeps plugin 
   const file = path.join(home, 'usage-ledger.json')
   const plugin = { [today]: { 'checker/test': [5, 4, 0, 0], '*': [5, 4, 0, 0] } }
   fs.writeFileSync(file, JSON.stringify({
-    version: 1,
+    version,
     plugin,
     files: {
       [relPath]: { mtime: Math.trunc(stat.mtimeMs), size: stat.size, buckets: { [today]: { 'relay/gpt-x': [36, 5, 0, 0] } } },
@@ -233,10 +280,10 @@ test('opening a v1 cache invalidates unchanged file aggregates but keeps plugin 
   assert.deepEqual(ledger.read().ranges.total, [5, 4, 0, 0])
   await ledger.rescan()
   const cache = JSON.parse(fs.readFileSync(file, 'utf8'))
-  assert.equal(cache.version, 2)
+  assert.equal(cache.version, 3)
   assert.deepEqual(cache.plugin, plugin)
-  assert.deepEqual(Object.keys(cache.files), [relPath])
-  assert.deepEqual(cache.files[relPath].buckets[today]['relay/gpt-x'], [6, 2, 0, 0])
+  assert.deepEqual(Object.keys(cache.files), ['proj/child'])
+  assert.deepEqual(cache.files['proj/child'].buckets[today]['relay/gpt-x'], [6, 2, 0, 0])
   const reopened = createUsageLedger(options)
   assert.deepEqual(reopened.read().ranges.total, [11, 6, 0, 0])
 })
@@ -268,6 +315,136 @@ test('the ledger scans incrementally and persists its cache', async (t) => {
   await ledger.rescan()
   const second = ledger.read()
   assert.deepEqual(second.ranges.month, [14, 5, 0, 0])
+})
+
+test('a damaged log keeps its published usage and retries until repaired', async (t) => {
+  const home = tempDir(t)
+  const time = new Date(2026, 3, 30, 12).getTime()
+  const options = { home, now: () => time, logger: { warn() {} } }
+  const ledger = createUsageLedger(options)
+  const lines = seedLog({ id: 'damaged', time }, [messageEvent({ time, turn: 0, step: 0, input: 2, output: 1 })])
+  const log = writeLog(home, 'damaged', lines, 'session.v4.jsonl.zstd')
+  const good = fs.readFileSync(log)
+  await ledger.rescan()
+  const cached = fs.readFileSync(ledger.file, 'utf8')
+  fs.writeFileSync(log, Buffer.concat([good.subarray(0, frame(lines[0]).length), Buffer.from('damaged frame')]))
+  await ledger.rescan({ force: true })
+  assert.deepEqual(ledger.read().ranges.total, [2, 1, 0, 0])
+  assert.match(ledger.read().error, /Usage scan incomplete.*invalid Zstandard frame/)
+  assert.equal(fs.readFileSync(ledger.file, 'utf8'), cached)
+  const restarted = createUsageLedger(options)
+  await restarted.rescan()
+  assert.deepEqual(restarted.read().ranges.total, [2, 1, 0, 0])
+  assert.match(restarted.read().error, /Last good totals were kept/)
+  const next = messageEvent({ time, turn: 0, step: 1, input: 4, output: 2 })
+  fs.writeFileSync(log, Buffer.concat([good, frame(next)]))
+  await restarted.rescan()
+  assert.equal(restarted.read().error, undefined)
+  assert.deepEqual(restarted.read().ranges.total, [6, 3, 0, 0])
+})
+
+for (const [encoding, damage, reason] of [
+  ['jsonl', Buffer.from('not JSON\n'), /invalid JSONL at line 3/],
+  ['jsonl', Buffer.from('{"type":"assistant/attempt"'), /incomplete JSONL tail/],
+  ['jsonl.zstd', Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x04]), /incomplete Zstandard tail/],
+  ['jsonl.zstd', Buffer.from('bad frame after good prefix'), /invalid Zstandard frame/],
+]) test(`a cold ${encoding} scan recovers a prefix without caching ${reason}`, async (t) => {
+  const home = tempDir(t)
+  const time = new Date(2026, 3, 30, 12).getTime()
+  const ledger = createUsageLedger({ home, now: () => time, logger: { warn() {} } })
+  const lines = seedLog({ id: 'partial', time }, [messageEvent({ time, turn: 0, step: 0, input: 2, output: 1 })])
+  const log = writeLog(home, 'partial', lines, `session.v4.${encoding}`)
+  const good = fs.readFileSync(log)
+  fs.appendFileSync(log, damage)
+  await ledger.ensureScanned()
+  assert.deepEqual(ledger.read().ranges.total, [2, 1, 0, 0])
+  assert.match(ledger.read().error, reason)
+  assert.equal(fs.existsSync(ledger.file), false)
+  fs.writeFileSync(log, good)
+  await ledger.rescan()
+  assert.equal(ledger.read().error, undefined)
+  assert.deepEqual(ledger.read().ranges.total, [2, 1, 0, 0])
+  assert.ok(fs.existsSync(ledger.file))
+})
+
+test('disk fallback admits only one supported generation in the official layout', async (t) => {
+  const home = tempDir(t)
+  const time = new Date(2026, 3, 30, 12).getTime()
+  const ledger = createUsageLedger({ home, now: () => time, logger: { warn() {} } })
+  const lines = (id) => seedLog({ id, time }, [messageEvent({ time, turn: 0, step: 0, input: 2, output: 1 })])
+  writeLog(home, 'current', lines('current'), 'session.v3.jsonl')
+  writeLog(home, 'current', lines('current'))
+  writeLog(home, 'future', lines('future'))
+  writeLog(home, 'future', lines('future'), 'session.v5.jsonl')
+  writeLog(home, 'conflict', lines('conflict'))
+  writeLog(home, 'conflict', lines('conflict'), 'session.v4.jsonl.zstd')
+  await ledger.rescan()
+  assert.deepEqual(ledger.read().ranges.total, [2, 1, 0, 0])
+  assert.match(ledger.read().error, /2 storage issues/)
+})
+
+test('an optional persistence service supplies the supported root/format, and a cold read joins its scan', async (t) => {
+  const home = tempDir(t)
+  const time = new Date(2026, 3, 30, 12).getTime()
+  writeLog(home, 'ignored', seedLog({ id: 'ignored', time }, [messageEvent({ time, turn: 0, step: 0, input: 64, output: 1 })]))
+  const events = [
+    { type: 'request/header', seq: 0, time, data: { header: { config: { provider: 'custom', model: 'backend' } } } },
+    JSON.parse(messageEvent({ time, turn: 0, step: 0, input: 7, output: 1 })),
+    JSON.parse(attemptEvent({ time, turn: 1, step: 0, input: 2, output: 1 })),
+  ]
+  let listCalls = 0
+  let openCalls = 0
+  let closed = 0
+  let revision = 'rev1'
+  let listingFails = false
+  let readFails = false
+  const gate = Promise.withResolvers()
+  const ledger = createUsageLedger({ home, now: () => time, logger: { warn() {} }, sessionPersistence: {
+    async list() {
+      listCalls += 1
+      await gate.promise
+      if (listingFails) throw new Error('private backend path')
+      return [{ header: { id: 'custom' }, revision, formatStatus: 'migration-required' }]
+    },
+    async open(id, access) {
+      openCalls += 1
+      assert.equal(id, 'custom')
+      assert.equal(access, 'read')
+      return { header: { createdAt: time }, inheritedEventCount: 2,
+        async read() { if (readFails) throw new Error('private backend data'); return { events } },
+        async close() { closed += 1 },
+      }
+    },
+  } })
+  const first = ledger.ensureScanned()
+  assert.equal(first, ledger.ensureScanned())
+  assert.equal(first, ledger.rescan())
+  assert.deepEqual(ledger.read().ranges.total, [0, 0, 0, 0])
+  assert.equal(ledger.read().computing, true)
+  gate.resolve()
+  await first
+  assert.deepEqual(ledger.read().byModel, { 'custom/backend': [2, 1, 0, 0] })
+  assert.equal(ledger.read().computing, false)
+  await ledger.ensureScanned()
+  assert.equal(listCalls, 1)
+  await ledger.rescan()
+  assert.equal(openCalls, 1)
+  revision = 'rev2'
+  readFails = true
+  await ledger.rescan()
+  assert.equal(openCalls, 2)
+  assert.equal(closed, 2)
+  assert.deepEqual(ledger.read().ranges.total, [2, 1, 0, 0])
+  assert.match(ledger.read().error, /could not read a session log from storage/)
+  assert.doesNotMatch(ledger.read().error, /private/)
+  readFails = false
+  await ledger.rescan()
+  assert.equal(openCalls, 3)
+  assert.equal(ledger.read().error, undefined)
+  listingFails = true
+  await ledger.rescan()
+  assert.match(ledger.read().error, /Could not list stored sessions/)
+  assert.deepEqual(ledger.read().ranges.total, [2, 1, 0, 0])
 })
 
 test('plugin-attributed usage lands in the same day buckets', async (t) => {

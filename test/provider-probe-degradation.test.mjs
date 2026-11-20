@@ -25,6 +25,10 @@ const PROVIDERS = {
   },
 }
 
+function directoryFor(providers = PROVIDERS) {
+  return { listConfigurableProviders: () => Object.keys(providers).map(provider => ({ provider, declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', provider] })) }
+}
+
 function settingsFor(providers = PROVIDERS) {
   return { describe: () => [{ ns: 'llm-pi-ai', value: { providers } }] }
 }
@@ -57,6 +61,7 @@ const credentials = { resolve: async () => ({ value: 'secret' }) }
 function probeWith(fetchImpl) {
   return createProviderProbe({
     settings: settingsFor(),
+    llm: directoryFor(),
     credentials,
     fetch: fetchImpl,
     logger: { warn() {} },
@@ -155,6 +160,7 @@ test('an http relay is reported as skipped instead of sending the key', async ()
   }
   const probe = createProviderProbe({
     settings: settingsFor(providers),
+    llm: directoryFor(providers),
     credentials,
     fetch: fetchImpl,
     logger: { warn() {} },
@@ -162,7 +168,7 @@ test('an http relay is reported as skipped instead of sending the key', async ()
   const snapshot = await probe.read({ fresh: true })
   assert.equal(touched, 0, 'no request may leave for a plaintext base URL')
   const [diagnostic] = snapshot.diagnostics
-  assert.equal(diagnostic.status, 'failed')
+  assert.equal(diagnostic.status, 'skipped')
 })
 
 test('readProviderProfiles keeps auth headers for the probe', () => {

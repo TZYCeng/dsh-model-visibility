@@ -137,12 +137,11 @@ test('every dictionary placeholder is spelled the same in zh and en', () => {
   assert.deepEqual(drift, [])
 })
 
-test('no dictionary entry ships a literal unresolved placeholder in a no-param call', () => {
-  // `checker.running` used to be called without `tokens`, so the UI showed a
-  // literal "{tokens}". Pin the keys whose call sites are easy to get wrong.
-  for (const key of ['checker.running', 'checker.finished', 'checker.progress']) {
-    assert.match(DICT.zh[key], /\{tokens\}/, `${key} should ask for {tokens}`)
-    assert.match(DICT.en[key], /\{tokens\}/, `${key} should ask for {tokens}`)
+test('checker progress and token labels interpolate separate values', () => {
+  for (const locale of [DICT.zh, DICT.en]) {
+    assert.match(locale['checker.progress'], /\{processed\}\/\{total\}/)
+    assert.doesNotMatch(locale['checker.progress'], /\{tokens\}/)
+    assert.match(locale['checker.tokens'], /\{tokens\}/)
   }
 })
 
@@ -294,16 +293,57 @@ test('patchDirectoryStore rewrites snapshots in place and restores', () => {
   assert.equal(store.getSnapshot(), base)
 })
 
-test('the client bundle builds deterministically from the sources', () => {
+test('the client bundle builds deterministically from the sources', (t) => {
   const root = path.dirname(dirname(fileURLToPath(import.meta.url)))
-  const first = os.tmpdir()
-  const out1 = path.join(first, `mv-bundle-${process.pid}-a.js`)
-  const out2 = path.join(first, `mv-bundle-${process.pid}-b.js`)
-  execFileSync(process.execPath, ['scripts/build-client.mjs'], { cwd: root, stdio: 'ignore' })
-  const built = fs.readFileSync(path.join(root, 'client.js'), 'utf8')
-  fs.writeFileSync(out1, built)
-  execFileSync(process.execPath, ['scripts/build-client.mjs'], { cwd: root, stdio: 'ignore' })
-  const rebuilt = fs.readFileSync(path.join(root, 'client.js'), 'utf8')
-  assert.equal(rebuilt, fs.readFileSync(out1, 'utf8'))
-  assert.equal(rebuilt.trim().length, built.trim().length)
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'mv-bundle-'))
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }))
+  fs.cpSync(path.join(root, 'client-src'), path.join(fixture, 'client-src'), { recursive: true })
+  fs.mkdirSync(path.join(fixture, 'scripts'))
+  fs.copyFileSync(path.join(root, 'scripts/build-client.mjs'), path.join(fixture, 'scripts/build-client.mjs'))
+  const build = () => {
+    execFileSync(process.execPath, ['scripts/build-client.mjs'], { cwd: fixture, stdio: 'ignore' })
+    return fs.readFileSync(path.join(fixture, 'client.js'), 'utf8')
+  }
+  const built = build()
+  fs.unlinkSync(path.join(fixture, 'client.js'))
+  assert.equal(build(), built)
+})
+
+
+/**
+ * The editor renders `t('override.reason.' + result.reason)` and
+ * `t('override.field.' + field)` with no fallback, so a reason the Host can
+ * return but the dictionary never learned reaches the user as a bare key.
+ * `native-catalog` did exactly that. Keep the two lists in lock-step.
+ */
+test('every provider-write reason and field has a localized label', async () => {
+  const source = fs.readFileSync(join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'lib', 'provider-write.js'), 'utf8')
+  const reasons = new Set([...source.matchAll(/reason: '([^']+)'/g)].map((match) => match[1]))
+  // `stripWrittenFields` and the verifier pass these through as `localOnly`.
+  for (const field of ['input', 'contextWindow', 'reasoningEfforts', 'kind', 'defaultEffort', 'supportsReasoningEffort']) {
+    reasons.add('field.' + field)
+  }
+  assert.ok(reasons.size > 5, 'the reason list was parsed')
+  const missing = []
+  for (const key of reasons) {
+    const name = key.startsWith('field.') ? 'override.field.' + key.slice(6) : 'override.reason.' + key
+    if (!(name in DICT.en)) missing.push(name + ' (en)')
+    if (!(name in DICT.zh)) missing.push(name + ' (zh)')
+  }
+  // A write result may also be reported before any provider write is attempted.
+  for (const name of ['override.reason.skipped', 'override.reason.write-pending', 'override.reason.protected']) {
+    if (!(name in DICT.en)) missing.push(name + ' (en)')
+    if (!(name in DICT.zh)) missing.push(name + ' (zh)')
+  }
+  assert.deepEqual(missing, [])
+})
+
+test('reasoning filter retains adapter choices despite a negative local reference', () => {
+  const models = [
+    { id: 'adapter', reasoningSupported: false, requestReasoning: { efforts: [{ id: 'high', name: 'High' }] } },
+    { id: 'reference', reasoningSupported: true, requestReasoning: null },
+    { id: 'disabled', reasoningSupported: false, requestReasoning: null },
+  ]
+  const groups = computeFilteredGroups([{ id: 'relay', models }], { reasoningOnly: true })
+  assert.deepEqual(groups[0].models.map(model => model.id), ['adapter', 'reference'])
 })

@@ -41,17 +41,16 @@ function apply(ctx) {
     const disposers = []
     disposers.push(
       ctx.on('connection/reset', () => {
-        catalog.refresh()
+        catalog.afterChange()
         overrides.load()
         usage.refresh()
+        verify.load()
       }),
     )
     if (ctx.remote !== undefined && typeof ctx.remote.$on === 'function') {
-      disposers.push(
-        ctx.remote.$on('llm/adapters-updated', () => {
-          catalog.refresh()
-        }),
-      )
+      for (const event of ['llm/adapters-updated', 'llm/models-updated']) {
+        disposers.push(ctx.remote.$on(event, () => { void catalog.afterChange() }))
+      }
       for (const event of [
         'settings/document-updated',
         'credentials/record-updated',
@@ -59,7 +58,9 @@ function apply(ctx) {
       ]) {
         disposers.push(
           ctx.remote.$on(event, () => {
-            catalog.load()
+            // Supersede a stale browser GET, but do not force new relay probes
+            // for unrelated settings edits (for example a visibility toggle).
+            void catalog.afterChange({ fresh: false })
           }),
         )
       }

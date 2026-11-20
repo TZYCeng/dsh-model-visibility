@@ -2,7 +2,8 @@ const React = require('react')
 const h = React.createElement
 
 import { FIELD } from './constants.mjs'
-import { keyOf, kindOf, isGenerationKind, providerLabel, countModels, readCollapsedGroups, persistCollapsedGroups, overrideKeyOf } from './format.mjs'
+import { keyOf, kindOf, isGenerationKind, providerLabel, countModels, sourceOf, sourceLabel, readCollapsedGroups, persistCollapsedGroups } from './format.mjs'
+import { overrideIdentity } from './catalog-store.mjs'
 import { computeFilteredGroups, countKinds, probeOf } from './pure.mjs'
 import { capabilityTags, tagClassOf } from './tags.mjs'
 import { ModelOverrideEditor, providerWriteNote } from './override-editor.mjs'
@@ -50,6 +51,15 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const [aboutOpen, setAboutOpen] = React.useState(readAboutOpen)
     const [editing, setEditing] = React.useState(null)
     const [providerNote, setProviderNote] = React.useState(null)
+    const editTrigger = React.useRef(null)
+
+    const closeEditor = () => setEditing(null)
+    React.useEffect(() => {
+      if (editing === null && editTrigger.current !== null) {
+        editTrigger.current.focus()
+        editTrigger.current = null
+      }
+    }, [editing])
 
     React.useEffect(() => {
       catalog.load()
@@ -60,12 +70,17 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const catalogMeta = state.learned && typeof state.learned === 'object' ? state.learned : null
     const hostFeatures =
       catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
-    const canEdit = state.source === 'host' && hostFeatures.includes('overrides')
-    const canVerify = state.source === 'host' && hostFeatures.includes('verifyWeb')
-    const overrideEntries = new Map()
-    for (const entry of overrideState.entries) {
-      overrideEntries.set(overrideKeyOf(entry), entry)
-    }
+    const supportsOverrides = state.source === 'host' && hostFeatures.includes('overrides')
+    const overridesReady = overrideState.status === 'ready' && overrideState.available === true
+    const canOpenEditor = state.status === 'ready' && supportsOverrides && overridesReady && !overrideState.pending && !overrideState.refreshing
+    const hostFeaturesKnown = state.source === 'host' && Array.isArray(catalogMeta?.features)
+    const canSetSourceMode = hostFeatures.includes('verifySourceModes')
+    const supportsVerify = canSetSourceMode || hostFeatures.includes('verifyWeb')
+    const canVerify = hostFeaturesKnown && state.status === 'ready' && supportsVerify
+    const verifyState = verify.getSnapshot()
+    const observeVerify = !hostFeaturesKnown || hostFeatures.includes('verify') || supportsVerify ||
+      verifyState.snapshot?.state?.running === true || verifyState.pending
+    const overrideEntries = new Map(overrideState.entries.map((entry) => [overrideIdentity(entry.provider, entry.model), entry]))
 
     const writable = snapshot.writable !== false
     const groups = state.groups
@@ -154,8 +169,9 @@ function makeSection(form, catalog, overrides, usage, verify) {
     // A hard reload may supersede a soft refresh that is still running;
     // catalog.load() gives it a new run and discards the older result.
     const reloadCatalog = () => {
-      if (busy || reloading || refreshing) return
-      runCatalogAction(() => catalog.reload(), setReloading)
+      if (busy || reloading) return
+      setRefreshing(false)
+      runCatalogAction(() => { void overrides.load(); return catalog.reload() }, setReloading)
     }
 
     const toggleGroupCollapsed = (id) => {
@@ -273,6 +289,9 @@ function makeSection(form, catalog, overrides, usage, verify) {
             ? null
             : models.map((model) => {
               const rowKey = keyOf(group.id, model.id)
+              const overrideId = overrideIdentity(group.id, model.id)
+              const currentRevision = overrideState.revisions?.get(overrideId) ?? null
+              const isEditing = editing?.id === overrideId
               const shownModel = !hidden.has(rowKey)
               const tags = capabilityTags(model, t)
               const kind = kindOf(model)
@@ -321,17 +340,24 @@ function makeSection(form, catalog, overrides, usage, verify) {
                 h(
                   'div',
                   { className: 'mvp_rowActions' },
-                  canEdit
+                  supportsOverrides && overrideState.available !== false
                     ? h(
                         'button',
                         {
                           type: 'button',
                           className: 'mvp_button mvp_button--quiet mvp_editButton',
-                          'aria-pressed': editing === rowKey,
+                          'aria-pressed': isEditing,
                           'aria-label': t('row.edit') + ': ' + model.name,
-                          title: t('row.editTitle'),
-                          disabled: busy,
-                          onClick: () => setEditing(editing === rowKey ? null : rowKey),
+                          title: t(canOpenEditor || isEditing ? 'row.editTitle' : 'override.listNotReady'),
+                          disabled: busy || overrideState.pending || (!canOpenEditor && !isEditing),
+                          onClick: (event) => {
+                            if (isEditing) closeEditor()
+                            else if (canOpenEditor) {
+                              editTrigger.current = event?.currentTarget ?? null
+                              setEditing({ id: overrideId, revision: currentRevision,
+                                entry: overrideEntries.get(overrideId) ?? { provider: group.id, model: model.id } })
+                            }
+                          },
                         },
                         t('row.edit'),
                       )
@@ -352,23 +378,39 @@ function makeSection(form, catalog, overrides, usage, verify) {
                 ),
               )
               const editor =
-                canEdit && editing === rowKey
+                supportsOverrides && isEditing
                   ? h(ModelOverrideEditor, {
                       key: 'editor',
-                      entry:
-                        overrideEntries.get(rowKey) || { provider: group.id, model: model.id },
+                      entry: editing.entry,
+                      revision: editing.revision,
+                      hasOverride: editing.revision !== null,
+                      stale: overridesReady && currentRevision !== editing.revision,
+                      blocked: !overridesReady || overrideState.pending || state.status !== 'ready',
                       name: model.name,
                       t,
                       overrides,
-                      onClose: () => setEditing(null),
+                      canMap: hostFeatures.includes('reasoningMappings'),
+                      hasStandard: hostFeatures.includes('standardEffort'),
+                      canUseStandard: model.standardEffort === true,
+                      canReferencePrefill: hostFeatures.includes('referencePrefill'),
+                      referenceEfforts: kind === 'chat' ? model.referenceReasoning?.efforts ?? model.reasoning?.efforts : [],
+                      referenceSource: model.referenceReasoning
+                        ? model.referenceReasoningSource === 'snapshot' || !model.referenceReasoningSource
+                          ? sourceLabel('snapshot', t) : model.referenceReasoningSource
+                        : model.reasoningCatalog ?? sourceLabel(sourceOf(model, 'reasoning'), t),
+                      referenceAlias: Boolean(model.learned?.publicAlias),
+                      onClose: closeEditor,
                       onSaved: (result) => {
-                        setEditing(null)
-                        setProviderNote(providerWriteNote(result && result.provider, t))
-                        refreshCatalog()
+                        setEditing((active) => active?.id === overrideId ? null : active)
+                        const message = providerWriteNote(result?.provider, t)
+                        setProviderNote(message === null ? null : { rowKey, message })
+                        void catalog.afterChange()
                       },
                     })
                   : null
-              return h(React.Fragment, { key: model.id }, row, editor)
+              const note = providerNote?.rowKey === rowKey
+                ? h('div', { className: 'mvp_note', role: 'status' }, providerNote.message) : null
+              return h(React.Fragment, { key: model.id }, row, editor, note)
             }),
         ),
       )
@@ -498,7 +540,9 @@ function makeSection(form, catalog, overrides, usage, verify) {
             h('p', { className: 'mvp_aboutP' }, t('page.manualNote')),
           )
         : null,
-      h(UsageToolbar, { usage, t, features: state.source === 'host' ? hostFeatures : [] }),
+      hostFeaturesKnown && !hostFeatures.includes('usage')
+        ? h('div', { className: 'mvp_usage mvp_usage--off' }, t('usage.hostStale'))
+        : h(UsageToolbar, { usage, t, features: hostFeatures }),
       h(
         'div',
         { className: 'mvp_filters' },
@@ -650,7 +694,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
         : null,
       hostStale ? h('div', { className: 'mvp_banner' }, t('page.hostStale')) : null,
       state.detailsError !== null && state.source === 'catalog'
-        ? h('div', { className: 'mvp_banner' }, t('page.metaFallback'))
+        ? h('div', { className: 'mvp_banner', title: state.detailsError }, t('page.metaFallback'))
         : null,
       state.failures.length > 0
         ? h(
@@ -668,8 +712,13 @@ function makeSection(form, catalog, overrides, usage, verify) {
             }),
           )
         : null,
-      overrideState.available === false
+      supportsOverrides && overrideState.available === false
         ? h('div', { className: 'mvp_banner' }, t('override.unavailable'))
+        : null,
+      supportsOverrides && overrideState.status === 'error'
+        ? h('div', { className: 'mvp_banner mvp_banner--warn', role: 'alert' },
+            t('override.listFailed', { message: overrideState.error }), ' ',
+            h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', onClick: () => { void overrides.load() } }, t('override.retryList')))
         : null,
       error !== null ? h('div', { className: 'mvp_banner mvp_banner--error', role: 'alert' }, error) : null,
       state.error !== null
@@ -694,14 +743,16 @@ function makeSection(form, catalog, overrides, usage, verify) {
           : null,
         catalogNote !== null ? h('span', { className: 'mvp_footerItem' }, catalogNote) : null,
       ),
-      providerNote !== null ? h('div', { className: 'mvp_note' }, providerNote) : null,
-      h(VerifyPanel, {
+      observeVerify ? h(VerifyPanel, {
         verify,
         catalog: state,
         t,
         canUse: canVerify,
+        onFinished: catalog.afterChange,
         canFullScan: canVerify && hostFeatures.includes('verifyFullScan'),
-      }),
+        canSetMode: hostFeatures.includes('verifyModes'),
+        canSetSourceMode,
+      }) : h('div', { className: 'mvp_banner' }, t('checker.hostStale')),
     )
   }
 }

@@ -47,6 +47,24 @@ test('a large Content-Length is refused before the body is read', async () => {
   await assert.rejects(readResponseText(response, 4), /too large/)
 })
 
+test('chunked overflow reports the size error without waiting for upstream cancellation', { timeout: 300 }, async () => {
+  let cancelled = 0
+  const response = new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(64)) },
+    cancel() { cancelled += 1; return new Promise(() => {}) },
+  }))
+  await assert.rejects(readResponseText(response, 16), /too large/)
+  assert.equal(cancelled, 1)
+})
+
+test('split UTF-8 sequences preserve Chinese names exactly', async () => {
+  const bytes = new TextEncoder().encode('模型')
+  const response = new Response(new ReadableStream({ start(controller) {
+    controller.enqueue(bytes.slice(0, 2)); controller.enqueue(bytes.slice(2, 5)); controller.enqueue(bytes.slice(5)); controller.close()
+  } }))
+  assert.equal(await readResponseText(response, 6), '模型')
+})
+
 test('abort cancels a stalled body reader and rejects the read', async () => {
   let cancelled = false
   const controller = new AbortController()

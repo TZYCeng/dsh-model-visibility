@@ -46,7 +46,8 @@ test('readModelsDev understands all three published endpoints', () => {
   }
   // api.json: { <provider>: { models: { <id>: record } } }
   const apiShape = readModelsDev({ openai: { id: 'openai', models: { 'gpt-4o': record } } })
-  assert.equal(apiShape.get('gpt-4o').contextWindow, 128000)
+  assert.equal(apiShape.get('openai/gpt-4o').contextWindow, 128000)
+  assert.equal(apiShape.has('gpt-4o'), false)
 
   // models.json: { <id>: record }
   const modelsShape = readModelsDev({ 'gpt-4o': record })
@@ -65,7 +66,34 @@ test('the old parser silently returned zero facts for two of the three shapes', 
   // Regression guard: models.json has no `models` wrapper at all.
   const facts = readModelsDev({ 'deepseek/deepseek-r1': { id: 'deepseek/deepseek-r1', reasoning: true, limit: { context: 131072 } } })
   assert.equal(facts.size >= 1, true)
-  assert.equal(facts.get('deepseek-r1').contextWindow, 131072)
+  assert.equal(facts.get('deepseek/deepseek-r1').contextWindow, 131072)
+})
+
+test('models.dev preserves declared tasks independently of text output', () => {
+  const rows = readModelsDev({
+    'vendor/generator': { type: 'image', modalities: { output: ['text', 'image'] }, reasoning: true },
+    'vendor/vectorizer': { type: 'embedding', modalities: { output: ['text'] } },
+    'vendor/ranker': { type: 'reranking' },
+    'vendor/listener': { type: 'transcription' },
+    'vendor/speaker': { type: 'speech' },
+    'vendor/live': { type: 'realtime', modalities: { output: ['text', 'audio'] } },
+    'vendor/chat': { modalities: { output: ['text'] } },
+  })
+  assert.deepEqual([...rows].map(([id, row]) => [id, publicFactToCapability(row).type]), [
+    ['vendor/generator', 'image'], ['vendor/vectorizer', 'embedding'], ['vendor/ranker', 'rerank'],
+    ['vendor/listener', 'audio'], ['vendor/speaker', 'audio'], ['vendor/live', undefined], ['vendor/chat', undefined],
+  ])
+  assert.deepEqual(rows.get('vendor/generator').output, ['text', 'image'])
+})
+
+test('weak OpenRouter chat hints do not shadow declared task facts in public merges', () => {
+  const id = 'vendor/ranker'
+  const router = readOpenRouter({ data: [{ id, architecture: { output_modalities: ['text'] } }] })
+  const hf = readHuggingFace([{ id, pipeline_tag: 'text-ranking' }])
+  assert.deepEqual(publicFactToCapability(router.get(id)), { output: ['text'] })
+  for (const sources of [[router, hf], [hf, router]]) {
+    assert.deepEqual(publicFactToCapability(mergePublicSources(...sources).get(id)), { type: 'rerank', output: ['text'] })
+  }
 })
 
 test('a models.dev record with no capability fields is not a fact', () => {
@@ -79,22 +107,28 @@ test('readHuggingFace maps pipeline tags and only trusts explicit tags', () => {
     { id: 'acme/img-gen', pipeline_tag: 'text-to-image', tags: [] },
     { id: 'acme/mystery', pipeline_tag: 'some-new-task', tags: [] },
     { id: 'acme/empty' },
+    { id: 'acme/library-only', library_name: 'transformers' },
   ])
-  const chat = facts.get('qwen3.5-9b') ?? facts.get('Qwen/Qwen3.5-9B')
+  const chat = facts.get('Qwen/Qwen3.5-9B')
   assert.ok(chat !== undefined, 'the checkpoint must be indexed')
   assert.equal(chat.kind, 'chat')
   assert.equal(chat.reasoning, true)
   assert.equal(chat.toolCall, true)
-  assert.equal(facts.get('img-gen').kind, 'image')
+  assert.equal(facts.get('acme/img-gen').kind, 'image')
   // An unknown pipeline tag must not invent a kind.
-  assert.equal(facts.get('mystery')?.kind, undefined)
+  assert.equal(facts.get('acme/mystery')?.kind, undefined)
   // A row with no usable field is dropped entirely.
-  assert.equal(facts.get('empty'), undefined)
+  assert.equal(facts.get('acme/empty'), undefined)
+  assert.equal(facts.get('acme/library-only'), undefined)
 })
 
 test('kindOfPipelineTag covers the tasks a relay actually serves', () => {
   assert.equal(kindOfPipelineTag('text-generation'), 'chat')
-  assert.equal(kindOfPipelineTag('image-text-to-text'), 'image')
+  assert.equal(kindOfPipelineTag('image-text-to-text'), 'chat')
+  assert.equal(kindOfPipelineTag('image-to-image'), 'image')
+  assert.equal(kindOfPipelineTag('image-classification'), 'classifier')
+  assert.equal(kindOfPipelineTag('image-feature-extraction'), undefined)
+  assert.equal(kindOfPipelineTag('video-classification'), 'classifier')
   assert.equal(kindOfPipelineTag('text-to-video'), 'video')
   assert.equal(kindOfPipelineTag('feature-extraction'), 'embedding')
   assert.equal(kindOfPipelineTag('automatic-speech-recognition'), 'audio')
@@ -401,7 +435,7 @@ test('readOpenRouter still reads the relay dialect', () => {
   const facts = readOpenRouter({
     data: [{ id: 'anthropic/claude-5', context_length: 200000, architecture: { input_modalities: ['text', 'image'] } }],
   })
-  assert.equal(facts.get('claude-5').contextWindow, 200000)
+  assert.equal(facts.get('anthropic/claude-5').contextWindow, 200000)
 })
 
 /* ------------------------------------------------------------ extraction */
@@ -421,7 +455,7 @@ test('extractJsonBlock accepts an array reply', async () => {
   assert.equal(extractJsonBlock(''), undefined)
 })
 
-test('an empty array is not a format violation and still fills from catalogs', async () => {
+test('a missing checker row is diagnosed while public fallback can still verify it', async () => {
   const models = [{ id: 'model-a' }, { id: 'checker-x' }]
   let calls = 0
   const home = tempHome()
@@ -458,10 +492,11 @@ test('an empty array is not a format violation and still fills from catalogs', a
   })
   const snapshot = await verifier.start({ checker: { provider: 'relay', model: 'checker-x' }, writeBack: false })
   assert.equal(snapshot.phase, 'done')
-  assert.deepEqual(snapshot.errors, [])
-  assert.equal(calls, 1, 'an empty array must not trigger a retry')
+  assert.match(snapshot.errors.join(), /missing ids: model-a/)
+  assert.equal(calls, 2, 'an empty array may be repaired once')
   assert.equal(snapshot.publicOnly, 1)
-  assert.deepEqual(snapshot.batches[0].status, 'ok')
+  assert.equal(snapshot.failed, 0, 'the public catalog verified this target despite the checker failure')
+  assert.equal(snapshot.batches[0].errorCode, 'CHECKER_FORMAT')
   const row = learned.get('model-a')
   assert.deepEqual(row.input, ['text', 'image'])
   assert.deepEqual(row.origins, ['public'])

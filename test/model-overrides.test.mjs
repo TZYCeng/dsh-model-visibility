@@ -151,16 +151,16 @@ test('an upsert with no declared field removes the entry', () => {
   }
 })
 
-test('a corrupt override file degrades to an empty store', () => {
+test('a corrupt override file is not writable or reported as empty by strict reads', () => {
   const home = tempHome()
   try {
     fs.mkdirSync(path.dirname(overrideFile(home)), { recursive: true })
     fs.writeFileSync(overrideFile(home), '{not json')
     const store = createOverrideStore({ home, logger: silent })
     assert.deepEqual(store.list(), [])
-    // A later write replaces the corrupt file instead of staying broken.
-    store.upsert({ provider: 'relay', model: 'm', kind: 'audio' })
-    assert.equal(store.get('relay', 'm').kind, 'audio')
+    assert.throws(() => store.read(), { code: 'OVERRIDES_UNREADABLE' })
+    assert.throws(() => store.upsert({ provider: 'relay', model: 'm', kind: 'audio' }), { code: 'OVERRIDES_UNREADABLE' })
+    assert.equal(fs.readFileSync(overrideFile(home), 'utf8'), '{not json')
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
@@ -181,6 +181,60 @@ test('invalidate re-reads a file changed outside the store', () => {
       store.list().map((entry) => entry.model),
       ['b'],
     )
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('strict snapshots and compare-and-commit preserve newer edits and unrelated rows', () => {
+  const home = tempHome()
+  try {
+    const store = createOverrideStore({ home, logger: silent })
+    const twin = createOverrideStore({ home, logger: silent })
+    const a = { provider: 'a/b', model: 'c' }
+    const b = { provider: 'a', model: 'b/c' }
+    assert.equal(store.snapshot(a.provider, a.model).revision, null)
+    const saved = store.compareAndCommit({ ...a, input: ['text'] }, null)
+    assert.equal(saved.ok, true)
+    assert.deepEqual(store.read().revisions, [{ ...a, revision: saved.revision }])
+    twin.upsert({ ...b, kind: 'image' })
+    assert.equal(store.compareAndCommit({ ...a, input: ['image'] }, saved.revision).ok, true)
+    const previous = store.snapshot(a.provider, a.model)
+    twin.upsert({ ...a, input: ['text', 'image'] })
+    assert.equal(store.compareAndCommit(a, previous.revision).ok, false)
+    assert.equal(store.get(b.provider, b.model).kind, 'image')
+    assert.deepEqual(store.get(a.provider, a.model).input, ['text', 'image'])
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('read and rename failures preserve the last good override and the full file', (t) => {
+  const home = tempHome()
+  try {
+    const store = createOverrideStore({ home, logger: silent })
+    const identity = { provider: 'relay', model: 'm' }
+    const file = overrideFile(home)
+    store.upsert({ ...identity, kind: 'audio', input: ['text'] })
+    store.upsert({ provider: 'relay', model: 'sibling', kind: 'chat' })
+    const before = fs.readFileSync(file, 'utf8')
+    const snapshot = store.snapshot(identity.provider, identity.model)
+    const failRename = t.mock.method(fs, 'renameSync', () => { throw new Error('simulated rename failure') })
+    assert.throws(() => store.compareAndCommit({ ...identity, kind: 'image' }, snapshot.revision), /rename failure/)
+    assert.equal(store.get(identity.provider, identity.model).kind, 'audio')
+    assert.equal(fs.readFileSync(file, 'utf8'), before)
+    assert.deepEqual(fs.readdirSync(path.dirname(file)), ['overrides.json'])
+    failRename.mock.restore()
+    fs.writeFileSync(file, '{bad JSON')
+    assert.equal(store.get(identity.provider, identity.model).kind, 'audio')
+    const detached = store.get(identity.provider, identity.model)
+    detached.input.push('image')
+    assert.deepEqual(store.get(identity.provider, identity.model).input, ['text'])
+    assert.throws(() => store.compareAndCommit(identity, snapshot.revision), { code: 'OVERRIDES_UNREADABLE' })
+    assert.equal(fs.readFileSync(file, 'utf8'), '{bad JSON')
+    fs.writeFileSync(file, before)
+    assert.equal(store.compareAndCommit(identity, snapshot.revision).ok, true)
+    assert.equal(store.get('relay', 'sibling').kind, 'chat')
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

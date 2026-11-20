@@ -26,6 +26,7 @@ import {
   detachModalities,
   detachReasoning,
   imageInputDecision,
+  mergeCapabilities,
 } from '../lib/model-info.js'
 
 /** A resolved-model record with every optional field populated. */
@@ -298,6 +299,56 @@ test('an invalidated sweep does not clear the newer in-flight slot', async () =>
   await third
 })
 
+test('specialist IDs beat generic relay/snapshot chat while keeping vision chat intact', async () => {
+  const cases = [
+    ['gemini-3-pro-image-preview', 'Gemini 3 Pro', 'image'],
+    ['ideogram-4', 'Image Creator', 'image'],
+    ['text-embedding-3-small', 'OpenAI Small', 'embedding'],
+    ['text-embedding-3-large', 'OpenAI Large', 'embedding'],
+    ['gemini-3.1-pro-preview', 'Gemini 3.1 Pro', 'chat'],
+  ]
+  const llm = { resolveModelInfo: async () => FULL_INFO }
+  for (const [id, name, kind] of cases) {
+    const model = { id, name }
+    const discovered = new Map([[`vendor/${id}:free`, { id: `vendor/${id}:free`, kind: 'chat', inputModalities: ['text', 'image'], outputModalities: ['text'], reasoning: true }]])
+    const learned = { id, type: 'chat', reasoning: true, reasoningEfforts: FULL_INFO.reasoning.efforts, publicAlias: true }
+    const profile = { models: new Map([[id, model]]) }
+    const context = { profile, discovered, learned, standardEffort: true }
+    const row = await describeModel(llm, 'relay', model, context)
+    assert.equal(row.kind, kind, id)
+    assert.equal(imageInputDecision('relay', id, context).allowed, kind === 'chat', id)
+    if (kind === 'chat') {
+      assert.equal(row.reasoningSupported, true)
+      assert.equal(row.standardEffort, true)
+    } else {
+      assert.equal(row.sources.kind, 'inferred')
+      assert.equal(row.requestReasoning, null)
+      for (const field of ['reasoning', 'reasoningSupported', 'reasoningWireDisabled', 'referenceReasoning', 'standardEffort']) {
+        assert.equal(row[field], undefined, `${id}: ${field}`)
+      }
+    }
+  }
+})
+
+test('manual and explicit route kinds still win over identifier inference', () => {
+  const model = { id: 'text-embedding-3-small', name: 'OpenAI Small' }
+  const snapshot = { type: 'chat', id: model.id, origins: ['public'] }
+  const weakChat = { id: model.id, kind: 'chat', weakKind: true }
+  assert.equal(mergeCapabilities(model, { discovered: weakChat, learned: snapshot }).kind, 'embedding')
+  assert.equal(mergeCapabilities(model, { discovered: { kind: 'chat' } }).sources.kind, 'provider')
+  assert.equal(mergeCapabilities({ id: 'new-route' }, { discovered: weakChat, learned: { type: 'rerank' } }).kind, 'rerank')
+  const discovered = { kind: 'embedding' }
+  const efforts = [{ id: 'custom', name: 'Custom' }]
+  const override = { kind: 'chat', efforts }
+  const chat = mergeCapabilities(model, { discovered, override })
+  assert.equal(chat.kind, 'chat')
+  assert.equal(chat.sources.kind, 'manual')
+  assert.deepEqual(chat.reasoning.efforts, efforts)
+  const embedding = mergeCapabilities(model, { discovered, override: { ...override, kind: 'embedding' } })
+  assert.equal(embedding.sources.kind, 'manual')
+  assert.equal(embedding.reasoning, undefined)
+})
+
 test('a manual override outranks every automatic capability layer', async () => {
   const llm = fakeLlm({
     providers: [{ id: 'relay', name: 'Relay' }],
@@ -389,6 +440,7 @@ test('explicit provider reasoning off outranks the adapter, relay, and learned l
     const llm = { resolveModelInfo: async () => info }
     const record = await describeModel(llm, 'acme', model, { profile, discovered: relay, learned })
     assert.equal(record.reasoning, undefined)
+    assert.equal(record.requestReasoning, null)
     assert.equal(record.reasoningSupported, false)
     assert.equal(record.sources.reasoning, 'config')
   }
@@ -398,4 +450,73 @@ test('explicit provider reasoning off outranks the adapter, relay, and learned l
   })
   assert.equal(manual.reasoning.defaultEffort, 'custom')
   assert.equal(manual.sources.reasoning, 'manual')
+})
+
+
+test('request reasoning stays adapter-owned despite an unrelated manual ladder', () => {
+  const model = { id: 'scoped-levels', name: 'scoped-levels' }
+  const row = mergeCapabilities(model, {
+    adapter: { reasoning: FULL_INFO.reasoning },
+    learned: { reasoning: true, reasoningEfforts: [{ id: 'low', name: 'Low' }], reasoningCatalog: 'models.dev' },
+    override: { efforts: [{ id: 'custom', name: 'Custom' }], defaultEffort: 'custom' },
+    profile: { api: 'openai-completions', compat: { supportsReasoningEffort: false } },
+  })
+  assert.equal(row.reasoning.defaultEffort, 'custom')
+  assert.equal(row.requestReasoning.defaultEffort, FULL_INFO.reasoning.defaultEffort)
+  assert.equal(row.reasoningWireDisabled, true)
+  assert.deepEqual(row.referenceReasoning.efforts, [{ id: 'low', name: 'Low' }])
+  assert.equal(row.referenceReasoningSource, 'models.dev')
+  const reference = mergeCapabilities(model, { learned: { reasoning: true, reasoningEfforts: [{ id: 'low', name: 'Low' }] } })
+  assert.equal(reference.reasoningSupported, true)
+  assert.deepEqual(reference.reasoning.efforts.map(level => level.id), ['low'])
+  assert.equal(reference.requestReasoning, null)
+  const disabled = mergeCapabilities(model, { learned: { reasoning: false, reasoningEfforts: [{ id: 'high', name: 'High' }] } })
+  assert.equal(disabled.reasoningSupported, false)
+  assert.equal(disabled.reasoning, undefined)
+})
+
+test('standard opt-in in the catalog comes from the same live ownership as provider writes', async () => {
+  const llm = fakeLlm({ providers: [{ id: 'relay' }], models: { relay: [{ id: 'first' }, { id: 'second' }, { id: 'from-adapter' }] } })
+  const target = { provider: 'relay', settingsNs: 'include:llm-pi-ai', settingsPath: ['providers', 'relay'], declared: true }
+  llm.listConfigurableProviders = () => [target]
+  const profile = {
+    api: 'openai-completions', baseURL: 'https://relay.example/v1',
+    models: [{ id: 'first' }, { id: 'second', compat: { thinkingFormat: 'openai' }, reasoningEfforts: { high: 'high' } }],
+  }
+  const settings = { describe: () => [{ ns: target.settingsNs, revision: 1, value: { providers: { relay: profile } } }], mutate() {} }
+  const document = { providers: { relay: profile } }
+  const configEditor = { configuration: () => [{ entry: { options: { id: target.settingsNs, config: document } }, override: document }] }
+  const service = createModelInfoService(llm, { settings, configEditor })
+  const eligibleIds = async () => (await service.read({ fresh: true })).groups[0].models.filter(model => model.standardEffort).map(model => model.id)
+  assert.deepEqual(await eligibleIds(), ['first', 'second'])
+  profile.baseURL = 'https://relay.example/proxy/openrouter.ai/v1'
+  assert.deepEqual(await eligibleIds(), ['second'])
+  profile.baseURL = 'https://relay.example/v1'
+  target.declared = false
+  assert.deepEqual(await eligibleIds(), ['second'])
+  target.settingsPath = ['not-providers', 'relay']
+  assert.deepEqual(await eligibleIds(), [])
+})
+
+test('ambiguous public provenance remains visible but does not enable image attachment', async () => {
+  const profile = { defaultInput: ['text'], models: new Map([['mystery-model', { id: 'mystery-model' }]]) }
+  for (const provenance of [{ publicAlias: true }, { legacyPublic: true }]) {
+    const learned = { id: 'public/shared', type: 'chat', input: ['text', 'image'], contextWindow: 12000, ...provenance }
+    const model = { id: 'mystery-model' }
+    const row = await describeModel({ resolveModelInfo: async () => ({ inputModalities: ['text'] }) }, 'relay', model, { profile, learned })
+    assert.deepEqual(row.inputModalities, ['text', 'image'])
+    assert.equal(row.sources.modalities, 'snapshot')
+    assert.equal(row.sources.context, 'snapshot')
+    for (const [key, value] of Object.entries(provenance)) assert.equal(row.learned[key], value)
+    assert.equal(imageInputDecision('relay', model.id, { profile, learned }).allowed, false)
+  }
+  const discovered = { id: 'mystery-model', kind: 'chat', weakKind: true, inputModalities: ['text', 'image'] }
+  assert.equal(imageInputDecision('relay', 'mystery-model', { profile, discovered }).allowed, true)
+  assert.equal(imageInputDecision('relay', 'mystery-model', {
+    profile, discovered, learned: { id: 'mystery-model', type: 'image', publicAlias: true },
+  }).reason, 'non-chat')
+  const alias = { id: 'mystery-model', input: ['text', 'image'], publicAlias: true }
+  const localStore = { get: (id) => id === alias.id ? alias : undefined, meta: () => ({}) }
+  await describeCatalog(fakeLlm(), { learned: localStore })
+  assert.equal(imageInputDecision('relay', alias.id, { profile }).allowed, false)
 })

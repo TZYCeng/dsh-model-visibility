@@ -67,6 +67,7 @@ test('usage CSV expands each window into the four numeric columns', () => {
     ranges: { today: [1, 2, 3, 4], week: [5, 6, 0, 0], month: [7, 8, 0, 0], total: [9, 10, 0, 0] },
     days: { '2026-11-09': [9, 10, 0, 0], '2026-11-08': [1, 1, 0, 0] },
     byModel: { 'relay/grok-4.7': [9, 10, 0, 0] },
+    byModelRange: '2026-11-01 through 2026-11-09 (local dates, inclusive)',
   }
   const rows = rowsOf(toUsageCsv(summary))
   assert.equal(rows[0], 'section,range,input,output,cacheRead,cacheWrite')
@@ -74,8 +75,13 @@ test('usage CSV expands each window into the four numeric columns', () => {
   assert.equal(rows[4], 'sum,total,9,10,0,0')
   const dataRows = rows.filter((row) => row.startsWith('2026-'))
   assert.deepEqual(dataRows, ['2026-11-08,1,1,0,0', '2026-11-09,9,10,0,0'])
-  assert.ok(rows.includes('provider/model,input,output,cacheRead,cacheWrite'))
-  assert.ok(rows.includes('relay/grok-4.7,9,10,0,0'))
+  assert.ok(rows.includes('range,provider/model,input,output,cacheRead,cacheWrite'))
+  assert.ok(rows.includes('"2026-11-01 through 2026-11-09 (local dates, inclusive)",relay/grok-4.7,9,10,0,0'))
+})
+
+test('a partial usage export carries the storage warning in the CSV', () => {
+  assert.ok(rowsOf(toUsageCsv({ error: 'Incomplete usage, previous totals kept.' }))
+    .includes('warning,"Incomplete usage, previous totals kept."'))
 })
 
 test('the real ledger shape (a tuple per day) does not crash the exporter', () => {
@@ -91,7 +97,7 @@ test('the real ledger shape (a tuple per day) does not crash the exporter', () =
   const rows = rowsOf(toUsageCsv(snapshot))
   assert.ok(rows.includes('2026-11-09,5,1,0,0'))
   // The `*` convenience row must never be exported as a route.
-  assert.equal(rows.some((row) => row.startsWith('*,')), false)
+  assert.equal(rows.some((row) => row.includes(',*,')), false)
 })
 
 test('both exporters quote commas, quotes and newlines', () => {

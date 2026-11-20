@@ -26,6 +26,11 @@ window.__ModuleLoader__.load({
   define("catalog-store", function (require, module, exports) {
     const { API } = require("constants")
 
+    /** A separate key space from the composer visibility keys. */
+    function overrideIdentity(provider, model) {
+      return JSON.stringify([provider, model])
+    }
+
     function createCatalog(ctx) {
       const listeners = new Set()
       let state = {
@@ -33,15 +38,13 @@ window.__ModuleLoader__.load({
         groups: [],
         failures: [],
         providers: [],
-        catalog: null,
+        learned: null,
         error: null,
         detailsError: null,
         source: null,
         generatedAt: 0,
       }
       let inflight = null
-      // A hard reload starts a new run even while `inflight` is set; the token
-      // keeps the older run from publishing its now-stale result afterwards.
       let generation = 0
 
       const publish = (next) => {
@@ -70,10 +73,10 @@ window.__ModuleLoader__.load({
           cache: 'no-store',
           redirect: 'error',
         })
-        if (!response.ok) throw new Error('HTTP ' + response.status)
+        if (!response.ok) throw await httpFailure(response)
         const body = await response.json()
         const value = body && body.ok === true ? body.value : null
-        if (value === null || !Array.isArray(value.groups)) {
+        if (!Array.isArray(value?.groups)) {
           throw new Error('malformed capability catalog')
         }
         return value
@@ -85,24 +88,29 @@ window.__ModuleLoader__.load({
         if (!response || response.ok !== true) throw new Error(failureMessage(response))
         const value = response.value || {}
         return {
-          groups: Array.isArray(value.groups) ? value.groups : [],
+          // Only the official Session catalog's reasoning ladder comes from the
+          // adapter. Do not infer request settings from enriched reference data.
+          groups: Array.isArray(value.groups) ? value.groups.map((group) => ({
+            ...group,
+            models: Array.isArray(group.models) ? group.models.map((model) =>
+              Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0
+                ? { ...model, requestReasoning: model.reasoning }
+                : model) : [],
+          })) : [],
           failures: Array.isArray(value.failures) ? value.failures : [],
           generatedAt: 0,
         }
       }
 
       const load = (options) => {
-        const fresh = options !== null && typeof options === 'object' && options.fresh === true
-        const reload = options !== null && typeof options === 'object' && options.reload === true
-        // A soft load joins whatever is already running. A hard reload has to
-        // start its own run, otherwise it would receive the very stale result
-        // it is meant to replace.
-        if (inflight !== null && !reload) return inflight
-        if (state.status !== 'ready') {
-          publish({ ...state, status: 'loading', error: null })
-        }
+        const fresh = options?.fresh === true
+        const reload = options?.reload === true
+        const priority = reload ? 2 : fresh ? 1 : 0
+        // A fresh read must not join an older browser GET. A known Host change
+        // can also supersede a read of equal priority, without another hard purge.
+        if (inflight !== null && !reload && !options?.supersede && priority <= inflight.priority) return inflight.run
         const token = ++generation
-        const run = (async () => {
+        const run = Promise.resolve().then(async () => {
           try {
             const value = await fetchHostCatalog(fresh, reload)
             if (token !== generation) return
@@ -122,6 +130,7 @@ window.__ModuleLoader__.load({
             })
             return
           } catch (detailError) {
+            if (token !== generation) return
             const detail = String(detailError && detailError.message ? detailError.message : detailError)
             try {
               const value = await fetchOfficialCatalog()
@@ -146,10 +155,11 @@ window.__ModuleLoader__.load({
               })
             }
           } finally {
-            if (inflight === run) inflight = null
+            if (inflight?.run === run) inflight = null
           }
-        })()
-        inflight = run
+        })
+        inflight = { priority, run }
+        if (state.status !== 'ready') publish({ ...state, status: 'loading', error: null })
         return run
       }
 
@@ -168,7 +178,10 @@ window.__ModuleLoader__.load({
           return load({ fresh: true })
         },
         reload() {
-          return load({ fresh: true, reload: true })
+          return load({ reload: true })
+        },
+        afterChange({ fresh = true } = {}) {
+          return load({ supersede: true, fresh })
         },
       }
     }
@@ -183,46 +196,47 @@ window.__ModuleLoader__.load({
      */
     function createOverrides() {
       const listeners = new Set()
-      let state = { status: 'idle', entries: [], available: null, error: null }
+      const unavailable = { status: 'ready', entries: [], revisions: null, available: false, error: null, pending: false, refreshing: false }
+      let state = { ...unavailable, status: 'idle', available: null }
       let inflight = null
+      let generation = 0
 
       const publish = (next) => {
         state = next
         for (const listener of listeners) listener()
       }
 
-      /** Error text for a failed envelope or HTTP response. */
-      const failureOf = async (response) => {
-        let detail = ''
-        try {
-          const body = await response.json()
-          if (body && body.error) {
-            detail = ' (' + String(body.error.code) + ': ' + String(body.error.message) + ')'
-          }
-        } catch (_error) {
-          // A proxy error page is not JSON; the status code is still useful.
-        }
-        return new Error('HTTP ' + response.status + detail)
+      const readValue = async (response) => {
+        if (!response.ok) throw await httpFailure(response)
+        const body = await response.json()
+        const value = body?.ok === true ? body.value : null
+        if (!Array.isArray(value?.overrides)) throw new Error('malformed override list')
+        return value
       }
 
-      const readEntries = async (response) => {
-        if (response.status === 404) {
-          publish({ status: 'ready', entries: [], available: false, error: null })
-          return null
+      const readyState = (value) => {
+        // A legacy Host cannot guard a full-entry replacement against lost edits.
+        if (!Array.isArray(value.revisions)) return unavailable
+        const revisions = new Map()
+        for (const item of value.revisions) {
+          if (typeof item?.provider !== 'string' || typeof item.model !== 'string' ||
+              typeof item.revision !== 'string' || item.revision === '') throw new Error('malformed override revisions')
+          const key = overrideIdentity(item.provider, item.model)
+          if (revisions.has(key)) throw new Error('duplicate override revision')
+          revisions.set(key, item.revision)
         }
-        if (!response.ok) throw await failureOf(response)
-        const body = await response.json()
-        const value = body && body.ok === true ? body.value : null
-        if (value === null || !Array.isArray(value.overrides)) {
-          throw new Error('malformed override list')
+        if (value.overrides.length !== revisions.size || value.overrides.some((entry) =>
+          !revisions.has(overrideIdentity(entry?.provider, entry?.model)))) {
+          throw new Error('missing override revision')
         }
-        return value.overrides
+        return { ...unavailable, available: true, entries: value.overrides, revisions }
       }
 
       const load = () => {
+        if (state.pending) return Promise.resolve()
         if (inflight !== null) return inflight
-        if (state.status !== 'ready') publish({ ...state, status: 'loading', error: null })
-        const run = (async () => {
+        const token = ++generation
+        const run = Promise.resolve().then(async () => {
           try {
             const response = await fetch(API + '/overrides', {
               method: 'GET',
@@ -231,46 +245,48 @@ window.__ModuleLoader__.load({
               cache: 'no-store',
               redirect: 'error',
             })
-            const entries = await readEntries(response)
-            if (entries !== null) {
-              publish({ status: 'ready', entries, available: true, error: null })
-            }
+            const next = response.status === 404 ? unavailable : readyState(await readValue(response))
+            if (token === generation) publish(next)
           } catch (error) {
-            publish({
-              ...state,
-              status: 'error',
-              error: String(error && error.message ? error.message : error),
-            })
+            if (token === generation) publish({ ...state, status: 'error', error: failureText(error), refreshing: false })
           } finally {
             if (inflight === run) inflight = null
           }
-        })()
+        })
         inflight = run
+        publish({ ...state, status: state.status === 'ready' ? 'ready' : 'loading', error: null, refreshing: true })
         return run
       }
 
-      /** POST one entry (or `{remove:true}`) and adopt the returned list. */
-      const write = async (payload) => {
-        const response = await fetch(API + '/overrides', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
-          credentials: 'same-origin',
-          cache: 'no-store',
-          redirect: 'error',
-          body: JSON.stringify(payload),
-        })
-        if (response.status === 404) {
-          publish({ status: 'ready', entries: [], available: false, error: null })
-          throw new Error('HTTP 404')
+      /** Send the revision captured when the draft opened, not the latest one. */
+      const write = async (payload, expectedRevision) => {
+        if (state.status !== 'ready' || state.available !== true || state.pending) {
+          throw new Error('Override list is not ready.')
         }
-        if (!response.ok) throw await failureOf(response)
-        const body = await response.json()
-        const value = body && body.ok === true ? body.value : null
-        if (value === null || !Array.isArray(value.overrides)) {
-          throw new Error('malformed override list')
+        const key = overrideIdentity(payload.provider, payload.model)
+        if ((state.revisions.get(key) ?? null) !== expectedRevision) {
+          throw Object.assign(new Error('Override changed.'), { status: 409 })
         }
-        publish({ status: 'ready', entries: value.overrides, available: true, error: null })
-        return value
+        generation += 1
+        inflight = null
+        publish({ ...state, pending: true, refreshing: false })
+        try {
+          const response = await fetch(API + '/overrides', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store',
+            redirect: 'error',
+            body: JSON.stringify({ ...payload, expectedRevision }),
+          })
+          const value = await readValue(response)
+          publish(readyState(value))
+          return value
+        } catch (error) {
+          if (error.status === 404) publish(unavailable)
+          else publish({ ...state, status: 'error', error: failureText(error), pending: false })
+          throw error
+        }
       }
 
       return {
@@ -284,11 +300,11 @@ window.__ModuleLoader__.load({
           return state
         },
         load,
-        save(entry) {
-          return write(entry)
+        save(entry, expectedRevision) {
+          return write(entry, expectedRevision)
         },
-        remove(provider, model) {
-          return write({ remove: true, provider, model })
+        remove(provider, model, expectedRevision) {
+          return write({ remove: true, provider, model }, expectedRevision)
         },
       }
     }
@@ -298,6 +314,17 @@ window.__ModuleLoader__.load({
     /** Common failure text for envelopes and HTTP errors. */
     function failureText(error) {
       return String(error && error.message ? error.message : error)
+    }
+
+    async function httpFailure(response) {
+      let detail = ''
+      try {
+        const { error } = await response.json()
+        if (error) detail = ' (' + String(error.code) + ': ' + String(error.message) + ')'
+      } catch (_error) {
+        // The status is still useful when a proxy returns a non-JSON body.
+      }
+      return Object.assign(new Error('HTTP ' + response.status + detail), { status: response.status })
     }
 
     /**
@@ -321,7 +348,7 @@ window.__ModuleLoader__.load({
 
       const read = async () => {
         if (inflight !== null) return inflight
-        const run = (async () => {
+        const run = Promise.resolve().then(async () => {
           try {
             const response = await fetch(API + '/usage', {
               headers: { accept: 'application/json' },
@@ -329,17 +356,17 @@ window.__ModuleLoader__.load({
               cache: 'no-store',
               redirect: 'error',
             })
-            if (!response.ok) throw new Error('HTTP ' + response.status)
+            if (!response.ok) throw await httpFailure(response)
             const body = await response.json()
             const value = body && body.ok === true ? body.value : null
-            if (value === null || typeof value !== 'object') throw new Error('malformed usage snapshot')
+            if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('malformed usage snapshot')
             publish({ status: 'ready', snapshot: value, error: null })
           } catch (error) {
             publish({ ...state, status: 'error', error: failureText(error) })
           } finally {
             if (inflight === run) inflight = null
           }
-        })()
+        })
         inflight = run
         return run
       }
@@ -513,7 +540,7 @@ window.__ModuleLoader__.load({
           stopTimer()
           return
         }
-        const wantFast = state.snapshot?.state?.running === true
+        const wantFast = state.snapshot?.state?.running === true || state.snapshot?.state?.pendingWrite != null
         const wantMs = wantFast ? SWEEP_POLL_MS : IDLE_POLL_MS
         if (timer !== null && timerMs === wantMs) return
         if (timer !== null) clearInterval(timer)
@@ -568,6 +595,7 @@ window.__ModuleLoader__.load({
     }
 
 
+    exports.overrideIdentity = overrideIdentity
     exports.createCatalog = createCatalog
     exports.createOverrides = createOverrides
     exports.createUsageApi = createUsageApi
@@ -576,49 +604,40 @@ window.__ModuleLoader__.load({
 
   // -------------------------------------------------------- checker-view
   define("checker-view", function (require, module, exports) {
-    /**
-     * The online capability verification panel.
-     *
-     * Collapsed to a single summary line: this is a maintenance action, not the
-     * point of the page. Expanding it reveals the checker picker, the write-back
-     * switch and — the part that matters when a sweep fails — the per-batch errors
-     * with their real messages instead of a bare count.
-     *
-     * The last route choice is kept in browser storage only: the Host persists run
-     * facts, not UI selections.
-     */
+    const { formatTokens, checkerRoutesOf } = require("pure")
+    const { useSource } = require("hooks")
 
     const React = require('react')
     const h = React.createElement
 
-    const { formatTokens, checkerRoutesOf } = require("pure")
-    const { useSource } = require("hooks")
-
     const PICK_KEY = 'dsh-model-visibility:checker-pick:v1'
-    /** Bound live batch details so progress cannot overwhelm the panel. */
+    const SOURCE_MODES = ['public', 'supplement', 'checker']
     const MAX_ACTIVE_BATCH_LINES = 3
-    /** How many failure lines to show before summarising the rest. */
-    const MAX_ERROR_LINES = 6
-    /** Concurrency choices offered in the panel; mirrors lib/check-catalog MAX_CONCURRENCY. */
-    const CONCURRENCY_CHOICES = [1, 2, 3, 4, 6, 8]
+    const MAX_ERROR_LINES = 3
+    const MAX_ERROR_LENGTH = 140
+    /** Mirrors lib/check-catalog MAX_CONCURRENCY. */
+    const CONCURRENCY_CHOICES = [1, 2, 3, 4, 5, 6, 7, 8]
+    const RUN_PHASES = ['listing', 'public', 'checker', 'verifying', 'cancelled']
+    const BATCH_STAGES = ['checker', 'search', 'fetch', 'writeBack', 'flush']
 
     function readPick() {
+      let parsed
       try {
-        const parsed = JSON.parse(window.localStorage.getItem(PICK_KEY))
-        return parsed !== null && typeof parsed === 'object'
-          ? {
-              provider: typeof parsed.provider === 'string' ? parsed.provider : '',
-              model: typeof parsed.model === 'string' ? parsed.model : '',
-              writeBack: parsed.writeBack === true,
-              webSearch: parsed.webSearch !== false,
-              concurrency:
-                Number.isFinite(parsed.concurrency) && parsed.concurrency > 0
-                  ? Math.min(8, Math.max(1, Math.trunc(parsed.concurrency)))
-                  : 2,
-            }
-          : { provider: '', model: '', writeBack: false, webSearch: true, concurrency: 2 }
+        parsed = JSON.parse(window.localStorage.getItem(PICK_KEY))
       } catch (_error) {
-        return { provider: '', model: '', writeBack: false, webSearch: true, concurrency: 2 }
+        // Storage availability is optional for this preference.
+      }
+      const concurrency = parsed?.concurrency
+      return {
+        provider: typeof parsed?.provider === 'string' ? parsed.provider : '',
+        model: typeof parsed?.model === 'string' ? parsed.model : '',
+        // The legacy choices are also kept for older Hosts that still control web access separately.
+        mode: SOURCE_MODES.includes(parsed?.mode) ? parsed.mode : undefined,
+        webSearch: parsed?.webSearch !== false,
+        useChecker: parsed?.useChecker !== false,
+        writeBack: parsed?.writeBack === true,
+        fuzzyMatch: typeof parsed?.fuzzyMatch === 'boolean' ? parsed.fuzzyMatch : undefined,
+        concurrency: Number.isFinite(concurrency) && concurrency > 0 ? Math.min(8, Math.trunc(concurrency) || 1) : 2,
       }
     }
 
@@ -630,39 +649,89 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false }) {
+    function shortError(message) {
+      const line = String(message).replace(/\s+/g, ' ').trim()
+      return line.length > MAX_ERROR_LENGTH ? line.slice(0, MAX_ERROR_LENGTH - 1) + '…' : line
+    }
+
+    function errorsView(errors, t, alert) {
+      function errorList(entries, shorten) {
+        return h('ul', { className: 'mvp_errorList' }, entries.map((entry, index) =>
+          h('li', { key: index }, shorten ? shortError(entry) : String(entry))))
+      }
+      const visible = errors.slice(0, MAX_ERROR_LINES)
+      const hasDetails = errors.length > visible.length || visible.some((entry) => shortError(entry) !== String(entry))
+      return h('div', { className: 'mvp_checkerErrors' },
+        h('div', { role: alert ? 'alert' : undefined },
+          h('div', { className: 'mvp_checkerErrorsTitle' }, t('checker.errorTitle')),
+          errorList(visible, true),
+        ),
+        hasDetails ? h('details', { className: 'mvp_checkerDetails' },
+          h('summary', null, t('checker.errorDetails', { count: errors.length })),
+          errorList(errors, false),
+        ) : null,
+      )
+    }
+
+    function routeLabel(checker) {
+      return checker?.provider && checker?.model ? `${checker.provider}/${checker.model}` : null
+    }
+
+    function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, canSetMode = false, canSetSourceMode = false, onFinished }) {
       const state = useSource(verify)
       const [pick, setPick] = React.useState(readPick)
-      const [message, setMessage] = React.useState(null)
       const [open, setOpen] = React.useState(false)
-      // A potentially expensive full search is an opt-in for one start, not a preference.
+      const [message, setMessage] = React.useState(null)
+      // A full scan is an opt-in for one start, not a saved preference.
       const [fullScan, setFullScan] = React.useState(false)
+      const modeGroup = React.useId()
+      const modeHint = React.useId()
 
-      React.useEffect(() => {
-        verify.load()
-      }, [verify])
+      React.useEffect(() => { verify.load() }, [verify])
 
-      const routeOptions = checkerRoutesOf(catalog?.groups)
-      const route = routeOptions.find((entry) => entry.id === pick.provider) ?? null
       const progress = state.snapshot?.state
       const running = progress?.running === true
       const pending = state.pending === true
       const locked = running || pending
-      const finished = progress?.phase === 'done' || progress?.phase === 'cancelled'
-      const models = (catalog?.groups ?? [])
-        .find((group) => group.id === pick.provider)?.models ?? []
+      const stopping = running && progress.phase === 'cancelled'
+      const pendingWrite = progress?.pendingWrite
+      const latestWrite = progress?.latestWriteSettlement
+      // Respect a previous opt-out: switching an offline legacy run to the new online default would change its cost.
+      const storedMode = pick.mode ?? (pick.useChecker && pick.webSearch ? 'supplement' : 'public')
+      const runMode = SOURCE_MODES.includes(progress?.mode) ? progress.mode : null
+      const shownMode = running && runMode !== null ? runMode : storedMode
+      const usesChecker = canSetSourceMode ? shownMode !== 'public' : !canSetMode || pick.useChecker
+      const usesCatalog = !canSetSourceMode || shownMode !== 'checker'
+      const autoFullScan = canSetSourceMode && shownMode === 'checker'
+      const fuzzyMatch = pick.fuzzyMatch ?? canSetSourceMode
+      const writeBack = usesChecker && pick.writeBack
+      const routeOptions = checkerRoutesOf(catalog?.groups)
+      const selectedRoute = running && progress?.checker ? progress.checker : pick
+      const route = routeOptions.find((entry) => entry.id === selectedRoute.provider) ?? null
+      const models = (catalog?.groups ?? []).find((group) => group.id === selectedRoute.provider)?.models ?? []
+      const missingChecker = usesChecker && (route === null || !models.some((model) => model.id === selectedRoute.model))
 
       React.useEffect(() => {
-        if (running || !canFullScan) setFullScan(false)
-      }, [running, canFullScan])
+        if (running || !canFullScan || autoFullScan) setFullScan(false)
+      }, [running, canFullScan, autoFullScan])
 
-      if (!canUse) {
-        return h('div', { className: 'mvp_banner' }, t('checker.hostStale'))
+      const lastFinished = React.useRef(progress?.finishedAt)
+      React.useEffect(() => {
+        if (running || progress?.finishedAt === undefined || lastFinished.current === progress.finishedAt) return
+        lastFinished.current = progress.finishedAt
+        onFinished?.()
+      }, [running, progress?.finishedAt, onFinished])
+
+      const lastWrite = React.useRef(latestWrite?.finishedAt)
+      React.useEffect(() => {
+        if (latestWrite?.finishedAt === undefined || lastWrite.current === latestWrite.finishedAt) return
+        lastWrite.current = latestWrite.finishedAt
+        if (latestWrite.written === true && !running) onFinished?.()
+      }, [latestWrite?.finishedAt, running, onFinished])
+
+      if (!canUse && !running && !pending && !progress && !state.error) {
+        return h('div', { className: 'mvp_banner' }, t('checker.catalogNeeded'))
       }
-
-      const tokensSpent = progress
-        ? formatTokens((progress.tokenUsage?.[0] ?? 0) + (progress.tokenUsage?.[1] ?? 0))
-        : null
 
       const commit = (next) => {
         setPick(next)
@@ -670,23 +739,30 @@ window.__ModuleLoader__.load({
       }
 
       const run = () => {
-        if (locked || pick.provider === '' || pick.model === '') return
+        if (!canUse || locked || missingChecker) return
         setMessage(null)
         setFullScan(false)
-        verify
-          .start({
-            provider: pick.provider,
-            model: pick.model,
-            writeBack: pick.writeBack,
-            webSearch: pick.webSearch,
-            concurrency: pick.concurrency,
-            fullScan: canFullScan && fullScan,
-          })
-          .catch((error) => setMessage(String(error?.message ?? error)))
+        verify.start({
+          ...(usesChecker ? { provider: pick.provider, model: pick.model } : {}),
+          writeBack,
+          ...(canSetSourceMode
+            ? { mode: shownMode, fuzzyMatch: usesCatalog && fuzzyMatch }
+            : {
+                webSearch: usesChecker && pick.webSearch,
+                ...(canSetMode ? { useChecker: usesChecker, fuzzyMatch } : {}),
+              }),
+          concurrency: pick.concurrency,
+          fullScan: autoFullScan || (canFullScan && fullScan),
+        }).catch((error) => setMessage(String(error?.message ?? error)))
       }
 
       const cancel = () => {
-        if (!pending) verify.cancel().catch((error) => setMessage(String(error?.message ?? error)))
+        if (!running || pending || stopping) return
+        setMessage(null)
+        verify.cancel().catch((error) => {
+          setOpen(true)
+          setMessage(String(error?.message ?? error))
+        })
       }
 
       const counts = {
@@ -698,295 +774,167 @@ window.__ModuleLoader__.load({
         skippedKnown: progress?.skippedKnown ?? 0,
         searchCalls: progress?.searchCalls ?? 0,
         fetchCalls: progress?.fetchCalls ?? 0,
-        tokens: tokensSpent,
+        tokens: formatTokens((progress?.tokenUsage?.[0] ?? 0) + (progress?.tokenUsage?.[1] ?? 0)),
       }
+      const finished = ['done', 'cancelled', 'error'].includes(progress?.phase)
       const allSkipped = progress?.phase === 'done' && counts.total === 0 && counts.skippedKnown > 0
+      const writeBackSkipped = progress?.writeBack === true && progress?.fullScan !== true && counts.skippedKnown > 0
+      const runningPhase = RUN_PHASES.includes(progress?.phase) ? progress.phase : 'verifying'
       let summary = t('checker.idle')
-      if (running) {
-        summary = t('checker.running', { phase: t('checker.phase.' + (progress?.phase ?? 'verifying')), ...counts })
-      } else if (allSkipped) {
-        summary = t('checker.allSkipped', counts)
-      } else if (finished) {
-        summary = t('checker.finished', counts)
+      if (running) summary = t('checker.running', { phase: t('checker.phase.' + runningPhase) })
+      else if (pending) summary = t('checker.starting')
+      else if (progress?.phase === 'error') summary = t('checker.runFailed')
+      else if (progress?.phase === 'cancelled') summary = t('checker.cancelled')
+      else if (allSkipped) summary = t('checker.allSkipped', counts)
+      else if (finished) summary = t('checker.finished')
+      if (runMode !== null && progress?.phase !== 'idle' && !pending) summary += ' · ' + t('checker.mode.' + runMode)
+      if ((running || finished) && !allSkipped && counts.total > 0) {
+        summary += ' · ' + t('checker.progress', counts)
       }
 
+      const routing = []
+      if (Number.isFinite(progress?.catalogTargets)) routing.push(t('checker.catalogTargets', { count: progress.catalogTargets }))
+      if (progress?.catalogMatches > 0 && progress.catalogMatches !== progress.publicOnly) {
+        routing.push(t('checker.catalogMatches', { count: progress.catalogMatches }))
+      }
+      if (Number.isFinite(progress?.checkerTargets)) routing.push(t('checker.checkerTargets', { count: progress.checkerTargets }))
+      if (routeLabel(progress?.checker) !== null && runMode !== 'public') {
+        routing.push(t('checker.usedRoute', { target: routeLabel(progress.checker) }))
+      }
       const searchBackends = ['dsh-free-search', 'host-web'].flatMap((backend) => {
         const count = progress?.searchBackends?.[backend]
         return Number.isFinite(count) && count > 0 ? [t('checker.searchBackend.' + backend, { count })] : []
       })
       const activeBatches = running && Array.isArray(progress?.batches)
-        ? progress.batches.filter((batch) => batch.status === 'running')
-        : []
-      const visibleBatches = activeBatches.slice(0, MAX_ACTIVE_BATCH_LINES)
-      const errors = Array.isArray(progress?.errors) ? progress.errors : []
-      const visibleErrors = errors.slice(0, MAX_ERROR_LINES)
+        ? progress.batches.filter((batch) => batch.status === 'running') : []
+      const notices = [...new Set([message, state.error].filter((error) => error != null))]
+      const errors = [...new Set([...notices, ...(Array.isArray(progress?.errors) ? progress.errors : [])])]
+      const sources = Array.isArray(progress?.sources) ? progress.sources : []
+      const showWebUsage = runMode !== 'public' && progress?.useChecker !== false && (counts.searchCalls > 0 || counts.fetchCalls > 0 || counts.tokens !== '0' || (counts.total > 0 && progress?.checkerTargets !== 0))
 
-      return h(
-        'div',
-        { className: 'mvp_checker' + (open ? '' : ' mvp_checker--closed') },
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'mvp_checkerHead',
-            'aria-expanded': open,
-            onClick: () => setOpen(!open),
-          },
-          h('span', { className: 'mvp_chevron' }, open ? '▾' : '▸'),
-          h('span', { className: 'mvp_checkerTitle' }, t('checker.title')),
-          h('span', { className: 'mvp_checkerSummary' }, summary),
-          errors.length > 0 ? h('span', { className: 'mvp_badge' }, t('checker.errorBadge', { count: errors.length })) : null,
+      const checkbox = (key, checked, change) => h('label', { className: 'mvp_check', title: t(key + 'Title') },
+        h('input', { type: 'checkbox', checked, disabled: locked, 'aria-label': t(key),
+          onChange: (event) => change(event.target.checked) }),
+        h('span', null, t(key)),
+      )
+      const select = (key, value, options, change, { placeholder, disabled, title } = {}) => h('label', { className: 'mvp_field', title },
+        h('span', { className: 'mvp_fieldLabel' }, t(key)),
+        h('select', { className: 'mvp_select', value, disabled: locked || disabled, 'aria-label': t(key),
+          onChange: (event) => change(event.target.value) },
+        placeholder ? h('option', { value: '' }, t(placeholder)) : null,
+        options.map(([id, name]) => h('option', { key: id, value: id }, name)),
         ),
-        open
-          ? h(
-              'div',
-              { className: 'mvp_checkerBody' },
-              h('p', { className: 'mvp_checkerHint' }, t('checker.description')),
-              canFullScan ? h('p', { className: 'mvp_checkerHint' }, t('checker.fullScanTitle')) : null,
-              h(
-                'div',
-                { className: 'mvp_checkerForm' },
-                h(
-                  'label',
-                  { className: 'mvp_field' },
-                  h('span', { className: 'mvp_fieldLabel' }, t('checker.provider')),
-                  h(
-                    'select',
-                    {
-                      className: 'mvp_select',
-                      value: pick.provider,
-                      'aria-label': t('checker.provider'),
-                      disabled: locked,
-                      onChange: (event) => commit({ ...pick, provider: event.target.value, model: '' }),
-                    },
-                    h('option', { key: '', value: '' }, t('override.kindAuto')),
-                    routeOptions.map((entry) => h('option', { key: entry.id, value: entry.id }, entry.name)),
-                  ),
-                ),
-                h(
-                  'label',
-                  { className: 'mvp_field' },
-                  h('span', { className: 'mvp_fieldLabel' }, t('checker.model')),
-                  h(
-                    'select',
-                    {
-                      className: 'mvp_select',
-                      value: pick.model,
-                      'aria-label': t('checker.model'),
-                      disabled: locked || route === null,
-                      onChange: (event) => commit({ ...pick, model: event.target.value }),
-                    },
-                    h('option', { key: '', value: '' }, t('override.kindAuto')),
-                    models.map((model) =>
-                      h('option', { key: model.id, value: model.id }, model.name ?? model.id),
-                    ),
-                  ),
-                ),
-                h(
-                  'label',
-                  { className: 'mvp_field', title: t('checker.concurrencyTitle') },
-                  h('span', { className: 'mvp_fieldLabel' }, t('checker.concurrency')),
-                  h(
-                    'select',
-                    {
-                      className: 'mvp_select',
-                      value: String(pick.concurrency),
-                      'aria-label': t('checker.concurrency'),
-                      disabled: locked,
-                      onChange: (event) =>
-                        commit({ ...pick, concurrency: Number(event.target.value) }),
-                    },
-                    CONCURRENCY_CHOICES.map((value) =>
-                      h('option', { key: value, value: String(value) }, t('checker.concurrencyValue', { count: value })),
-                    ),
-                  ),
-                ),
-                h(
-                  'label',
-                  { className: 'mvp_check', title: t('checker.webSearchTitle') },
-                  h('input', {
-                    type: 'checkbox',
-                    checked: pick.webSearch,
-                    disabled: locked,
-                    'aria-label': t('checker.webSearch'),
-                    onChange: (event) => commit({ ...pick, webSearch: event.target.checked }),
-                  }),
-                  h('span', null, t('checker.webSearch')),
-                ),
-                canFullScan
-                  ? h(
-                      'label',
-                      { className: 'mvp_check', title: t('checker.fullScanTitle') },
-                      h('input', {
-                        type: 'checkbox',
-                        checked: running ? progress?.fullScan === true : fullScan,
-                        disabled: locked,
-                        'aria-label': t('checker.fullScan'),
-                        onChange: (event) => { if (!locked) setFullScan(event.target.checked) },
-                      }),
-                      h('span', null, t('checker.fullScan')),
-                    )
-                  : null,
-                h(
-                  'label',
-                  { className: 'mvp_check', title: t('checker.writeBackTitle') },
-                  h('input', {
-                    type: 'checkbox',
-                    checked: pick.writeBack,
-                    disabled: locked,
-                    'aria-label': t('checker.writeBack'),
-                    onChange: (event) => commit({ ...pick, writeBack: event.target.checked }),
-                  }),
-                  h('span', null, t('checker.writeBack')),
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: running ? 'mvp_button' : 'mvp_button mvp_button--accent',
-                    disabled: pending || (!running && (pick.provider === '' || pick.model === '')),
-                    title: running ? t('checker.cancelTitle') : t('checker.startTitle'),
-                    onClick: running ? cancel : run,
-                  },
-                  running ? t('checker.cancel') : t('checker.start'),
-                ),
-              ),
-              (running || finished) && !allSkipped
-                ? h(
-                    'div',
-                    { className: 'mvp_checkerProgress' },
-                    h('div', {
-                      className: 'mvp_progressBar',
-                      role: 'progressbar',
-                      'aria-valuemin': 0,
-                      'aria-valuemax': progress?.total ?? 0,
-                      'aria-valuenow': counts.processed,
-                    }, h('span', {
-                      className: 'mvp_progressFill',
-                      style: {
-                        width:
-                          (progress?.total ?? 0) > 0
-                            ? Math.min(100, Math.round((counts.processed / progress.total) * 100)) + '%'
-                            : '0%',
-                      },
-                    })),
-                    h(
-                      'span',
-                      { className: 'mvp_checkerProgressText' },
-                      t('checker.progress', counts),
-                    ),
-                    h(
-                      'span',
-                      { className: 'mvp_checkerProgressText' },
-                      t('checker.outcomes', counts),
-                    ),
-                    h(
-                      'span',
-                      { className: 'mvp_checkerProgressText' },
-                      t('checker.webCalls', counts),
-                    ),
-                    searchBackends.length > 0 ? h(
-                      'span',
-                      { className: 'mvp_checkerProgressText' },
-                      t('checker.searchBreakdown', { breakdown: searchBackends.join(' · ') }),
-                    ) : null,
-                    h(
-                      'span',
-                      { className: 'mvp_checkerProgressText' },
-                      t('checker.threads', { count: progress?.concurrency ?? pick.concurrency }),
-                    ),
-                  )
-                : null,
-              visibleBatches.length > 0
-                ? h(
-                    'div',
-                    { className: 'mvp_sources', 'aria-label': t('checker.activeBatches') },
-                    h('div', { className: 'mvp_sourcesTitle' }, t('checker.activeBatches')),
-                    h(
-                      'ul',
-                      { className: 'mvp_sourceList' },
-                      visibleBatches.map((batch, index) =>
-                        h(
-                          'li',
-                          { key: index },
-                          h('span', { className: 'mvp_sourceState' },
-                            ['checker', 'search', 'fetch', 'writeBack', 'flush'].includes(batch.stage)
-                              ? t('checker.stage.' + batch.stage)
-                              : String(batch.stage ?? t('checker.stage.checker')),
-                          ),
-                          h('span', { className: 'mvp_sourceName' },
-                            Array.isArray(batch.ids) ? batch.ids.map(String).join(', ') : '',
-                          ),
-                        ),
-                      ),
-                    ),
-                    activeBatches.length > visibleBatches.length
-                      ? h('div', { className: 'mvp_usageHint' },
-                          t('checker.activeMore', { count: activeBatches.length - visibleBatches.length }),
-                        )
-                      : null,
-                  )
-                : null,
-              // Which public catalogs were read, and which were not. Without this
-              // "the catalogs returned nothing" and "the catalogs errored" look
-              // identical, which is exactly how a broken fetch stayed invisible.
-              (progress?.sources?.length ?? 0) > 0
-                ? h(
-                    'div',
-                    { className: 'mvp_sources' },
-                    h('div', { className: 'mvp_sourcesTitle' }, t('checker.sourcesTitle')),
-                    h(
-                      'ul',
-                      { className: 'mvp_sourceList' },
-                      progress.sources.map((source, index) =>
-                        h(
-                          'li',
-                          { key: index, className: source.status === 'ok' ? 'mvp_source--ok' : 'mvp_source--bad' },
-                          h('span', { className: 'mvp_sourceName' }, String(source.name)),
-                          h('span', { className: 'mvp_sourceState' }, t('checker.source.' + String(source.status))),
-                          source.models > 0
-                            ? h('span', { className: 'mvp_sourceCount' }, t('checker.sourceModels', { count: source.models }))
-                            : null,
-                          source.message
-                            ? h('span', { className: 'mvp_sourceMsg' }, String(source.message))
-                            : null,
-                        ),
-                      ),
-                    ),
-                  )
-                : null,
-              (progress?.publicOnly ?? 0) > 0
-                ? h(
-                    'div',
-                    { className: 'mvp_usageHint' },
-                    t('checker.publicOnly', { count: progress.publicOnly }),
-                  )
-                : null,
-              errors.length > 0
-                ? h(
-                    'div',
-                    { className: 'mvp_checkerErrors' },
-                    h('div', { className: 'mvp_checkerErrorsTitle' }, t('checker.errorTitle')),
-                    h(
-                      'ul',
-                      { className: 'mvp_errorList' },
-                      visibleErrors.map((entry, index) =>
-                        h('li', { key: index }, typeof entry === 'string' ? entry : String(entry)),
-                      ),
-                    ),
-                    errors.length > visibleErrors.length
-                      ? h(
-                          'div',
-                          { className: 'mvp_usageHint' },
-                          t('checker.errorMore', { count: errors.length - visibleErrors.length }),
-                        )
-                      : null,
-                  )
-                : null,
-              message !== null ? h('div', { className: 'mvp_banner mvp_banner--error' }, message) : null,
-              state.error !== null ? h('div', { className: 'mvp_banner mvp_banner--error' }, state.error) : null,
-            )
-          : null,
+      )
+
+      return h('div', { className: 'mvp_checker' },
+        h('div', { className: 'mvp_checkerBar' },
+          h('button', { type: 'button', className: 'mvp_checkerHead', 'aria-expanded': open, onClick: () => setOpen(!open) },
+            h('span', { className: 'mvp_chevron', 'aria-hidden': true }, open ? '▾' : '▸'),
+            h('span', { className: 'mvp_checkerTitle' }, t('checker.title')),
+            h('span', { className: 'mvp_checkerSummary', 'aria-live': 'polite', 'aria-atomic': true }, summary),
+            errors.length > 0 ? h('span', { className: 'mvp_badge' }, t('checker.errorBadge', { count: errors.length })) : null,
+          ),
+          running ? h('button', { type: 'button', className: 'mvp_button', disabled: pending || stopping,
+            title: t('checker.cancelTitle'), onClick: cancel }, t(stopping ? 'checker.stopping' : 'checker.cancel')) : null,
+        ),
+        pendingWrite?.waitEnded != null ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn mvp_checkerNotice', role: 'status' },
+          t('checker.pendingWrite', { target: routeLabel(pendingWrite) })) : null,
+        open ? h('div', { className: 'mvp_checkerBody' },
+          !canUse ? h('p', { className: 'mvp_checkerHint' }, t('checker.catalogNeeded')) : null,
+          canSetSourceMode ? h('fieldset', { className: 'mvp_checkerModes', disabled: locked, 'aria-describedby': modeHint },
+            h('legend', { className: 'mvp_fieldLabel' }, t('checker.sourceMode')),
+            SOURCE_MODES.map((mode) => h('label', { key: mode, className: 'mvp_checkerMode' },
+              h('input', { type: 'radio', name: modeGroup, value: mode, checked: shownMode === mode, disabled: locked,
+                onChange: () => { setFullScan(false); commit({ ...pick, mode }) } }),
+              h('span', null, t('checker.mode.' + mode)),
+            )),
+          ) : null,
+          h('p', { id: modeHint, className: 'mvp_checkerHint' }, t(canSetSourceMode
+            ? 'checker.hint.' + shownMode : usesChecker ? 'checker.description' : 'checker.publicDescription')),
+          h('div', { className: 'mvp_checkerForm' },
+            !canSetSourceMode && canSetMode ? checkbox('checker.useChecker', usesChecker, (useChecker) => commit({ ...pick, useChecker })) : null,
+            usesChecker ? select('checker.provider', selectedRoute.provider,
+              routeOptions.map((entry) => [entry.id, entry.name]), (provider) => commit({ ...pick, provider, model: '' }),
+              { placeholder: 'checker.chooseProvider' }) : null,
+            usesChecker ? select('checker.model', selectedRoute.model,
+              models.map((model) => [model.id, model.name ?? model.id]), (model) => commit({ ...pick, model }),
+              { placeholder: 'checker.chooseModel', disabled: route === null }) : null,
+            !running ? h('button', { type: 'button', className: 'mvp_button mvp_button--accent',
+              disabled: !canUse || pending || missingChecker, title: t('checker.startTitle'), onClick: run },
+            t(usesChecker ? 'checker.start' : 'checker.startPublic')) : null,
+          ),
+          !locked && canUse && missingChecker ? h('p', { className: 'mvp_checkerHint mvp_checkerNotice' },
+            routeOptions.length === 0 ? t(canSetMode || canSetSourceMode ? 'checker.noRoute' : 'checker.noLegacyRoute') : t('checker.chooseRoute')) : null,
+          usesChecker || canSetMode || canSetSourceMode || canFullScan ? h('details', { className: 'mvp_checkerDetails' },
+            h('summary', null, t('checker.advanced'), (running ? progress?.writeBack === true : writeBack)
+              ? h('span', { className: 'mvp_checkerOptionNote' }, ' · ' + t('checker.writeBackEnabled')) : null),
+            h('div', { className: 'mvp_checkerAdvanced' },
+              usesCatalog && (canSetSourceMode || canSetMode)
+                ? checkbox('checker.fuzzyMatch', running ? progress?.fuzzyMatch ?? fuzzyMatch : fuzzyMatch,
+                    (fuzzyMatch) => commit({ ...pick, fuzzyMatch })) : null,
+              canFullScan && !autoFullScan
+                ? checkbox('checker.fullScan', running ? progress?.fullScan === true : fullScan, setFullScan) : null,
+              usesChecker ? checkbox('checker.writeBack', running ? progress?.writeBack === true : writeBack,
+                (writeBack) => commit({ ...pick, writeBack })) : null,
+              usesChecker && !canSetSourceMode ? checkbox('checker.webSearch', running ? progress?.webSearch ?? pick.webSearch : pick.webSearch,
+                (webSearch) => commit({ ...pick, webSearch })) : null,
+              usesChecker ? select('checker.concurrency', String(running ? progress?.concurrency ?? pick.concurrency : pick.concurrency),
+                CONCURRENCY_CHOICES.map((count) => [String(count), t('checker.concurrencyValue', { count })]),
+                (concurrency) => commit({ ...pick, concurrency: Number(concurrency) }), { title: t('checker.concurrencyTitle') }) : null,
+            ),
+            h('div', { className: 'mvp_usageHint' }, t('checker.targetScope'), usesChecker ? ' ' + t('checker.resultsScope') : null),
+            usesChecker && (running ? progress?.writeBack === true : writeBack) && !autoFullScan && !(running ? progress?.fullScan : fullScan)
+              ? h('div', { className: 'mvp_usageHint' }, t('checker.writeBackScope')) : null,
+          ) : null,
+          (running || finished) && counts.total > 0 ? h('div', { className: 'mvp_checkerProgress' },
+            running ? h('div', { className: 'mvp_progressBar', role: 'progressbar', 'aria-label': t('checker.progressLabel'),
+              'aria-valuemin': 0, 'aria-valuemax': counts.total, 'aria-valuenow': counts.processed }, h('span', {
+              className: 'mvp_progressFill', style: { width: Math.min(100, Math.round((counts.processed / counts.total) * 100)) + '%' },
+            })) : null,
+            h('span', { className: 'mvp_checkerProgressText' }, t('checker.outcomes', counts)),
+          ) : null,
+          routing.length > 0 ? h('div', { className: 'mvp_checkerProgressText mvp_checkerNotice' }, routing.join(' · ')) : null,
+          (running || finished) && showWebUsage
+            ? h('div', { className: 'mvp_checkerProgressText mvp_checkerNotice' },
+              t('checker.webCalls', counts), ' · ', t('checker.tokens', counts),
+              searchBackends.length > 0 ? ' · ' + t('checker.searchBreakdown', { breakdown: searchBackends.join(' · ') }) : null,
+            ) : null,
+          (progress?.publicOnly ?? 0) > 0 || (progress?.aliasMatches ?? 0) > 0
+            ? h('div', { className: 'mvp_checkerProgressText mvp_checkerNotice' }, [
+              progress?.publicOnly > 0 ? t('checker.catalogResults', { count: progress.publicOnly }) : null,
+              progress?.aliasMatches > 0 ? t('checker.aliasMatches', { count: progress.aliasMatches }) : null,
+            ].filter(Boolean).join(' · ')) : null,
+          latestWrite?.finishedAt != null ? h('div', { className: 'mvp_usageHint mvp_checkerNotice',
+            title: latestWrite.message || latestWrite.reason }, t(latestWrite.written === true
+            ? 'checker.lateWriteApplied' : 'checker.lateWriteNotApplied', { target: routeLabel(latestWrite) })) : null,
+          writeBackSkipped ? h('div', { className: 'mvp_usageHint mvp_checkerNotice' },
+            t('checker.writeBackSkipped', { count: counts.skippedKnown })) : null,
+          errors.length > 0 ? errorsView(errors, t, notices.length > 0) : null,
+          activeBatches.length > 0 ? h('div', { className: 'mvp_sources', 'aria-label': t('checker.activeBatches') },
+            h('div', { className: 'mvp_sourcesTitle' }, t('checker.activeBatches')),
+            h('ul', { className: 'mvp_sourceList' }, activeBatches.slice(0, MAX_ACTIVE_BATCH_LINES).map((batch, index) =>
+              h('li', { key: index },
+                h('span', { className: 'mvp_sourceState' }, BATCH_STAGES.includes(batch.stage)
+                  ? t('checker.stage.' + batch.stage) : String(batch.stage ?? t('checker.stage.checker'))),
+                h('span', { className: 'mvp_sourceName' }, Array.isArray(batch.ids) ? batch.ids.map(String).join(', ') : ''),
+              ))),
+            activeBatches.length > MAX_ACTIVE_BATCH_LINES ? h('div', { className: 'mvp_usageHint' },
+              t('checker.activeMore', { count: activeBatches.length - MAX_ACTIVE_BATCH_LINES })) : null,
+          ) : null,
+          sources.length > 0 ? h('details', { className: 'mvp_checkerDetails' },
+            h('summary', null, t('checker.sourcesTitle'), ' · ', t('checker.sourceSummary', {
+              complete: sources.filter((source) => ['ok', 'empty'].includes(source.status)).length, total: sources.length,
+            })),
+            h('ul', { className: 'mvp_sourceList' }, sources.map((source, index) =>
+              h('li', { key: index, className: ['ok', 'empty'].includes(source.status) ? 'mvp_source--ok' : 'mvp_source--bad' },
+                h('span', { className: 'mvp_sourceName' }, String(source.name)),
+                h('span', { className: 'mvp_sourceState' }, t('checker.source.' + String(source.status))),
+                source.attempts > 1 ? h('span', { className: 'mvp_sourceCount' }, t('checker.sourceAttempts', { count: source.attempts })) : null,
+                source.models > 0 ? h('span', { className: 'mvp_sourceCount' }, t('checker.sourceModels', { count: source.models })) : null,
+                source.message ? h('span', { className: 'mvp_sourceMsg', title: String(source.message) }, shortError(source.message)) : null,
+              ))),
+          ) : null,
+        ) : null,
       )
     }
 
@@ -1004,151 +952,155 @@ window.__ModuleLoader__.load({
       return value && Array.isArray(value[FIELD]) ? value[FIELD] : []
     }
 
+    /** Patch one method while preserving its previous own/inherited shape. */
+    function replaceMethod(target, name, wrapper) {
+      const original = Object.getOwnPropertyDescriptor(target, name)
+      Object.defineProperty(target, name, {
+        configurable: original?.configurable ?? true,
+        enumerable: original?.enumerable ?? false,
+        writable: original && 'writable' in original ? original.writable : true,
+        value: wrapper,
+      })
+      return () => {
+        if (Object.getOwnPropertyDescriptor(target, name)?.value !== wrapper) return
+        if (original) Object.defineProperty(target, name, original)
+        else delete target[name]
+      }
+    }
+
     /**
-     * Rewrite one directory store in place so its snapshots omit hidden models.
-     *
-     * The shipped composer seat may capture the directory store before this plugin
-     * applies, so replacing the store object would never reach it; rewriting
-     * getSnapshot/subscribe on the captured object does. The session's active
-     * model stays listed even while hidden, because the shipped trigger
-     * resolves its label from this same catalog.
+     * Filter the existing directory store without swapping any subscriptions.
+     * Notify through the underlying SnapshotStore so seats already subscribed at
+     * attach time (and those still mounted during removal) see the transition.
      */
     function patchDirectoryStore(store, form) {
       const readBase = store.getSnapshot.bind(store)
-      const subscribeBase = store.subscribe.bind(store)
-      const originalGet = store.getSnapshot
-      const originalSubscribe = store.subscribe
-      const listeners = new Set()
+      const publishBase = typeof store.set === 'function' ? store.set.bind(store) : null
+      let active = true
       let snapshot = null
       let lastBase
       let lastSignature
 
-      const build = (baseSnapshot) => {
-        const hidden = new Set(hiddenListOf(form.getSnapshot()))
-        const activeSelection = baseSnapshot.current
+      const build = (baseSnapshot, hiddenList) => {
+        const hidden = new Set(hiddenList)
+        const selection = baseSnapshot.current
         const groups = []
-        for (const group of baseSnapshot.groups || []) {
-          const all = group.models || []
-          const models = []
-          for (const model of all) {
-            const key = keyOf(group.id, model.id)
-            const active =
-              activeSelection !== null &&
-              activeSelection !== undefined &&
-              activeSelection.provider === group.id &&
-              activeSelection.model === model.id
-            if (!hidden.has(key) || active) models.push(model)
+        let changed = false
+        for (const group of baseSnapshot.groups ?? []) {
+          const all = group.models ?? []
+          const models = all.filter((model) => !hidden.has(keyOf(group.id, model.id)) ||
+            (selection?.provider === group.id && selection.model === model.id))
+          if (models.length === all.length) groups.push(group)
+          else {
+            changed = true
+            if (models.length > 0) groups.push({ ...group, models })
           }
-          if (models.length === 0) continue
-          groups.push(models.length === all.length ? group : { ...group, models })
         }
-        return { ...baseSnapshot, groups }
+        return changed ? { ...baseSnapshot, groups } : baseSnapshot
       }
 
       const current = () => {
         const baseSnapshot = readBase()
-        const signature = hiddenListOf(form.getSnapshot()).join('\u0000')
-        if (snapshot !== null && baseSnapshot === lastBase && signature === lastSignature) {
-          return snapshot
-        }
+        if (!active) return baseSnapshot
+        const hidden = hiddenListOf(form.getSnapshot())
+        const signature = JSON.stringify(hidden)
+        if (baseSnapshot === lastBase && signature === lastSignature) return snapshot
+        const next = build(baseSnapshot, hidden)
+        // Keep the external-store snapshot stable when a hidden-list edit didn't
+        // affect this particular directory (e.g. its current model is retained).
+        const sameGroups = baseSnapshot === lastBase && next !== baseSnapshot && snapshot !== baseSnapshot &&
+          next.groups.length === snapshot.groups.length && next.groups.every((group, index) => {
+            const prior = snapshot.groups[index]
+            return group === prior || (group.id === prior.id && group.models.length === prior.models.length &&
+              group.models.every((model, modelIndex) => model === prior.models[modelIndex]))
+          })
         lastBase = baseSnapshot
         lastSignature = signature
-        snapshot = build(baseSnapshot)
+        if (!sameGroups) snapshot = next
         return snapshot
       }
 
-      const emit = () => {
-        const previous = snapshot
-        const next = current()
-        if (previous === next) return
-        for (const listener of Array.from(listeners)) listener()
-      }
-
-      Object.defineProperties(store, {
-        __modelVisibilityPatched: { value: true, configurable: true },
-        getSnapshot: { value: current, configurable: true, writable: true },
-        subscribe: {
-          value(listener) {
-            listeners.add(listener)
-            const stop = subscribeBase(listener)
-            return () => {
-              listeners.delete(listener)
-              stop()
-            }
-          },
-          configurable: true,
-          writable: true,
-        },
-      })
+      // Capture the pre-attach snapshot so the initial emit notifies even existing subscribers.
+      snapshot = readBase()
+      let published = snapshot
+      const restoreSnapshot = replaceMethod(store, 'getSnapshot', current)
+      const notify = () => { if (publishBase) publishBase({ ...readBase() }) }
 
       return {
-        emit,
-        restore() {
-          Object.defineProperties(store, {
-            getSnapshot: { value: originalGet, configurable: true, writable: true },
-            subscribe: { value: originalSubscribe, configurable: true, writable: true },
-          })
-          delete store.__modelVisibilityPatched
-          listeners.clear()
+        emit() {
+          if (published === current()) return
+          notify()
+          published = current()
+        },
+        restore({ notifyReaders = true } = {}) {
+          if (!active) return
+          const changed = current() !== readBase()
+          active = false
+          restoreSnapshot()
+          if (changed && notifyReaders) notify()
+          snapshot = lastBase = lastSignature = null
         },
       }
     }
 
-    /**
-     * Patch every model directory — the ones already live when the plugin
-     * applies and every directory resolved later — so the shipped seat keeps
-     * owning the trigger, the Model / Effort rows, and third-party menu
-     * enhancements such as the reasoning-effort slider.
-     */
+    /** Patch live and future directories without retaining closed sessions. */
     function installComposerFilter(scope, form) {
       const models = scope.modelDirectories
       const original = models.directoryFor
       if (typeof original !== 'function') return
-      const records = new Set()
-
-      const ensure = (directory) => {
-        if (directory === undefined || directory === null) return directory
-        const store = directory.store
-        if (store === undefined || store === null || store.__modelVisibilityPatched === true) {
-          return directory
-        }
-        try {
-          records.add(patchDirectoryStore(store, form))
-        } catch (_error) {
-          // Fail open: an unwritable store simply keeps showing every model.
-        }
-        return directory
-      }
 
       scope.effect(() => {
-        const live = models.live && models.live.directories ? models.live.directories.values : null
-        if (live instanceof Set) for (const directory of live) ensure(directory)
-
-        const stopForm = form.subscribe(() => {
-          for (const record of records) record.emit()
-        })
-
-        const wrapper = function directoryFor(sessionId) {
-          return ensure(original.call(this, sessionId))
+        const records = new Map()
+        const ensure = (directory) => {
+          const store = directory?.store
+          if (!store || records.has(store)) return directory
+          let record
+          try {
+            record = patchDirectoryStore(store, form)
+            let restoreDispose
+            const stop = (notifyReaders) => {
+              records.delete(store)
+              restoreDispose?.()
+              record.restore({ notifyReaders })
+            }
+            const dispose = directory.dispose
+            if (typeof dispose !== 'function') throw new Error('Directory has no scope disposer')
+            restoreDispose = replaceMethod(directory, 'dispose', function (...args) {
+              stop(false)
+              return dispose.apply(this, args)
+            })
+            records.set(store, { emit: record.emit, stop })
+            record.emit()
+          } catch (_error) {
+            // An unwritable store or directory must not break model selection.
+            const installed = records.get(store)
+            if (installed) installed.stop(false)
+            else record?.restore({ notifyReaders: false })
+          }
+          return directory
         }
-        Object.defineProperty(models, 'directoryFor', {
-          value: wrapper,
-          configurable: true,
-          writable: true,
+
+        let restoreResolver
+        try {
+          restoreResolver = replaceMethod(models, 'directoryFor', function (sessionId) {
+            return ensure(original.call(this, sessionId))
+          })
+        } catch (_error) {
+          return
+        }
+        const live = models.live?.directories?.values
+        if (live instanceof Set) for (const directory of live) ensure(directory)
+        const stopForm = form.subscribe(() => {
+          for (const record of records.values()) record.emit()
         })
 
         return () => {
+          restoreResolver()
           stopForm()
-          for (const record of records) record.restore()
-          records.clear()
-          if (Object.getOwnPropertyDescriptor(models, 'directoryFor')?.value === wrapper) {
-            delete models.directoryFor
-          }
+          for (const record of records.values()) record.stop(true)
         }
       }, 'model-visibility: filtered model directory')
     }
-
-    /* ----------------------------------------------------- settings page */
 
 
     exports.patchDirectoryStore = patchDirectoryStore
@@ -1335,24 +1287,42 @@ window.__ModuleLoader__.load({
 
     /* --------------------------------------------------------------- checker */
     .mvp_checker{flex:none;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);margin-top:12px;overflow:hidden}
-    .mvp_checker--closed{background:transparent}
-    .mvp_checkerHead{box-sizing:border-box;width:100%;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;background:0 0;border:0;align-items:baseline;gap:8px;padding:7px 10px;font-family:inherit;font-size:12px;line-height:18px;display:flex;flex-wrap:wrap}
-    .mvp_checkerHead:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.08))}
+    .mvp_checkerBar{display:flex;align-items:center;gap:6px;padding-right:4px}
+    .mvp_checkerBar .mvp_button{flex-shrink:0}
+    .mvp_checkerHead{box-sizing:border-box;flex:1;min-width:0;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;background:0 0;border:0;align-items:baseline;gap:4px 8px;padding:7px 10px;font-family:inherit;font-size:12px;line-height:18px;display:flex;flex-wrap:wrap}
+    .mvp_checkerHead:hover{background:var(--dsw-alias-interactive-bg-hover)}
     .mvp_checkerHead:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
     .mvp_checkerTitle{font-weight:500;flex:none}
-    .mvp_checkerSummary{color:var(--dsw-alias-label-tertiary);flex:1;min-width:0;font-size:11px}
+    .mvp_checkerSummary{color:var(--dsw-alias-label-secondary);flex:1 1 120px;min-width:0;font-size:11px;font-variant-numeric:tabular-nums}
     .mvp_badge{flex:none;color:var(--dsw-alias-state-warn-primary);border:.5px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent);border-radius:999px;padding:0 6px;font-size:10px;line-height:15px}
     .mvp_checkerBody{border-top:.5px solid var(--dsw-alias-border-l2);padding:10px}
-    .mvp_checkerHint{color:var(--dsw-alias-label-tertiary);margin:0 0 8px;font-size:11px;line-height:16px}
-    .mvp_checkerForm{align-items:flex-end;gap:10px;display:flex;flex-wrap:wrap}
-    .mvp_checkerProgress{align-items:center;gap:10px;margin-top:10px;display:flex;flex-wrap:wrap}
+    .mvp_checkerModes{min-inline-size:0;border:0;margin:0 0 6px;padding:0;display:flex;flex-wrap:wrap;gap:4px 6px}
+    .mvp_checkerModes legend{margin-bottom:4px;padding:0}
+    .mvp_checkerMode{align-items:center;gap:5px;display:inline-flex;padding:4px 8px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,6px);cursor:pointer;font-size:12px;line-height:16px}
+    .mvp_checkerMode input{margin:0;accent-color:var(--dsw-alias-brand-primary)}
+    .mvp_checkerMode:has(input:checked){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary) 8%, transparent)}
+    .mvp_checkerMode:has(input:disabled){cursor:default;opacity:.75}
+    .mvp_checkerMode:has(input:focus-visible){outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+    .mvp_checkerHint{color:var(--dsw-alias-label-secondary);margin:0 0 8px;font-size:11px;line-height:16px}
+    .mvp_checkerForm,.mvp_checkerAdvanced{align-items:flex-end;gap:8px;display:flex;flex-wrap:wrap}
+    .mvp_checkerForm .mvp_field,.mvp_checkerAdvanced .mvp_field{min-width:0;max-width:100%}
+    .mvp_checkerForm .mvp_select,.mvp_checkerAdvanced .mvp_select{min-width:120px;max-width:100%}
+    .mvp_checkerAdvanced{padding:6px 0}
+    .mvp_checkerAdvanced .mvp_check{min-height:26px}
+    .mvp_checkerDetails{margin-top:8px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
+    .mvp_checkerDetails summary{cursor:pointer;width:fit-content;max-width:100%}
+    .mvp_checkerDetails summary:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+    .mvp_checkerOptionNote{color:var(--dsw-alias-state-warn-primary)}
+    .mvp_checkerNotice{box-sizing:border-box;margin-top:5px;overflow-wrap:anywhere}
+    .mvp_checkerBar + .mvp_checkerNotice{margin:0;padding:0 10px 6px}
+    .mvp_checkerProgress{align-items:center;gap:5px 10px;margin-top:8px;display:flex;flex-wrap:wrap}
     .mvp_progressBar{flex:1 1 160px;min-width:120px;height:4px;border-radius:999px;background:var(--dsw-alias-border-l2);overflow:hidden}
     .mvp_progressFill{height:100%;background:var(--dsw-alias-brand-primary);transition:width .2s ease;display:block}
-    .mvp_checkerProgressText{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+    .mvp_checkerProgressText{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
     .mvp_checkerErrors{margin-top:10px}
     .mvp_checkerErrorsTitle{color:var(--dsw-alias-state-warn-primary);margin-bottom:4px;font-size:11px;line-height:16px}
     .mvp_errorList{max-height:150px;color:var(--dsw-alias-label-secondary);margin:0;padding-left:18px;font-size:11px;line-height:16px;overflow-y:auto}
-    .mvp_errorList li{margin-bottom:3px;word-break:break-word}
+    .mvp_errorList li{margin-bottom:3px;overflow-wrap:anywhere}
     .mvp_sources{margin-top:10px}
     .mvp_sourcesTitle{color:var(--dsw-alias-label-tertiary);margin-bottom:4px;font-size:11px;line-height:16px}
     .mvp_sourceList{max-height:150px;margin:0;padding:0;list-style:none;font-size:11px;line-height:16px;overflow-y:auto}
@@ -1394,7 +1364,7 @@ window.__ModuleLoader__.load({
         'page.saveFailed': '保存失败，请重试。',
         'page.refresh': '刷新',
         'page.refreshing': '刷新中…',
-        'page.refreshTitle': '重新读取适配器与中转站的能力信息（沿用缓存，10 分钟内的探测不会重发请求）',
+        'page.refreshTitle': '重新读取适配器与中转站的能力，跳过 TTL；可复用正在进行的探测。',
         'page.reload': '重新获取能力',
         'page.reloading': '正在获取…',
         'page.reloadTitle':
@@ -1407,7 +1377,7 @@ window.__ModuleLoader__.load({
         'page.showAll': '启用所有模型',
         'page.showAllTitle': '启用整个列表中的模型，包括不符合当前筛选的模型',
         'page.legend':
-          '标签：推理 = 可调推理等级；上下文 = 输入窗口；多模态 = 可输入图像。实线来自适配器、中转站或厂商文档，虚线来自联网校验或模型名推断。生图 / 生视频 / 嵌入等只标类型，不显示思考强度与文本标签。',
+          '「可选思考强度」来自当前适配器；「目录参考档位」来自公开目录，不影响对话请求。上下文指输入窗口；多模态表示已标注图像能力。',
         'page.metaFallback':
           '模型能力信息暂不可用：上下文与模态显示为未知，推理档位仍来自官方目录。',
         'page.hostStale':
@@ -1421,6 +1391,10 @@ window.__ModuleLoader__.load({
         'usage.title': 'token',
         'usage.computing': '统计中…',
         'usage.none': '—',
+        'usage.exportingUsage': '正在扫描并准备使用量 CSV…',
+        'usage.exportingModels': '正在准备模型 CSV…',
+        'usage.readFailed': '用量数据可能不完整：{message}',
+        'usage.exportFailed': 'CSV 下载失败：{message}',
         'usage.detail': '输入 {input} · 输出 {output} · 缓存读 {cacheRead} · 缓存写 {cacheWrite}',
         'usage.today': '今天',
         'usage.todayTitle': '本地自然日（今天 0 点起）',
@@ -1429,36 +1403,104 @@ window.__ModuleLoader__.load({
         'usage.month': '本月',
         'usage.monthTitle': '本月 1 日 0 点起',
         'usage.total': '总计',
-        'usage.totalTitle': '全部历史（更早的按会话创建日粗算）',
+        'usage.totalTitle': '保留期内用量（较早月份按会话创建日估算）',
         'usage.exportUsage': '用量 CSV',
         'usage.exportUsageTitle': '下载按天分桶、含每模型 token 分解的 CSV',
         'usage.exportModels': '模型 CSV',
         'usage.exportModelsTitle': '下载全部提供商模型的可见性与能力表',
         'usage.hostStale': '宿主半尚未提供用量统计，重启 DSH 即可启用。',
-        'checker.title': '联网校验',
-        'checker.description':
-          '选定一个校验员模型：先读取 models.dev / OpenRouter / Hugging Face 三个公开目录，再分批核对其余模型。开启联网后，校验员可调用搜索和网页读取；可能消耗联网服务额度及所选校验员模型的 Token，其 Token 计入上方统计。此过程依据目录、资料与校验员判断，不对目标模型进行实测。联网不可用会报告错误。写入提供商配置默认关闭，可按需开启。提示：思考型模型会先花掉输出预算，若批次普遍失败，可换一个非思考模型或降低其思考档位。',
+        'checker.title': '能力校验',
+        'checker.sourceMode': '校验来源',
+        'checker.mode.public': '只用公开目录',
+        'checker.mode.supplement': '公开目录＋校验员补漏',
+        'checker.mode.checker': '仅校验员联网',
+        'checker.hint.public': '比对 models.dev、OpenRouter 和 Hugging Face。不调用校验员或搜索网页。',
+        'checker.hint.supplement': '先比对公开目录，再由校验员联网查找未匹配的模型。可能消耗联网额度和 Token。',
+        'checker.hint.checker': '跳过公开目录，由校验员联网重查全部符合条件的模型。可能消耗更多额度和 Token。',
+        'checker.description': '先比对公开目录，再用校验员补漏。请在高级选项里确认是否允许联网。',
+        'checker.resultsScope': '校验依据目录和资料，不实测目标模型。校验员用量计入上方统计，联网不可用时会报告错误。',
+        'checker.useChecker': '使用校验员模型',
+        'checker.useCheckerTitle': '关闭后只读取公开目录，不调用校验员或搜索网页。',
+        'checker.fuzzyMatch': '允许后缀和别名匹配',
+        'checker.fuzzyMatchTitle': '优先匹配原 ID；再按中英文名、标点和尾部规格查找同厂商模型。冲突不猜测，归一化结果只作参考。',
+        'checker.publicDescription': '比对公开目录。不调用校验员或搜索网页。',
+        'checker.startPublic': '读取公开目录',
+        'checker.catalogTargets': '目录比对范围 {count} 个模型',
+        'checker.catalogMatches': '目录匹配 {count} 个',
+        'checker.checkerTargets': '交给校验员 {count} 个模型',
+        'checker.usedRoute': '校验员 {target}',
+        'checker.catalogResults': '目录补全 {count} 个模型',
+        'checker.aliasMatches': '别名参考 {count} 个',
+        'override.useReference': '填入参考档位',
+        'override.useReferenceTitle': '预览来源、档位和可用的映射，再确认填入草稿。',
+        'override.referencePreview': '参考档位预览',
+        'override.referenceSource': '来源：{source}',
+        'override.referenceAlias': '{source}（别名匹配）',
+        'override.referenceLevels': '参考档位：{levels}',
+        'override.referenceDraft': '草稿档位：{levels}',
+        'override.referenceLimit': '最多保留 16 个档位，未填入：{levels}',
+        'override.referenceFallbacks': '标准同名备选值（仅补空白映射）：{levels}',
+        'override.referenceStandardScope': '仅填入当前模型草稿。参考不代表该上游支持。要使用同名备选值，还需勾选写入提供商与标准 reasoning_effort。',
+        'override.referenceManualScope': '仅填入当前模型草稿。此路由不提供同名备选值。若要配置请求值，请以该路由的 API 文档为准。',
+        'override.referenceOldHost': '当前 Host 无法保护已有提供商映射。参考档位只能保存在本插件。',
+        'override.referenceProviderScope': '仅写入当前提供商的此模型。请核对上游支持的档位和值。部分配置若无法写入，仍可保存本地草稿。',
+        'override.referenceSafeguards': '查看保留规则和撤销方式',
+        'override.referencePreservation': '填入时保留草稿的已有档位、默认档位和手填值。参考写入不会覆盖提供商的现有映射或默认档位。要替换已有映射，请在模型提供商设置中手动修改。',
+        'override.referenceRevert': '如需撤销提供商改动，请在模型提供商设置中修改该模型。「恢复自动」只清除本插件设置。',
+        'override.cancelReference': '取消填入',
+        'override.confirmReference': '确认填入草稿',
+        'override.referenceApplied': '已填入草稿，请核对后保存。',
+        'override.referenceWireBlank': '保留已有值，空白可用 {value}',
+        'override.referenceDisabled': '已保留提供商明确禁用的推理配置。',
+        'override.referenceNonChat': '此路由不是对话模型，未写入参考推理设置。',
+        'override.referencePreservedEfforts': '这些档位保留了提供商的已有映射：{levels}',
+        'override.saveLocal': '保存到本插件',
+        'override.saveProvider': '保存并写入模型提供商',
+        'override.providerConfirmTitle': '确认保存并写入模型提供商',
+        'override.providerTarget': '写入目标：{provider} / {model}',
+        'override.providerContext': '上下文窗口（可写时）：{value}',
+        'override.providerInput': '输入模态（兼容时）：{value}',
+        'override.providerDisableReasoning': '请求禁用此模型的推理。',
+        'override.providerMappings': '手填映射（仅补空白）：{values}',
+        'override.providerOmit': '省略上游值',
+        'override.providerLocalDefault': '默认档位（仅本地）：{value}',
+        'override.providerStandardEnable': '允许此模型发送标准 reasoning_effort。',
+        'override.backToDraft': '返回草稿',
+        'override.confirmProviderSave': '确认保存并写入',
+        'tag.aliasReference': "别名参考",
+        'tag.aliasReferenceTitle': "此能力由唯一的公开目录别名匹配补全，不是该路由的声明。",
         'checker.provider': '校验员提供商',
         'checker.model': '校验员模型',
+        'checker.chooseProvider': '选择提供商',
+        'checker.chooseModel': '选择模型',
+        'checker.noRoute': '没有可选的校验员。请配置模型或选用公开目录。',
+        'checker.noLegacyRoute': '没有可选的校验员，请先配置模型。',
+        'checker.chooseRoute': '选择校验员提供商和模型后即可开始。',
+        'checker.targetScope': '校验范围不受本页筛选影响。',
+        'checker.advanced': '高级选项',
+        'checker.writeBackEnabled': '写回已开启',
         'checker.start': '开始校验',
         'checker.startTitle': '在宿主侧后台运行校验',
         'checker.cancel': '取消',
         'checker.cancelTitle': '中止正在进行的校验',
-        'checker.writeBack': '同时写入提供商配置',
+        'checker.writeBack': '补填提供商空白配置',
         'checker.writeBackTitle':
-          '开启：判定到的 input / contextWindow / 推理档位直接写进各提供商该模型条目（learned.json 只留写不进去的字段）；关闭：只更新本页与快照。',
+          '开启：只为确认归属的自定义模型条目补填未配置的输入模态和上下文，不改现有值或推理映射；关闭：只更新本页和快照。',
         'checker.webSearch': '允许搜索与网页读取',
         'checker.webSearchTitle': '默认开启。允许校验员调用搜索与网页读取，可能消耗联网服务额度及模型 Token；联网不可用会报告错误。关闭后仅依据公开目录与校验员已有知识核对。',
-        'checker.fullScan': '全量搜索',
-        'checker.fullScanTitle': '默认关闭：跳过已有校验记录的模型。开启后本轮重新校验所有符合条件的模型，可能消耗更多配额；仅本次生效，不会开启联网权限。',
+        'checker.fullScan': '重查已有记录',
+        'checker.fullScanTitle': '重查已有记录，仅本次生效。使用校验员的模式可能消耗更多额度。',
         'checker.searchBackend.dsh-free-search': 'DSH 免费搜索 {count} 次',
         'checker.searchBackend.host-web': '宿主网页搜索 {count} 次',
         'checker.allSkipped': '没有新模型需要校验 · 跳过已知 {skippedKnown}',
-        'checker.searchBreakdown': '按搜索来源：{breakdown}',
+        'checker.searchBreakdown': '搜索来源 {breakdown}',
         'checker.idle': '未运行',
-        'checker.running': '进行中{phase} · 已处理 {processed}/{total} · 有效 {valid} / 未知 {unknown} / 失败 {failed} · 跳过已知 {skippedKnown} · 搜索 {searchCalls} / 读取 {fetchCalls} · 已耗 {tokens} Token',
-        'checker.finished': '已结束 · 已处理 {processed}/{total} · 有效 {valid} / 未知 {unknown} / 失败 {failed} · 跳过已知 {skippedKnown} · 搜索 {searchCalls} / 读取 {fetchCalls} · 耗 {tokens} Token',
-        'checker.progress': '{processed}/{total} 已处理 · 校验本身消耗 {tokens} Token',
+        'checker.starting': '正在提交…',
+        'checker.running': '{phase}',
+        'checker.finished': '已结束',
+        'checker.progress': '已处理 {processed}/{total}',
+        'checker.progressLabel': '校验进度',
+        'checker.tokens': '{tokens} Token',
         'checker.outcomes': '有效 {valid} · 未知 {unknown} · 失败 {failed} · 跳过已知 {skippedKnown}',
         'checker.webCalls': '搜索 {searchCalls} 次 · 网页读取 {fetchCalls} 次',
         'checker.activeBatches': '活跃批次',
@@ -1468,14 +1510,14 @@ window.__ModuleLoader__.load({
         'checker.stage.fetch': '读取网页',
         'checker.stage.writeBack': '写入配置',
         'checker.stage.flush': '保存快照',
-        'checker.errorBadge': '{count} 个批次失败',
-        'checker.errorTitle': '失败批次',
-        'checker.errorMore': '另有 {count} 条未显示',
+        'checker.errorBadge': '{count} 条错误',
+        'checker.errorTitle': '本轮错误',
+        'checker.errorDetails': '全部错误详情（{count} 条）',
         'checker.concurrency': '并发线程',
         'checker.concurrencyTitle': '同时发出的校验请求数。中转站限流时调低，网络快时调高（上限 8）。',
         'checker.concurrencyValue': '{count} 路',
-        'checker.threads': '并发 {count} 路',
         'checker.sourcesTitle': '公开目录',
+        'checker.sourceSummary': '已读取 {complete}/{total}',
         'checker.source.ok': '已读取',
         'checker.source.empty': '无匹配',
         'checker.source.http': 'HTTP 错误',
@@ -1484,21 +1526,33 @@ window.__ModuleLoader__.load({
         'checker.source.too-large': '响应过大',
         'checker.source.pending': '等待中',
         'checker.sourceModels': '{count} 条',
-        'checker.publicOnly': '其中 {count} 个模型的能力来自公开目录（校验员未作答）。',
         'checker.hostStale': '宿主半不支持联网校验，请重启 DSH 后使用。',
-        'checker.phase.public': '（读取公开目录）',
-        'checker.phase.checker': '（读取公开目录）',
-        'checker.phase.verifying': '（分批校验）',
+        'checker.catalogNeeded': '当前无法开启新的校验，请先恢复增强模型目录。',
+        'checker.writeBackScope': '只写回本轮核验结果。需要写回以前的记录时，请开启「重查已有记录」。',
+        'checker.writeBackSkipped': '已跳过 {count} 个已知模型，对应配置未写回。',
+        'checker.phase.listing': '正在读取模型列表',
+        'checker.phase.public': '正在读取公开目录',
+        'checker.phase.checker': '校验员核对中',
+        'checker.phase.verifying': '正在分批校验',
+        'checker.phase.cancelled': '正在停止',
+        'checker.cancelled': '已取消',
+        'checker.stopping': '正在停止…',
+        'checker.pendingWrite': '已提交的供应商写入仍待确认（{target}）。停止校验不会撤回这次写入。',
+        'checker.lateWriteApplied': '延迟的供应商写入已完成（{target}）。',
+        'checker.lateWriteNotApplied': '延迟的供应商写入未确认成功（{target}）。',
+        'checker.runFailed': '校验失败',
+        'checker.source.cancelled': '已取消',
+        'checker.sourceAttempts': '尝试 {count} 次',
         'source.snapshot': '已校验',
-        'page.applyInput': '让输入框按能力标注放行图像',
-        'page.applyInputShort': '多模态中转站模型自动补 image；关闭则只按 Provider 的 input 声明',
+        'page.applyInput': '为符合条件的中转站模型补充图像输入',
+        'page.applyInputShort': '仅补有可靠图像能力证据、且未明确声明输入模态的中转站对话模型；列表标签不代表请求会放行。',
         'page.applyInputHint':
-          '开启后，被标注为「多模态」的中转站对话模型会在发送请求时自动补上图像输入能力；关闭则完全按 Provider 配置里的 input 声明。只影响中转站（pi-ai）路由，不改任何配置文件；若某个上游实际拒绝图像，关闭此开关即可。',
+          '开启后，只为有可靠图像能力证据且未明确声明输入模态的中转站（pi-ai）对话模型补充图像输入。列表标注不保证请求会放行，也不保证上游接受图像。关闭后不补充；不修改提供商配置。',
         'page.kindLegend':
           '类型配色：生图 蓝 · 生视频 绿 · 嵌入 橙 · 音频 紫 · 重排 红 · 审核 玫红 · 翻译 灰。「官方校正」表示目录与厂商文档不一致时以文档为准。',
         'page.searchPlaceholder': '搜索名称或 ID',
         'page.capability.multimodal': '多模态',
-        'page.capability.multimodalTitle': '只看可输入图像的模型',
+        'page.capability.multimodalTitle': '只看能力信息包含图像输入的模型',
         'page.capability.reasoning': '支持推理',
         'page.capability.reasoningTitle': '只看公布了推理能力的模型',
         'page.contextLabel': '上下文至少',
@@ -1531,7 +1585,14 @@ window.__ModuleLoader__.load({
         'tag.reasoning': '支持推理',
         'tag.noReasoning': '不支持推理',
         'tag.reasoningUnknown': '推理未知',
-        'tag.effort': '思考强度',
+        'tag.effort': '可选思考强度',
+        'tag.effortReference': '参考档位',
+        'tag.effortPublicReference': '目录参考档位',
+        'tag.reasoningReference': '推理（参考）',
+        'tag.noReasoningReference': '参考：不支持推理',
+        'tag.effortReferenceTitle': '仅为能力参考（来源：{source}），不改变对话菜单或实际请求。',
+        'tag.effortWireOff': '未启用 reasoning_effort',
+        'tag.effortWireOffTitle': '这个 OpenAI Completions 路由明确关闭了 reasoning_effort。若上游确实支持此字段，请在模型提供商的兼容设置中启用；其他协议可能使用不同的参数。',
         'tag.context': '上下文',
         'tag.unknown': '未知',
         'tag.multimodal': '多模态',
@@ -1570,13 +1631,13 @@ window.__ModuleLoader__.load({
         'source.official': '厂商官方文档',
         'source.manual': '手动设置',
         'source.unknown': '未知',
-        'effort.off': '关闭',
-        'effort.minimal': '极低',
-        'effort.low': '低',
-        'effort.medium': '中',
-        'effort.high': '高',
-        'effort.max': '最高',
-        'effort.xhigh': '极高',
+        'effort.off': 'off',
+        'effort.minimal': 'minimal',
+        'effort.low': 'low',
+        'effort.medium': 'medium',
+        'effort.high': 'high',
+        'effort.max': 'max',
+        'effort.xhigh': 'xhigh',
         'tag.manual': '手动',
         'tag.manualTitle': '这项能力由你手动指定，优先于适配器、中转站与内置目录。',
         'row.edit': '编辑能力',
@@ -1593,7 +1654,7 @@ window.__ModuleLoader__.load({
         'override.defaultEffort': '默认档位',
         'override.defaultEffortAuto': '不指定',
         'override.effortHint':
-          '勾选「不支持推理」会隐藏思考强度；勾选档位后，这些档位会直接显示为该模型的可用强度。',
+          '本地档位仅供参考。对话可选档位由适配器决定；此处的默认档位不会改动 Provider 的实际默认值。',
         'override.save': '保存',
         'override.saving': '保存中…',
         'override.reset': '恢复自动',
@@ -1601,8 +1662,12 @@ window.__ModuleLoader__.load({
         'override.failed': '保存失败：{message}',
         'override.unavailable': 'Host 半仍不支持手动能力设置；重启 DSH 后可用。',
         'override.provider': '同时写入模型提供商设置',
+        'override.listNotReady': '等待手动设置清单加载完成',
+        'override.listFailed': '无法同步手动设置清单：{message}',
+        'override.retryList': '重试读取',
+        'override.conflict': '此模型的手动设置已发生变化。请关闭编辑器，再打开并核对最新值后重新编辑。',
         'override.providerHint':
-          '勾选后，输入模态、上下文窗口与思考强度会写进「设置 → 模型提供商」里这个模型的配置，其他界面也能看到；只在本页可表达的项（模型类型、默认档位、仅 off 的档位）仍留在本插件。',
+          '默认只保存在本插件。主动勾选后，兼容的输入模态、上下文窗口和已知上游映射可写入 Provider；其余仍保留在本地。',
         'override.providerWritten': '已同时写入提供商设置：{fields}',
         'override.providerSkipped': '已保存在本插件；提供商设置未写入（{reason}）。',
         'override.resetTitle': '只删除本插件的覆盖；已写入提供商设置的值不会被清除。',
@@ -1617,6 +1682,31 @@ window.__ModuleLoader__.load({
         'override.reason.describe-failed': '读取提供商设置失败',
         'override.reason.settings-failed': '设置服务拒绝了写入',
         'override.reason.skipped': '未请求写入',
+        'override.reason.local-only': '没有可安全写入的字段',
+        'override.reason.revision-unavailable': '缺少可用的配置版本，已避免覆盖',
+        'override.reason.config-provenance-unavailable': '无法确认设置归属',
+        'override.reason.expression-backed': '字段由配置表达式提供',
+        'override.reason.settings-unverified': '写入结果无法核实，本地设置已保留',
+        'override.reason.provider-unverified': '无法确认当前路由的 Provider 设置归属',
+        'override.reason.native-catalog': '该模型来自内置目录，没有可写的模型条目',
+        'override.reason.protected': '提供商已声明这些字段，未覆盖',
+        'override.reason.write-pending': '上一个写入尚未结算，本次已跳过',
+        'override.field.kind': '模型类型',
+        'override.field.defaultEffort': '默认档位',
+        'override.localOnly': '仅保存在本插件：{fields}',
+        'override.unresolvedEfforts': '这些档位没有可用的上游值：{levels}',
+        'override.routeDefaultConflict': '推理配置与提供商默认档位冲突，未写入。',
+        'override.inheritedLadderConflict': '为保留内置目录映射，未写入推理档位。',
+        'override.wireTitle': '上游请求值',
+        'override.wireHint': '按当前路由的 API 文档填写，不自动猜测。留空可复用已有显式值；未选的已配置档位保持不变。是否发送取决于协议及兼容设置。',
+        'override.wireValue': '{level} 的上游值',
+        'override.wireKeep': '留空 = 保持已有配置',
+        'override.standardWire': '让此模型发送标准 reasoning_effort',
+        'override.standardWireUnavailable': '同名映射仅适用于使用标准思考格式的 OpenAI Completions 显式模型条目；其他协议请按 Provider 文档配置。',
+        'override.standardWireHint': '仅在上游接受 reasoning_effort 和此模型的全部发送值时勾选（包括 Provider 里已有的未选档位）。所选非 off 档位缺少映射时使用同名值；只为此模型开启。',
+        'override.standardFormatConflict': '此模型未使用标准 OpenAI Completions 思考格式，未开启 reasoning_effort。',
+        'override.field.supportsReasoningEffort': '允许发送 reasoning_effort',
+        'override.wireOff': 'Off：使用上游省略值的语义（依协议处理）',
         'page.manualNote':
           '「手动」标签表示这项能力来自你在这个模型上的手动设置，优先于适配器、中转站与内置目录。',
         'correction.glm-5.3-text-only':
@@ -1646,7 +1736,7 @@ window.__ModuleLoader__.load({
         'page.saveFailed': 'Could not save this change. Try again.',
         'page.refresh': 'Refresh',
         'page.refreshing': 'Refreshing…',
-        'page.refreshTitle': 'Read adapter and relay capabilities again (honours caches; a probe younger than 10 minutes is not repeated)',
+        'page.refreshTitle': 'Read adapter and relay capabilities again, skipping cache TTLs; may join an ongoing probe.',
         'page.reload': 'Re-fetch capabilities',
         'page.reloading': 'Re-fetching…',
         'page.reloadTitle':
@@ -1659,7 +1749,7 @@ window.__ModuleLoader__.load({
         'page.showAll': 'Enable all models',
         'page.showAllTitle': 'Enable every model in the catalog, even those outside the current filters',
         'page.legend':
-          'Tags: Reasoning = adjustable levels; Context = input window; Multimodal = accepts images. Solid tags come from the adapter, the relay or vendor documentation; dashed tags come from online verification or the model name. Image, video, embedding and other models show only their kind.',
+          'Selectable effort levels come from the current adapter. Public catalog reference levels do not change chat requests. Context is the input window; multimodal indicates reported image capability.',
         'page.metaFallback':
           'Model capability details are unavailable right now: context and modalities show as unknown, while effort levels still come from the shipped catalog.',
         'page.hostStale':
@@ -1673,6 +1763,10 @@ window.__ModuleLoader__.load({
         'usage.title': 'tokens',
         'usage.computing': 'scanning…',
         'usage.none': '—',
+        'usage.exportingUsage': 'Scanning and preparing the usage CSV…',
+        'usage.exportingModels': 'Preparing the models CSV…',
+        'usage.readFailed': 'Usage data may be incomplete: {message}',
+        'usage.exportFailed': 'CSV download failed: {message}',
         'usage.detail': 'input {input} · output {output} · cache read {cacheRead} · cache write {cacheWrite}',
         'usage.today': 'Today',
         'usage.week': 'Week',
@@ -1681,36 +1775,104 @@ window.__ModuleLoader__.load({
         'usage.todayTitle': 'Local calendar day',
         'usage.weekTitle': 'Since Monday 00:00 local',
         'usage.monthTitle': 'Since the 1st local',
-        'usage.totalTitle': 'All history (older months attributed by session start day)',
+        'usage.totalTitle': 'Usage within the retention window (older months attributed by session start day)',
         'usage.exportUsage': 'Usage CSV',
         'usage.exportUsageTitle': 'Download a day-bucketed CSV with per-model breakdown',
         'usage.exportModels': 'Models CSV',
         'usage.exportModelsTitle': 'Download visibility and capability table of every provider model',
         'usage.hostStale': 'The Host half does not provide usage stats yet; restart DSH to enable it.',
-        'checker.title': 'Online verification',
-        'checker.description':
-          'Pick one checker model: read three public catalogs (models.dev / OpenRouter / Hugging Face), then verify the remaining models in batches. With web access enabled, the checker can call search and read web pages; this may consume web-service quota and the selected checker model’s tokens, which count in the strip above. Results use catalogs, references and the checker’s judgement; target models are not tested directly. Unavailable web access is reported as an error. Writing to provider settings is off by default and can be enabled. Note: a thinking model spends the output budget before it answers, so if batches keep failing pick a non-thinking checker or lower its effort.',
+        'checker.title': 'Capability verification',
+        'checker.sourceMode': 'Verification source',
+        'checker.mode.public': 'Public catalogs only',
+        'checker.mode.supplement': 'Public catalogs + checker',
+        'checker.mode.checker': 'Online checker only',
+        'checker.hint.public': 'Compare against models.dev, OpenRouter and Hugging Face without calling a checker or searching the web.',
+        'checker.hint.supplement': 'Compare against public catalogs first. The checker searches the web for unmatched models. Uses web quota and model tokens if needed.',
+        'checker.hint.checker': 'The checker searches the web for all eligible models, bypassing public catalogs. May use more quota and model tokens.',
+        'checker.description': 'Read public catalogs first and use a checker for the rest. See Advanced options for web access.',
+        'checker.resultsScope': 'Results are based on catalogs and references, without direct tests of target models. The usage strip includes checker tokens. Unavailable web access is reported as an error.',
+        'checker.useChecker': 'Use checker model',
+        'checker.useCheckerTitle': 'Turn off to read public catalogs without checker calls or web search.',
+        'checker.fuzzyMatch': 'Allow suffix and alias matching',
+        'checker.fuzzyMatchTitle': 'Try exact IDs first, then normalize names, punctuation, and variant suffixes within the same vendor. Ambiguous matches are rejected; normalized results are references only.',
+        'checker.publicDescription': 'Compare against public catalogs without calling a checker or searching the web.',
+        'checker.startPublic': 'Read public catalogs',
+        'checker.catalogTargets': 'Catalog lookup: {count} models',
+        'checker.catalogMatches': '{count} catalog matches',
+        'checker.checkerTargets': '{count} models assigned to the checker',
+        'checker.usedRoute': 'Checker {target}',
+        'checker.catalogResults': 'Catalog facts for {count} models',
+        'checker.aliasMatches': '{count} advisory alias matches',
+        'override.useReference': 'Fill from reference',
+        'override.useReferenceTitle': 'Preview the source, levels and available mappings before filling the draft.',
+        'override.referencePreview': 'Reference level preview',
+        'override.referenceSource': 'Source: {source}',
+        'override.referenceAlias': '{source} (alias match)',
+        'override.referenceLevels': 'Reference levels: {levels}',
+        'override.referenceDraft': 'Draft levels: {levels}',
+        'override.referenceLimit': 'Maximum 16 levels. Skipped: {levels}',
+        'override.referenceFallbacks': 'Standard same-name values for blank mappings: {levels}',
+        'override.referenceStandardScope': 'Fills the draft for this model only. Check what your upstream supports. To use the same-name values, opt in to provider write and standard reasoning_effort.',
+        'override.referenceManualScope': 'Fills the draft for this model only. Same-name values are unavailable on this route. Consult its API documentation for request values.',
+        'override.referenceOldHost': 'This Host cannot protect existing provider mappings. Reference drafts can only be saved in this plugin.',
+        'override.referenceProviderScope': 'Writes to this model in the selected provider only. Check the upstream levels and values. The local draft can still be saved if some provider settings cannot be written.',
+        'override.referenceSafeguards': 'What is kept and how to undo',
+        'override.referencePreservation': 'Filling keeps draft levels, the default and manual values. Reference saves keep existing provider mappings and the default. To replace mappings, edit the model provider settings.',
+        'override.referenceRevert': 'To undo a provider change, edit the model in Model providers. “Use automatic” clears this plugin’s settings only.',
+        'override.cancelReference': 'Cancel fill',
+        'override.confirmReference': 'Fill draft',
+        'override.referenceApplied': 'Draft filled. Review it before saving.',
+        'override.referenceWireBlank': 'Keep existing value or use {value} if blank',
+        'override.referenceDisabled': 'Kept reasoning disabled in the provider settings.',
+        'override.referenceNonChat': 'This is not a chat route; reference reasoning was not written.',
+        'override.referencePreservedEfforts': 'Kept existing provider mappings for: {levels}',
+        'override.saveLocal': 'Save in this plugin',
+        'override.saveProvider': 'Save and write to provider',
+        'override.providerConfirmTitle': 'Confirm save and provider write',
+        'override.providerTarget': 'Write target: {provider} / {model}',
+        'override.providerContext': 'Context window (if writable): {value}',
+        'override.providerInput': 'Input modalities (if compatible): {value}',
+        'override.providerDisableReasoning': 'Requests disabling reasoning for this model.',
+        'override.providerMappings': 'Manually entered mappings (fill blanks only): {values}',
+        'override.providerOmit': 'omit upstream value',
+        'override.providerLocalDefault': 'Default level (local only): {value}',
+        'override.providerStandardEnable': 'Allows standard reasoning_effort for this model.',
+        'override.backToDraft': 'Back to draft',
+        'override.confirmProviderSave': 'Confirm save and write',
+        'tag.aliasReference': "Alias reference",
+        'tag.aliasReferenceTitle': "A unique public catalog alias supplied advisory metadata; it is not a route declaration.",
         'checker.provider': 'Checker provider',
         'checker.model': 'Checker model',
+        'checker.chooseProvider': 'Select provider',
+        'checker.chooseModel': 'Select model',
+        'checker.noRoute': 'No checker is available. Configure a model or use public catalogs only.',
+        'checker.noLegacyRoute': 'No checker is available. Configure a model first.',
+        'checker.chooseRoute': 'Select a checker provider and model to start.',
+        'checker.targetScope': 'Page filters do not limit which models are checked.',
+        'checker.advanced': 'Advanced options',
+        'checker.writeBackEnabled': 'Provider write-back on',
         'checker.start': 'Start',
         'checker.startTitle': 'Run a background verification sweep in the Host',
         'checker.cancel': 'Cancel',
         'checker.cancelTitle': 'Abort the running sweep',
-        'checker.writeBack': 'Also write into provider settings',
+        'checker.writeBack': 'Fill missing provider settings',
         'checker.writeBackTitle':
-          'On: the judged input / contextWindow / efforts are written into each provider entry (learned.json keeps only what cannot be mapped). Off: only this page and the snapshot update.',
+          'On: fill missing inputs and context for verified custom routes only. Existing settings and reasoning mappings are unchanged. Off: only update this page and the snapshot.',
         'checker.webSearch': 'Allow search and web-page reads',
         'checker.webSearchTitle': 'On by default. Let the checker search and read web pages; this may consume web-service quota and model tokens. Unavailable web access is reported as an error. When off, verification uses public catalogs and the checker’s existing knowledge.',
-        'checker.fullScan': 'Full search',
-        'checker.fullScanTitle': 'Off by default: skip models with an existing verification record. Turn on to recheck every eligible model for this run only; this may use more quota and does not enable web access.',
+        'checker.fullScan': 'Recheck existing models',
+        'checker.fullScanTitle': 'Recheck existing records for this run only. Checker modes may use more quota.',
         'checker.searchBackend.dsh-free-search': '{count} DSH Free Search calls',
         'checker.searchBackend.host-web': '{count} Host web search calls',
         'checker.allSkipped': 'No new models to verify · {skippedKnown} known skipped',
         'checker.searchBreakdown': 'Search breakdown: {breakdown}',
-        'checker.idle': 'not run yet',
-        'checker.running': 'running{phase} · {processed}/{total} processed · {valid} valid / {unknown} unknown / {failed} failed · {skippedKnown} known skipped · {searchCalls} searches / {fetchCalls} reads · {tokens} tokens spent',
-        'checker.finished': 'ended · {processed}/{total} processed · {valid} valid / {unknown} unknown / {failed} failed · {skippedKnown} known skipped · {searchCalls} searches / {fetchCalls} reads · {tokens} tokens spent',
-        'checker.progress': '{processed}/{total} processed · checker spent {tokens} tokens',
+        'checker.idle': 'Not run yet',
+        'checker.starting': 'Submitting…',
+        'checker.running': '{phase}',
+        'checker.finished': 'Finished',
+        'checker.progress': '{processed}/{total} processed',
+        'checker.progressLabel': 'Verification progress',
+        'checker.tokens': '{tokens} tokens',
         'checker.outcomes': '{valid} valid · {unknown} unknown · {failed} failed · {skippedKnown} known skipped',
         'checker.webCalls': '{searchCalls} searches · {fetchCalls} web-page reads',
         'checker.activeBatches': 'Active batches',
@@ -1720,15 +1882,15 @@ window.__ModuleLoader__.load({
         'checker.stage.fetch': 'Reading web pages',
         'checker.stage.writeBack': 'Writing settings',
         'checker.stage.flush': 'Saving snapshot',
-        'checker.errorBadge': '{count} failed batches',
-        'checker.errorTitle': 'Failed batches',
-        'checker.errorMore': '{count} more not shown',
+        'checker.errorBadge': '{count} errors',
+        'checker.errorTitle': 'Errors from this run',
+        'checker.errorDetails': 'Full error details ({count})',
         'checker.concurrency': 'Threads',
         'checker.concurrencyTitle':
           'How many checker requests may be in flight at once. Lower it if the relay rate-limits you, raise it on a fast link (max 8).',
         'checker.concurrencyValue': '{count}',
-        'checker.threads': '{count} in parallel',
         'checker.sourcesTitle': 'Public catalogs',
+        'checker.sourceSummary': '{complete}/{total} read',
         'checker.source.ok': 'read',
         'checker.source.empty': 'no match',
         'checker.source.http': 'HTTP error',
@@ -1737,22 +1899,34 @@ window.__ModuleLoader__.load({
         'checker.source.too-large': 'response too large',
         'checker.source.pending': 'pending',
         'checker.sourceModels': '{count}',
-        'checker.publicOnly': '{count} models were resolved from a public catalog alone (the checker had no answer).',
-        'checker.hostStale': 'The Host half does not support online verification yet; restart DSH.',
-        'checker.phase.public': ' (fetching public catalogs)',
-        'checker.phase.checker': ' (fetching public catalogs)',
-        'checker.phase.verifying': ' (verifying in batches)',
+        'checker.hostStale': 'Restart DSH to enable verification in the Host.',
+        'checker.catalogNeeded': 'New verification runs require the enriched model catalog. Refresh it and try again.',
+        'checker.writeBackScope': 'Only this run’s results can be written back. Recheck existing models to include earlier results.',
+        'checker.writeBackSkipped': '{count} known models were skipped and not written back.',
+        'checker.phase.listing': 'Reading model list',
+        'checker.phase.public': 'Reading public catalogs',
+        'checker.phase.checker': 'Checking models',
+        'checker.phase.verifying': 'Verifying in batches',
+        'checker.phase.cancelled': 'Stopping',
+        'checker.cancelled': 'Cancelled',
+        'checker.stopping': 'Stopping…',
+        'checker.pendingWrite': 'A provider write is still pending ({target}). Stopping verification does not undo this write.',
+        'checker.lateWriteApplied': 'The delayed provider write was applied ({target}).',
+        'checker.lateWriteNotApplied': 'The delayed provider write was not confirmed ({target}).',
+        'checker.runFailed': 'Verification failed',
+        'checker.source.cancelled': 'cancelled',
+        'checker.sourceAttempts': '{count} attempts',
         'source.snapshot': 'verified',
-        'page.applyInput': 'Let the composer admit images shown as supported',
+        'page.applyInput': 'Supplement image input for eligible relay models',
         'page.applyInputShort':
-          'Adds image input to multimodal relay models; off means the Provider input declaration only',
+          'Only applies to relay chat models with reliable vision evidence and no explicit input declaration. A label does not guarantee image admission.',
         'page.applyInputHint':
-          'When on, relay chat models labelled Multimodal advertise image input to the request path; when off, only the Provider input declaration counts. Relay (pi-ai) routes only — no configuration file is modified. Turn it off if a particular upstream still rejects images.',
+          'When on, the plugin can supply image input for eligible relay (pi-ai) chat models with reliable vision evidence and no explicit input declaration. Display labels do not guarantee request admission or upstream support. Turning this off stops supplementation; no provider settings are changed.',
         'page.kindLegend':
           'Kind colours: image blue · video green · embedding orange · audio purple · rerank red · moderation rose · translation grey. “Official correction” means vendor documentation overrides a wrong catalog row.',
         'page.searchPlaceholder': 'Search name or ID',
         'page.capability.multimodal': 'Multimodal',
-        'page.capability.multimodalTitle': 'Only models that accept image input',
+        'page.capability.multimodalTitle': 'Only models with evidence of image input in the catalog',
         'page.capability.reasoning': 'Reasoning',
         'page.capability.reasoningTitle': 'Only models that publish reasoning support',
         'page.contextLabel': 'Context at least',
@@ -1785,7 +1959,14 @@ window.__ModuleLoader__.load({
         'tag.reasoning': 'Reasoning',
         'tag.noReasoning': 'No reasoning',
         'tag.reasoningUnknown': 'Reasoning unknown',
-        'tag.effort': 'Effort',
+        'tag.effort': 'Selectable effort',
+        'tag.effortReference': 'Reference levels',
+        'tag.effortPublicReference': 'Catalog reference levels',
+        'tag.reasoningReference': 'Reasoning (reference)',
+        'tag.noReasoningReference': 'Reference: no reasoning',
+        'tag.effortReferenceTitle': 'Capability reference only (source: {source}); does not change the menu or requests.',
+        'tag.effortWireOff': 'reasoning_effort disabled',
+        'tag.effortWireOffTitle': 'This OpenAI Completions route explicitly disables reasoning_effort. Enable it in provider compatibility settings only if the upstream accepts this field. Other protocols may use different fields.',
         'tag.context': 'Context',
         'tag.unknown': 'unknown',
         'tag.multimodal': 'Multimodal',
@@ -1824,13 +2005,13 @@ window.__ModuleLoader__.load({
         'source.official': 'vendor documentation',
         'source.manual': 'manual override',
         'source.unknown': 'unknown',
-        'effort.off': 'Off',
-        'effort.minimal': 'Minimal',
-        'effort.low': 'Low',
-        'effort.medium': 'Medium',
-        'effort.high': 'High',
-        'effort.max': 'Max',
-        'effort.xhigh': 'XHigh',
+        'effort.off': 'off',
+        'effort.minimal': 'minimal',
+        'effort.low': 'low',
+        'effort.medium': 'medium',
+        'effort.high': 'high',
+        'effort.max': 'max',
+        'effort.xhigh': 'xhigh',
         'tag.manual': 'Manual',
         'tag.manualTitle':
           'You set this capability by hand; it outranks the adapter, the relay and the built-in catalog.',
@@ -1849,8 +2030,7 @@ window.__ModuleLoader__.load({
         'override.efforts': 'Effort levels',
         'override.defaultEffort': 'Default level',
         'override.defaultEffortAuto': 'Unspecified',
-        'override.effortHint':
-          '“No reasoning” hides effort levels; checked levels are shown as this model’s available effort levels.',
+        'override.effortHint': 'Local levels are for reference. The adapter controls selectable levels; the local default does not change actual requests.',
         'override.save': 'Save',
         'override.saving': 'Saving…',
         'override.reset': 'Use automatic',
@@ -1859,8 +2039,11 @@ window.__ModuleLoader__.load({
         'override.unavailable':
           'The Host half does not support manual capabilities yet; restart DSH to enable it.',
         'override.provider': 'Also write to the model provider settings',
-        'override.providerHint':
-          'When checked, input modalities, context window and effort levels are written into this model’s entry under Settings → Model providers, so other views see them too. Fields that only exist here (kind, default level, an off-only ladder) stay in this plugin.',
+        'override.listNotReady': 'Waiting for the override list',
+        'override.listFailed': 'Could not synchronize the override list: {message}',
+        'override.retryList': 'Retry list',
+        'override.conflict': 'This model’s override changed. Close and reopen the editor, then review the latest values before editing again.',
+        'override.providerHint': 'Saved in this plugin by default. Opt in to write compatible inputs, context and known upstream mappings; other settings stay local.',
         'override.providerWritten': 'Also written to the provider settings: {fields}',
         'override.providerSkipped': 'Saved in this plugin; the provider settings were not written ({reason}).',
         'override.resetTitle':
@@ -1876,6 +2059,31 @@ window.__ModuleLoader__.load({
         'override.reason.describe-failed': 'the settings document could not be read',
         'override.reason.settings-failed': 'the settings service rejected the write',
         'override.reason.skipped': 'not requested',
+        'override.reason.local-only': 'no fields could be safely written',
+        'override.reason.revision-unavailable': 'no usable settings revision; the write was skipped',
+        'override.reason.config-provenance-unavailable': 'settings ownership cannot be confirmed',
+        'override.reason.expression-backed': 'the field is backed by a configuration expression',
+        'override.reason.settings-unverified': 'the settings write could not be verified; the local override was retained',
+        'override.reason.provider-unverified': 'the route’s provider settings owner could not be verified',
+        'override.reason.native-catalog': 'this model comes from the built-in catalog; there is no model entry to write',
+        'override.reason.protected': 'the provider already declares these fields; nothing was overwritten',
+        'override.reason.write-pending': 'a previous write has not settled yet, so this one was skipped',
+        'override.field.kind': 'model kind',
+        'override.field.defaultEffort': 'default level',
+        'override.localOnly': 'Kept in this plugin only: {fields}',
+        'override.unresolvedEfforts': 'No usable upstream values for: {levels}',
+        'override.routeDefaultConflict': 'Reasoning was not written because it conflicts with the provider default level.',
+        'override.inheritedLadderConflict': 'Reasoning was not written to protect inherited catalog mappings.',
+        'override.wireTitle': 'Upstream request values',
+        'override.wireHint': 'Follow the route’s API documentation. Blank keeps existing explicit values, including unselected levels. The protocol and compatibility settings determine what is sent.',
+        'override.wireValue': 'Upstream value for {level}',
+        'override.wireKeep': 'Blank = keep existing value',
+        'override.standardWire': 'Send standard reasoning_effort for this model',
+        'override.standardWireUnavailable': 'Same-name mappings require an explicit model entry using standard OpenAI Completions thinking. See the provider docs for other protocols.',
+        'override.standardWireHint': 'Enable only if the upstream accepts reasoning_effort and all values this model sends, including retained Provider mappings. Unmapped non-off levels use the same identifiers. Applies only to this model.',
+        'override.standardFormatConflict': 'This model does not use the standard OpenAI Completions thinking format; reasoning_effort was not enabled.',
+        'override.field.supportsReasoningEffort': 'allow reasoning_effort',
+        'override.wireOff': 'Off: use omission semantics (protocol-dependent)',
         'page.manualNote':
           'A “Manual” tag means you set that capability on this model; it outranks the adapter, the relay and the built-in catalog.',
         'correction.glm-5.3-text-only':
@@ -2043,11 +2251,6 @@ window.__ModuleLoader__.load({
       return label === key ? id : label
     }
 
-    /** Identity of a manual override entry; same shape as the row key. */
-    function overrideKeyOf(entry) {
-      return entry ? keyOf(entry.provider, entry.model) : null
-    }
-
     /** Model fields whose provenance can be manual. */
     function manualFieldsOf(model) {
       const sources = model && model.sources ? model.sources : {}
@@ -2079,7 +2282,6 @@ window.__ModuleLoader__.load({
     exports.OVERRIDE_MODALITIES = OVERRIDE_MODALITIES
     exports.OVERRIDE_EFFORTS = OVERRIDE_EFFORTS
     exports.effortLabel = effortLabel
-    exports.overrideKeyOf = overrideKeyOf
     exports.manualFieldsOf = manualFieldsOf
   })
 
@@ -2122,22 +2324,46 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const { modalityLabel, effortLabel, OVERRIDE_MODALITIES, OVERRIDE_EFFORTS } = require("format")
+
+    const isStandardChoice = (id) => id !== 'off' && OVERRIDE_EFFORTS.includes(id)
+
     function providerWriteNote(result, t) {
       if (result === null || typeof result !== 'object') return null
+      const fieldLabels = (fields) => fields.map((field) => {
+        const key = 'override.field.' + field
+        const label = t(key)
+        return label === key ? field : label
+      }).join(' / ')
+      const messages = []
       if (result.written === true) {
-        const fields = (Array.isArray(result.fields) ? result.fields : [])
-          .map((field) => t('override.field.' + field))
-          .join('、')
-        return t('override.providerWritten', { fields })
+        messages.push(t('override.providerWritten', { fields: fieldLabels(Array.isArray(result.fields) ? result.fields : []) }))
+      } else if (result.reason && result.reason !== 'nothing' && result.reason !== 'skipped') {
+        const key = 'override.reason.' + result.reason
+        const label = t(key)
+        messages.push(t('override.providerSkipped', { reason: label === key ? result.reason : label }))
       }
-      if (result.reason === 'nothing' || result.reason === 'skipped') return null
-      const label = t('override.reason.' + String(result.reason))
-      return t('override.providerSkipped', {
-        reason: label === 'override.reason.' + String(result.reason) ? String(result.reason) : label,
-      })
+      if (result.localOnly?.length) messages.push(t('override.localOnly', { fields: fieldLabels(result.localOnly) }))
+      if (result.unresolvedEfforts?.length) messages.push(t('override.unresolvedEfforts', {
+        levels: result.unresolvedEfforts.map((id) => effortLabel(id, t)).join(' / '),
+      }))
+      if (result.reasoningConflict === 'route-default') messages.push(t('override.routeDefaultConflict'))
+      if (result.reasoningConflict === 'inherited-ladder') messages.push(t('override.inheritedLadderConflict'))
+      if (result.reasoningConflict === 'standard-format') messages.push(t('override.standardFormatConflict'))
+      if (result.reasoningConflict === 'reference-disabled') messages.push(t('override.referenceDisabled'))
+      if (result.reasoningConflict === 'reference-nonchat') messages.push(t('override.referenceNonChat'))
+      if (Array.isArray(result.protectedEfforts) && result.protectedEfforts.length > 0) {
+        messages.push(t('override.referencePreservedEfforts', {
+          levels: result.protectedEfforts.map((id) => effortLabel(id, t)).join(' / '),
+        }))
+      }
+      return messages.length > 0 ? messages.join(' · ') : null
     }
 
-    function ModelOverrideEditor({ entry, name, t, overrides, onClose, onSaved }) {
+    function ModelOverrideEditor({
+      entry, revision, hasOverride, blocked, stale, name, t, overrides, onClose, onSaved,
+      canMap = false, hasStandard = false, canUseStandard = false, canReferencePrefill = false,
+      referenceEfforts = [], referenceSource = '', referenceAlias = false,
+    }) {
       const [kind, setKind] = React.useState(entry.kind || '')
       const [context, setContext] = React.useState(
         entry.contextWindow === undefined ? '' : String(entry.contextWindow),
@@ -2154,7 +2380,38 @@ window.__ModuleLoader__.load({
       )
       const [busy, setBusy] = React.useState(false)
       const [error, setError] = React.useState(null)
-      const [applyToProvider, setApplyToProvider] = React.useState(true)
+      const [applyToProvider, setApplyToProvider] = React.useState(false)
+      const [wireValues, setWireValues] = React.useState({})
+      const [omitOff, setOmitOff] = React.useState(false)
+      const [standardEffort, setStandardEffort] = React.useState(false)
+      const [referenceApplied, setReferenceApplied] = React.useState(false)
+      const [confirmation, setConfirmation] = React.useState(null)
+      const referenceButton = React.useRef(null)
+      const saveButton = React.useRef(null)
+      const confirmationPreview = React.useRef(null)
+      const contextInput = React.useRef(null)
+      const returnFocus = React.useRef(null)
+      const referencePanel = React.useId()
+      const providerPanel = React.useId()
+
+      React.useEffect(() => {
+        if (confirmation !== null) confirmationPreview.current?.focus()
+        else if (returnFocus.current !== null) {
+          returnFocus.current.current?.focus()
+          returnFocus.current = null
+        }
+      }, [confirmation])
+
+      const closeConfirmation = () => {
+        returnFocus.current = confirmation === 'reference' ? referenceButton : saveButton
+        setConfirmation(null)
+      }
+      const cancelOnEscape = (event) => {
+        if (event.key !== 'Escape' || confirmation === null) return
+        event.preventDefault()
+        event.stopPropagation()
+        closeConfirmation()
+      }
 
       const toggleIn = (setter, id) => {
         setter((previous) => {
@@ -2165,41 +2422,83 @@ window.__ModuleLoader__.load({
         })
       }
 
+      const locked = busy || blocked || stale
+      const editingLocked = locked || confirmation !== null
       const fail = (failure) => {
         setBusy(false)
-        setError(
-          t('override.failed', {
-            message: String(failure && failure.message ? failure.message : failure),
-          }),
-        )
+        if (failure?.status === 409) {
+          setError(t('override.conflict'))
+          void overrides.load()
+        } else {
+          setError(t('override.failed', { message: String(failure?.message ?? failure) }))
+        }
       }
 
-      const save = () => {
+      const availableEfforts = [...new Set([...OVERRIDE_EFFORTS, ...efforts])]
+      // Keep the order of a hand-authored ladder. A standalone default must remain selected when filling a ladder.
+      const selectedEfforts = [...efforts]
+      const suggested = [...new Set((Array.isArray(referenceEfforts) ? referenceEfforts : []).map((item) => item?.id)
+        .filter((id) => typeof id === 'string' && /^[a-z0-9][a-z0-9._-]{0,31}$/.test(id)))]
+      const standaloneDefault = selectedEfforts.length === 0 && defaultEffort ? [defaultEffort] : []
+      const referenceDraft = [...new Set([...selectedEfforts, ...standaloneDefault, ...suggested])].slice(0, 16)
+      const includedReference = suggested.filter((id) => referenceDraft.includes(id))
+      const skippedReference = suggested.filter((id) => !referenceDraft.includes(id))
+      const levelsOf = (ids) => ids.map((id) => effortLabel(id, t)).join(' / ')
+      const providerAllowed = !referenceApplied || canReferencePrefill
+      const providerRequested = applyToProvider && providerAllowed
+      const canSuggestStandard = canMap && hasStandard && canUseStandard && canReferencePrefill
+      const hasStandardChoices = !noReasoning && selectedEfforts.some(isStandardChoice)
+      const standardAvailable = hasStandard && canUseStandard && hasStandardChoices
+      const fallbackFor = (ids) => ids.filter((id) => isStandardChoice(id) && !wireValues[id]?.trim())
+      const mappings = Object.fromEntries(selectedEfforts.filter((id) => OVERRIDE_EFFORTS.includes(id)).flatMap((id) => {
+        if (id === 'off' && omitOff) return [[id, null]]
+        const value = wireValues[id]?.trim()
+        return value ? [[id, value]] : []
+      }))
+
+      const applyReference = () => {
+        if (locked || noReasoning || confirmation !== 'reference' || includedReference.length === 0) return
+        setEfforts(new Set(referenceDraft))
+        setReferenceApplied(true)
+        if (!canReferencePrefill) setApplyToProvider(false)
+        closeConfirmation()
+      }
+
+      const save = (confirmed = false) => {
+        if (locked || (confirmation !== null && !confirmed)) return
+        const contextWindow = context.trim() === '' ? undefined : Number(context)
+        if (contextWindow !== undefined && (!Number.isSafeInteger(contextWindow) || contextWindow <= 0)) {
+          setError(t('override.contextInvalid'))
+          contextInput.current?.focus()
+          return
+        }
+        if (referenceApplied && providerRequested && !confirmed) {
+          setError(null)
+          setConfirmation('provider')
+          return
+        }
         const payload = { provider: entry.provider, model: entry.model }
         if (kind !== '') payload.kind = kind
-        if (context.trim() !== '') {
-          const value = Number(context)
-          if (!Number.isFinite(value) || value <= 0) {
-            setError(t('override.contextInvalid'))
-            return
-          }
-          payload.contextWindow = Math.round(value)
-        }
+        if (contextWindow !== undefined) payload.contextWindow = contextWindow
         if (input.size > 0) {
-          payload.input = OVERRIDE_MODALITIES.filter((id) => input.has(id))
+          payload.input = [...input]
         }
         if (noReasoning) {
           payload.reasoningSupported = false
         } else if (efforts.size > 0) {
-          payload.efforts = OVERRIDE_EFFORTS.filter((id) => efforts.has(id)).map((id) => ({ id }))
-          if (defaultEffort !== '' && efforts.has(defaultEffort)) {
-            payload.defaultEffort = defaultEffort
-          }
+          payload.efforts = selectedEfforts.map((id) => ({ id }))
+          if (providerRequested && canMap && Object.keys(mappings).length > 0) payload.reasoningEffortMappings = mappings
         }
-        payload.applyToProvider = applyToProvider
+        if (!noReasoning && defaultEffort !== '' && (efforts.size === 0 || efforts.has(defaultEffort))) {
+          payload.defaultEffort = defaultEffort
+        }
+        payload.applyToProvider = providerRequested
+        if (providerRequested && referenceApplied) payload.referencePrefill = true
+        if (providerRequested && standardAvailable && standardEffort) payload.standardEffort = true
+        setConfirmation(null)
         setBusy(true)
         setError(null)
-        Promise.resolve(overrides.save(payload)).then(
+        overrides.save(payload, revision).then(
           (result) => {
             setBusy(false)
             if (typeof onSaved === 'function') onSaved(result)
@@ -2209,12 +2508,13 @@ window.__ModuleLoader__.load({
       }
 
       const resetToAuto = () => {
+        if (locked || !hasOverride) return
         setBusy(true)
         setError(null)
-        Promise.resolve(overrides.remove(entry.provider, entry.model)).then(
-          () => {
+        overrides.remove(entry.provider, entry.model, revision).then(
+          (result) => {
             setBusy(false)
-            if (typeof onSaved === 'function') onSaved()
+            if (typeof onSaved === 'function') onSaved(result)
           },
           fail,
         )
@@ -2226,13 +2526,27 @@ window.__ModuleLoader__.load({
         ),
       )
       const defaultOptions = [['', t('override.defaultEffortAuto')]].concat(
-        OVERRIDE_EFFORTS.filter((id) => efforts.has(id)).map((id) => [id, effortLabel(id, t)]),
+        (efforts.size === 0 && defaultEffort !== '' ? [defaultEffort] : selectedEfforts).map((id) => [id, effortLabel(id, t)]),
       )
-      const selectedDefault = efforts.has(defaultEffort) ? defaultEffort : ''
+      const selectedDefault = efforts.size === 0 || efforts.has(defaultEffort) ? defaultEffort : ''
+      const referenceFallbacks = canSuggestStandard ? fallbackFor(referenceDraft) : []
+      const providerFallbacks = standardAvailable && standardEffort ? fallbackFor(selectedEfforts) : []
+      const sourceLabel = referenceAlias
+        ? t('override.referenceAlias', { source: referenceSource || t('source.unknown') })
+        : referenceSource || t('source.unknown')
+      const saveLabel = t(providerRequested ? 'override.saveProvider' : 'override.saveLocal')
+      const caution = (summary) => h('div', { className: 'mvp_banner mvp_banner--warn' },
+        h('div', null, t(summary)),
+        h('details', null,
+          h('summary', null, t('override.referenceSafeguards')),
+          h('div', null, t('override.referencePreservation')),
+          h('div', null, t('override.referenceRevert')),
+        ),
+      )
 
       return h(
         'div',
-        { className: 'mvp_editor' },
+        { className: 'mvp_editor', onKeyDown: cancelOnEscape },
         h(
           'div',
           { className: 'mvp_editorHead' },
@@ -2251,6 +2565,7 @@ window.__ModuleLoader__.load({
               {
                 className: 'mvp_select',
                 value: kind,
+                disabled: editingLocked,
                 'aria-label': t('override.kind'),
                 onChange: (event) => setKind(event.target.value),
               },
@@ -2263,10 +2578,12 @@ window.__ModuleLoader__.load({
             h('span', { className: 'mvp_fieldLabel' }, t('override.context')),
             h('input', {
               className: 'mvp_number',
+              ref: contextInput,
               type: 'number',
               min: '1',
               step: '1',
               value: context,
+              disabled: editingLocked,
               placeholder: t('override.contextPlaceholder'),
               'aria-label': t('override.context'),
               onInput: (event) => setContext(event.target.value),
@@ -2287,7 +2604,7 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'mvp_chip',
                     'aria-pressed': input.has(id),
-                    disabled: busy,
+                    disabled: editingLocked,
                     onClick: () => toggleIn(setInput, id),
                   },
                   modalityLabel(id, t),
@@ -2299,6 +2616,31 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'mvp_field mvp_field--wide' },
             h('span', { className: 'mvp_fieldLabel' }, t('override.efforts')),
+            suggested.length > 0 ? h('div', null,
+              h('button', {
+                ref: referenceButton,
+                type: 'button', className: 'mvp_button mvp_button--quiet', disabled: editingLocked || noReasoning,
+                'aria-expanded': confirmation === 'reference',
+                'aria-controls': referencePanel,
+                onClick: () => setConfirmation('reference'),
+                title: t('override.useReferenceTitle'),
+              }, t('override.useReference')),
+              h('div', { id: referencePanel, hidden: confirmation !== 'reference' }, confirmation === 'reference' ? h(
+                'div', { role: 'group', 'aria-label': t('override.referencePreview') },
+                h('div', { ref: confirmationPreview, tabIndex: -1, className: 'mvp_editorTitle' }, t('override.referencePreview')),
+                h('div', { className: 'mvp_fieldLabel' }, t('override.referenceSource', { source: sourceLabel })),
+                h('div', null, t('override.referenceLevels', { levels: levelsOf(suggested) })),
+                h('div', null, t('override.referenceDraft', { levels: levelsOf(referenceDraft) })),
+                skippedReference.length > 0 ? h('div', null, t('override.referenceLimit', { levels: levelsOf(skippedReference) })) : null,
+                referenceFallbacks.length > 0 ? h('div', null, t('override.referenceFallbacks', { levels: referenceFallbacks.join(' / ') })) : null,
+                caution(!canReferencePrefill ? 'override.referenceOldHost' : canSuggestStandard ? 'override.referenceStandardScope' : 'override.referenceManualScope'),
+                h('div', { className: 'mvp_editorActions' },
+                  h('button', { type: 'button', className: 'mvp_button', onClick: closeConfirmation }, t('override.cancelReference')),
+                  h('button', { type: 'button', className: 'mvp_button mvp_button--accent', disabled: locked || noReasoning || includedReference.length === 0, onClick: applyReference }, t('override.confirmReference')),
+                ),
+              ) : null),
+              h('div', { role: 'status', className: 'mvp_editorNote' }, referenceApplied ? t('override.referenceApplied') : ''),
+            ) : null,
             h(
               'div',
               { className: 'mvp_chips' },
@@ -2308,12 +2650,12 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'mvp_chip',
                   'aria-pressed': noReasoning,
-                  disabled: busy,
-                  onClick: () => setNoReasoning((value) => !value),
+                  disabled: editingLocked,
+                  onClick: () => { setNoReasoning((value) => !value); setStandardEffort(false) },
                 },
                 t('tag.noReasoning'),
               ),
-              OVERRIDE_EFFORTS.map((id) =>
+              availableEfforts.map((id) =>
                 h(
                   'button',
                   {
@@ -2321,15 +2663,15 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'mvp_chip',
                     'aria-pressed': !noReasoning && efforts.has(id),
-                    disabled: busy || noReasoning,
-                    onClick: () => toggleIn(setEfforts, id),
+                    disabled: editingLocked || noReasoning,
+                    onClick: () => { toggleIn(setEfforts, id); setStandardEffort(false) },
                   },
                   effortLabel(id, t),
                 ),
               ),
             ),
           ),
-          !noReasoning && efforts.size > 0
+          !noReasoning && (efforts.size > 0 || defaultEffort !== '')
             ? h(
                 'label',
                 { className: 'mvp_field' },
@@ -2339,11 +2681,42 @@ window.__ModuleLoader__.load({
                   {
                     className: 'mvp_select',
                     value: selectedDefault,
+                    disabled: editingLocked,
                     'aria-label': t('override.defaultEffort'),
                     onChange: (event) => setDefaultEffort(event.target.value),
                   },
                   defaultOptions.map(([value, label]) => h('option', { key: value, value }, label)),
                 ),
+              )
+            : null,
+          canMap && (providerRequested || (referenceApplied && canSuggestStandard)) && !noReasoning && selectedEfforts.some((id) => OVERRIDE_EFFORTS.includes(id))
+            ? h(
+                'div',
+                { className: 'mvp_field mvp_field--wide' },
+                h('div', { className: 'mvp_fieldLabel' }, t('override.wireTitle')),
+                h('div', { className: 'mvp_editorNote' }, t('override.wireHint')),
+                h('div', { className: 'mvp_chips' }, selectedEfforts.filter((id) => OVERRIDE_EFFORTS.includes(id)).map((id) => {
+                  const label = t('override.wireValue', { level: effortLabel(id, t) })
+                  return h('label', { className: 'mvp_field', key: id },
+                    h('span', { className: 'mvp_fieldLabel' }, label),
+                    h('input', {
+                      className: 'mvp_number', type: 'text', 'aria-label': label,
+                      value: wireValues[id] ?? '', maxLength: 128,
+                      placeholder: referenceApplied && canSuggestStandard && isStandardChoice(id)
+                        ? t('override.referenceWireBlank', { value: id }) : t('override.wireKeep'),
+                      disabled: editingLocked || !providerRequested || (id === 'off' && omitOff),
+                      onChange: (event) => {
+                        const value = event.target.value
+                        setWireValues((previous) => ({ ...previous, [id]: value }))
+                        if (!referenceApplied) setStandardEffort(false)
+                      },
+                    }),
+                  )
+                })),
+                efforts.has('off') ? h('label', { className: 'mvp_check' },
+                  h('input', { type: 'checkbox', checked: omitOff, disabled: editingLocked || !providerRequested, onChange: (event) => { setOmitOff(event.target.checked); if (!referenceApplied) setStandardEffort(false) } }),
+                  t('override.wireOff'),
+                ) : null,
               )
             : null,
           h(
@@ -2354,20 +2727,49 @@ window.__ModuleLoader__.load({
               { className: 'mvp_check' },
               h('input', {
                 type: 'checkbox',
-                checked: applyToProvider,
-                disabled: busy,
-                onChange: (event) => setApplyToProvider(event.target.checked),
+                checked: providerRequested,
+                disabled: editingLocked || !providerAllowed,
+                onChange: (event) => { setApplyToProvider(event.target.checked); setStandardEffort(false) },
               }),
               h('span', null, t('override.provider')),
             ),
             h('div', { className: 'mvp_editorNote' }, t('override.providerHint')),
+            !providerAllowed ? h('div', { className: 'mvp_editorNote' }, t('override.referenceOldHost')) : null,
+            standardAvailable && providerRequested ? h('label', { className: 'mvp_check' },
+              h('input', { type: 'checkbox', checked: standardEffort, disabled: editingLocked,
+                onChange: (event) => setStandardEffort(event.target.checked) }),
+              h('span', null, t('override.standardWire')),
+            ) : null,
+            hasStandard && hasStandardChoices && providerRequested
+              ? h('div', { className: 'mvp_editorNote' }, t(standardAvailable ? 'override.standardWireHint' : 'override.standardWireUnavailable')) : null,
           ),
         ),
-        error !== null ? h('div', { className: 'mvp_editorError', role: 'alert' }, error) : null,
+        stale || error !== null
+          ? h('div', { className: 'mvp_editorError', role: 'alert' }, stale ? t('override.conflict') : error) : null,
         h(
           'div',
           { className: 'mvp_editorFooter' },
           h('div', { className: 'mvp_editorNote' }, t('override.effortHint')),
+          h('div', { id: providerPanel, className: 'mvp_field--wide', hidden: confirmation !== 'provider' }, confirmation === 'provider' ? h(
+            'div', { role: 'group', 'aria-label': t('override.providerConfirmTitle') },
+            h('div', { ref: confirmationPreview, tabIndex: -1, className: 'mvp_editorTitle' }, t('override.providerConfirmTitle')),
+            h('div', null, t('override.providerTarget', { provider: entry.provider, model: entry.model })),
+            context.trim() !== '' ? h('div', null, t('override.providerContext', { value: Number(context) })) : null,
+            input.size > 0 ? h('div', null, t('override.providerInput', { value: [...input].map((id) => modalityLabel(id, t)).join(' / ') })) : null,
+            !noReasoning && selectedEfforts.length > 0 ? h('div', null, t('override.referenceDraft', { levels: levelsOf(selectedEfforts) })) : null,
+            noReasoning ? h('div', null, t('override.providerDisableReasoning')) : null,
+            !noReasoning && canMap && Object.keys(mappings).length > 0 ? h('div', null, t('override.providerMappings', {
+              values: Object.entries(mappings).map(([id, wire]) => `${effortLabel(id, t)} → ${wire ?? t('override.providerOmit')}`).join(' / '),
+            })) : null,
+            !noReasoning && selectedDefault !== '' ? h('div', null, t('override.providerLocalDefault', { value: effortLabel(selectedDefault, t) })) : null,
+            providerFallbacks.length > 0 ? h('div', null, t('override.referenceFallbacks', { levels: providerFallbacks.join(' / ') })) : null,
+            standardAvailable && standardEffort ? h('div', null, t('override.providerStandardEnable')) : null,
+            caution('override.referenceProviderScope'),
+            h('div', { className: 'mvp_editorActions' },
+              h('button', { type: 'button', className: 'mvp_button', onClick: closeConfirmation }, t('override.backToDraft')),
+              h('button', { type: 'button', className: 'mvp_button mvp_button--accent', disabled: locked || !providerRequested, onClick: () => save(true) }, t('override.confirmProviderSave')),
+            ),
+          ) : null),
           h(
             'div',
             { className: 'mvp_editorActions' },
@@ -2376,7 +2778,7 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 className: 'mvp_button',
-                disabled: busy,
+                disabled: editingLocked || !hasOverride,
                 title: t('override.resetTitle'),
                 onClick: resetToAuto,
               },
@@ -2384,7 +2786,7 @@ window.__ModuleLoader__.load({
             ),
             h(
               'button',
-              { type: 'button', className: 'mvp_button', disabled: busy, onClick: onClose },
+              { type: 'button', className: 'mvp_button', disabled: busy || confirmation !== null, onClick: onClose },
               t('override.cancel'),
             ),
             h(
@@ -2392,10 +2794,13 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 className: 'mvp_button mvp_button--accent',
-                disabled: busy,
-                onClick: save,
+                ref: saveButton,
+                disabled: editingLocked,
+                'aria-expanded': referenceApplied && providerRequested ? confirmation === 'provider' : undefined,
+                'aria-controls': referenceApplied && providerRequested ? providerPanel : undefined,
+                onClick: () => save(),
               },
-              t(busy ? 'override.saving' : 'override.save'),
+              busy ? t('override.saving') : saveLabel,
             ),
           ),
         ),
@@ -2488,7 +2893,7 @@ window.__ModuleLoader__.load({
           if (multimodalOnly && !(Array.isArray(model.inputModalities) && model.inputModalities.includes('image'))) {
             continue
           }
-          if (reasoningOnly && model.reasoningSupported !== true) continue
+          if (reasoningOnly && model.reasoningSupported !== true && !(model.requestReasoning?.efforts?.length > 0)) continue
           if (minContext > 0 && !(Number.isFinite(model.contextWindow) && model.contextWindow >= minContext)) {
             continue
           }
@@ -2589,7 +2994,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const { FIELD } = require("constants")
-    const { keyOf, kindOf, isGenerationKind, providerLabel, countModels, readCollapsedGroups, persistCollapsedGroups, overrideKeyOf } = require("format")
+    const { keyOf, kindOf, isGenerationKind, providerLabel, countModels, sourceOf, sourceLabel, readCollapsedGroups, persistCollapsedGroups } = require("format")
+    const { overrideIdentity } = require("catalog-store")
     const { computeFilteredGroups, countKinds, probeOf } = require("pure")
     const { capabilityTags, tagClassOf } = require("tags")
     const { ModelOverrideEditor, providerWriteNote } = require("override-editor")
@@ -2637,6 +3043,15 @@ window.__ModuleLoader__.load({
         const [aboutOpen, setAboutOpen] = React.useState(readAboutOpen)
         const [editing, setEditing] = React.useState(null)
         const [providerNote, setProviderNote] = React.useState(null)
+        const editTrigger = React.useRef(null)
+
+        const closeEditor = () => setEditing(null)
+        React.useEffect(() => {
+          if (editing === null && editTrigger.current !== null) {
+            editTrigger.current.focus()
+            editTrigger.current = null
+          }
+        }, [editing])
 
         React.useEffect(() => {
           catalog.load()
@@ -2647,12 +3062,17 @@ window.__ModuleLoader__.load({
         const catalogMeta = state.learned && typeof state.learned === 'object' ? state.learned : null
         const hostFeatures =
           catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
-        const canEdit = state.source === 'host' && hostFeatures.includes('overrides')
-        const canVerify = state.source === 'host' && hostFeatures.includes('verifyWeb')
-        const overrideEntries = new Map()
-        for (const entry of overrideState.entries) {
-          overrideEntries.set(overrideKeyOf(entry), entry)
-        }
+        const supportsOverrides = state.source === 'host' && hostFeatures.includes('overrides')
+        const overridesReady = overrideState.status === 'ready' && overrideState.available === true
+        const canOpenEditor = state.status === 'ready' && supportsOverrides && overridesReady && !overrideState.pending && !overrideState.refreshing
+        const hostFeaturesKnown = state.source === 'host' && Array.isArray(catalogMeta?.features)
+        const canSetSourceMode = hostFeatures.includes('verifySourceModes')
+        const supportsVerify = canSetSourceMode || hostFeatures.includes('verifyWeb')
+        const canVerify = hostFeaturesKnown && state.status === 'ready' && supportsVerify
+        const verifyState = verify.getSnapshot()
+        const observeVerify = !hostFeaturesKnown || hostFeatures.includes('verify') || supportsVerify ||
+          verifyState.snapshot?.state?.running === true || verifyState.pending
+        const overrideEntries = new Map(overrideState.entries.map((entry) => [overrideIdentity(entry.provider, entry.model), entry]))
 
         const writable = snapshot.writable !== false
         const groups = state.groups
@@ -2741,8 +3161,9 @@ window.__ModuleLoader__.load({
         // A hard reload may supersede a soft refresh that is still running;
         // catalog.load() gives it a new run and discards the older result.
         const reloadCatalog = () => {
-          if (busy || reloading || refreshing) return
-          runCatalogAction(() => catalog.reload(), setReloading)
+          if (busy || reloading) return
+          setRefreshing(false)
+          runCatalogAction(() => { void overrides.load(); return catalog.reload() }, setReloading)
         }
 
         const toggleGroupCollapsed = (id) => {
@@ -2860,6 +3281,9 @@ window.__ModuleLoader__.load({
                 ? null
                 : models.map((model) => {
                   const rowKey = keyOf(group.id, model.id)
+                  const overrideId = overrideIdentity(group.id, model.id)
+                  const currentRevision = overrideState.revisions?.get(overrideId) ?? null
+                  const isEditing = editing?.id === overrideId
                   const shownModel = !hidden.has(rowKey)
                   const tags = capabilityTags(model, t)
                   const kind = kindOf(model)
@@ -2908,17 +3332,24 @@ window.__ModuleLoader__.load({
                     h(
                       'div',
                       { className: 'mvp_rowActions' },
-                      canEdit
+                      supportsOverrides && overrideState.available !== false
                         ? h(
                             'button',
                             {
                               type: 'button',
                               className: 'mvp_button mvp_button--quiet mvp_editButton',
-                              'aria-pressed': editing === rowKey,
+                              'aria-pressed': isEditing,
                               'aria-label': t('row.edit') + ': ' + model.name,
-                              title: t('row.editTitle'),
-                              disabled: busy,
-                              onClick: () => setEditing(editing === rowKey ? null : rowKey),
+                              title: t(canOpenEditor || isEditing ? 'row.editTitle' : 'override.listNotReady'),
+                              disabled: busy || overrideState.pending || (!canOpenEditor && !isEditing),
+                              onClick: (event) => {
+                                if (isEditing) closeEditor()
+                                else if (canOpenEditor) {
+                                  editTrigger.current = event?.currentTarget ?? null
+                                  setEditing({ id: overrideId, revision: currentRevision,
+                                    entry: overrideEntries.get(overrideId) ?? { provider: group.id, model: model.id } })
+                                }
+                              },
                             },
                             t('row.edit'),
                           )
@@ -2939,23 +3370,39 @@ window.__ModuleLoader__.load({
                     ),
                   )
                   const editor =
-                    canEdit && editing === rowKey
+                    supportsOverrides && isEditing
                       ? h(ModelOverrideEditor, {
                           key: 'editor',
-                          entry:
-                            overrideEntries.get(rowKey) || { provider: group.id, model: model.id },
+                          entry: editing.entry,
+                          revision: editing.revision,
+                          hasOverride: editing.revision !== null,
+                          stale: overridesReady && currentRevision !== editing.revision,
+                          blocked: !overridesReady || overrideState.pending || state.status !== 'ready',
                           name: model.name,
                           t,
                           overrides,
-                          onClose: () => setEditing(null),
+                          canMap: hostFeatures.includes('reasoningMappings'),
+                          hasStandard: hostFeatures.includes('standardEffort'),
+                          canUseStandard: model.standardEffort === true,
+                          canReferencePrefill: hostFeatures.includes('referencePrefill'),
+                          referenceEfforts: kind === 'chat' ? model.referenceReasoning?.efforts ?? model.reasoning?.efforts : [],
+                          referenceSource: model.referenceReasoning
+                            ? model.referenceReasoningSource === 'snapshot' || !model.referenceReasoningSource
+                              ? sourceLabel('snapshot', t) : model.referenceReasoningSource
+                            : model.reasoningCatalog ?? sourceLabel(sourceOf(model, 'reasoning'), t),
+                          referenceAlias: Boolean(model.learned?.publicAlias),
+                          onClose: closeEditor,
                           onSaved: (result) => {
-                            setEditing(null)
-                            setProviderNote(providerWriteNote(result && result.provider, t))
-                            refreshCatalog()
+                            setEditing((active) => active?.id === overrideId ? null : active)
+                            const message = providerWriteNote(result?.provider, t)
+                            setProviderNote(message === null ? null : { rowKey, message })
+                            void catalog.afterChange()
                           },
                         })
                       : null
-                  return h(React.Fragment, { key: model.id }, row, editor)
+                  const note = providerNote?.rowKey === rowKey
+                    ? h('div', { className: 'mvp_note', role: 'status' }, providerNote.message) : null
+                  return h(React.Fragment, { key: model.id }, row, editor, note)
                 }),
             ),
           )
@@ -3085,7 +3532,9 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'mvp_aboutP' }, t('page.manualNote')),
               )
             : null,
-          h(UsageToolbar, { usage, t, features: state.source === 'host' ? hostFeatures : [] }),
+          hostFeaturesKnown && !hostFeatures.includes('usage')
+            ? h('div', { className: 'mvp_usage mvp_usage--off' }, t('usage.hostStale'))
+            : h(UsageToolbar, { usage, t, features: hostFeatures }),
           h(
             'div',
             { className: 'mvp_filters' },
@@ -3237,7 +3686,7 @@ window.__ModuleLoader__.load({
             : null,
           hostStale ? h('div', { className: 'mvp_banner' }, t('page.hostStale')) : null,
           state.detailsError !== null && state.source === 'catalog'
-            ? h('div', { className: 'mvp_banner' }, t('page.metaFallback'))
+            ? h('div', { className: 'mvp_banner', title: state.detailsError }, t('page.metaFallback'))
             : null,
           state.failures.length > 0
             ? h(
@@ -3255,8 +3704,13 @@ window.__ModuleLoader__.load({
                 }),
               )
             : null,
-          overrideState.available === false
+          supportsOverrides && overrideState.available === false
             ? h('div', { className: 'mvp_banner' }, t('override.unavailable'))
+            : null,
+          supportsOverrides && overrideState.status === 'error'
+            ? h('div', { className: 'mvp_banner mvp_banner--warn', role: 'alert' },
+                t('override.listFailed', { message: overrideState.error }), ' ',
+                h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', onClick: () => { void overrides.load() } }, t('override.retryList')))
             : null,
           error !== null ? h('div', { className: 'mvp_banner mvp_banner--error', role: 'alert' }, error) : null,
           state.error !== null
@@ -3281,14 +3735,16 @@ window.__ModuleLoader__.load({
               : null,
             catalogNote !== null ? h('span', { className: 'mvp_footerItem' }, catalogNote) : null,
           ),
-          providerNote !== null ? h('div', { className: 'mvp_note' }, providerNote) : null,
-          h(VerifyPanel, {
+          observeVerify ? h(VerifyPanel, {
             verify,
             catalog: state,
             t,
             canUse: canVerify,
+            onFinished: catalog.afterChange,
             canFullScan: canVerify && hostFeatures.includes('verifyFullScan'),
-          }),
+            canSetMode: hostFeatures.includes('verifyModes'),
+            canSetSourceMode,
+          }) : h('div', { className: 'mvp_banner' }, t('checker.hostStale')),
         )
       }
     }
@@ -3364,58 +3820,53 @@ window.__ModuleLoader__.load({
 
       const tags = []
       const reasoning = model.reasoning
-      const levels = effortNames(reasoning)
       const reasoningSource = sourceOf(model, 'reasoning')
-      const errorTitle =
-        typeof model.infoError === 'string' && model.infoError !== ''
-          ? t('tag.infoErrorTitle', { message: model.infoError })
-          : t('tag.unknownTitle')
+      const requestReasoning = Object.hasOwn(model, 'requestReasoning') ? model.requestReasoning
+        : reasoningSource === 'config' || reasoningSource === 'adapter' ? reasoning : null
+      const requestLevels = effortNames(requestReasoning)
+      const referenceLevels = model.reasoningSupported === false ? [] : effortNames(reasoning)
+      const sameLadder = referenceLevels.length === requestLevels.length
+        && referenceLevels.every((level, index) => level === requestLevels[index])
+        && reasoning?.defaultEffort === requestReasoning?.defaultEffort
+      const errorTitle = typeof model.infoError === 'string' && model.infoError !== ''
+        ? t('tag.infoErrorTitle', { message: model.infoError }) : t('tag.unknownTitle')
 
-      if (levels.length > 0) {
-        tags.push({
-          key: 'reasoning',
-          tone: 'accent',
-          label: t('tag.reasoning'),
-          title: t('tag.reasoningTitle', {
-            levels: levels.join(' / '),
-            source: sourceLabel(reasoningSource, t),
-          }),
-        })
-        const fallback = defaultEffortName(reasoning)
-        tags.push({
-          key: 'effort',
-          tone: 'neutral',
-          label: t('tag.effort') + ' ' + levels.join('/'),
-          title:
-            fallback === null
-              ? t('tag.effortTitleNoFallback', {
-                  levels: levels.join(' / '),
-                  source: sourceLabel(reasoningSource, t),
-                })
-              : t('tag.effortTitle', {
-                  levels: levels.join(' / '),
-                  fallback,
-                  source: sourceLabel(reasoningSource, t),
-                }),
-        })
-      } else if (model.reasoningSupported === true) {
-        tags.push({
-          key: 'reasoning',
-          tone: 'accent',
-          label: t('tag.reasoning'),
-          title: t('tag.reasoningCatalogTitle', { source: sourceLabel(reasoningSource, t) }),
-          inferred: isInferredSource(reasoningSource),
-        })
-      } else if (model.reasoningSupported === false) {
-        tags.push({
-          key: 'reasoning',
-          tone: 'muted',
-          label: t('tag.noReasoning'),
-          title: sourceLabel(reasoningSource, t),
-          inferred: isInferredSource(reasoningSource),
-        })
+      if (model.reasoningSupported === false && requestLevels.length === 0) {
+        const authoritative = reasoningSource === 'config' || reasoningSource === 'adapter'
+        tags.push({ key: 'reasoning', tone: 'muted', label: t(authoritative ? 'tag.noReasoning' : 'tag.noReasoningReference'),
+          title: sourceLabel(reasoningSource, t), inferred: !authoritative })
+      } else if (model.reasoningSupported === true || requestLevels.length > 0) {
+        tags.push({ key: 'reasoning', tone: 'accent', label: t(requestLevels.length > 0 ? 'tag.reasoning' : 'tag.reasoningReference'),
+          title: requestLevels.length > 0
+            ? t('tag.reasoningTitle', { levels: requestLevels.join(' / '), source: sourceLabel('adapter', t) })
+            : t('tag.reasoningCatalogTitle', { source: sourceLabel(reasoningSource, t) }),
+          inferred: requestLevels.length === 0 && (isInferredSource(reasoningSource) || reasoningSource === 'manual') })
       } else {
         tags.push({ key: 'reasoning', tone: 'muted', label: t('tag.reasoningUnknown'), title: errorTitle })
+      }
+
+      if (requestLevels.length > 0 && model.reasoningSupported === false) {
+        tags.push({ key: 'reference-no-reasoning', tone: 'muted', inferred: true,
+          label: t('tag.noReasoningReference'), title: t('tag.effortReferenceTitle', { source: sourceLabel(reasoningSource, t) }) })
+      }
+      if (requestLevels.length > 0) {
+        const fallback = defaultEffortName(requestReasoning)
+        tags.push({ key: 'effort', tone: 'neutral', label: t('tag.effort') + ' ' + requestLevels.join('/'),
+          title: fallback === null
+            ? t('tag.effortTitleNoFallback', { levels: requestLevels.join(' / '), source: sourceLabel('adapter', t) })
+            : t('tag.effortTitle', { levels: requestLevels.join(' / '), fallback, source: sourceLabel('adapter', t) }) })
+      }
+      if (model.reasoningWireDisabled === true) {
+        tags.push({ key: 'effort-wire-off', tone: 'muted', label: t('tag.effortWireOff'), title: t('tag.effortWireOffTitle') })
+      }
+      if (model.learned?.publicAlias) {
+        tags.push({ key: 'public-alias', tone: 'muted', inferred: true,
+          label: t('tag.aliasReference'), title: t('tag.aliasReferenceTitle') })
+      }
+      if (referenceLevels.length > 0 && !sameLadder) {
+        tags.push({ key: 'reference-effort', tone: 'muted', inferred: true,
+          label: t(model.reasoningCatalog ? 'tag.effortPublicReference' : 'tag.effortReference') + ' ' + referenceLevels.join('/'),
+          title: t('tag.effortReferenceTitle', { source: model.reasoningCatalog ?? sourceLabel(reasoningSource, t) }) })
       }
 
       const contextSource = sourceOf(model, 'context')
@@ -3440,10 +3891,11 @@ window.__ModuleLoader__.load({
         tags.push({ key: 'modality', tone: 'muted', label: t('tag.modalityUnknown'), title: errorTitle })
       } else {
         const vision = modalities.includes('image')
+        const textOnly = modalities.every((modality) => modality === 'text')
         tags.push({
           key: 'modality',
           tone: vision ? 'vision' : 'neutral',
-          label: vision ? t('tag.multimodal') : t('tag.textOnly'),
+          label: vision ? t('tag.multimodal') : textOnly ? t('tag.textOnly') : modalityNames(modalities, t),
           title: t('tag.modalityTitle', {
             modalities: modalityNames(modalities, t),
             source: sourceLabel(modalitySource, t),
@@ -3536,15 +3988,31 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** Trigger a same-origin download without leaving the page. */
-    function download(href) {
+    /** Download only a successful CSV response, not a Host JSON error document. */
+    async function download(type) {
+      const response = await fetch(API + '/export?type=' + type, {
+        headers: { accept: 'text/csv' }, credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+      })
+      if (!response.ok) {
+        let detail = ''
+        try { detail = (await response.json())?.error?.message ?? '' } catch (_error) { /* status is enough */ }
+        throw new Error('HTTP ' + response.status + (detail ? ': ' + detail : ''))
+      }
+      if (!/^text\/csv(?:;|$)/i.test(response.headers.get('content-type') ?? '')) throw new Error('Expected a CSV response.')
+      const filename = /filename="([A-Za-z0-9_.-]+\.csv)"/i.exec(response.headers.get('content-disposition') ?? '')?.[1]
+      const href = URL.createObjectURL(await response.blob())
       const anchor = document.createElement('a')
-      anchor.href = href
-      anchor.rel = 'noopener'
-      anchor.download = ''
-      document.body.appendChild(anchor)
-      anchor.click()
-      anchor.remove()
+      try {
+        anchor.href = href
+        anchor.rel = 'noopener'
+        anchor.download = filename ?? 'model-visibility-' + type + '.csv'
+        document.body.appendChild(anchor)
+        anchor.click()
+      } finally {
+        anchor.remove()
+        // Leave time for the browser to acquire the blob before releasing the URL.
+        setTimeout(() => URL.revokeObjectURL(href), 1000)
+      }
     }
 
     function UsageToolbar({ usage, t, features }) {
@@ -3552,6 +4020,17 @@ window.__ModuleLoader__.load({
       const supported = features.length === 0 || features.includes('usage')
       const ranges = state.snapshot?.ranges
       const computing = state.snapshot?.computing === true
+      const scanError = state.snapshot?.error
+      const [exporting, setExporting] = React.useState(null)
+      const [exportError, setExportError] = React.useState(null)
+
+      const startExport = (type) => {
+        if (exporting !== null) return
+        setExporting(type)
+        setExportError(null)
+        void download(type).catch((error) => setExportError(String(error?.message ?? error)))
+          .finally(() => setExporting(null))
+      }
 
       if (!supported) {
         return h('div', { className: 'mvp_usage mvp_usage--off' }, t('usage.hostStale'))
@@ -3571,23 +4050,27 @@ window.__ModuleLoader__.load({
           'span',
           { className: 'mvp_usageLabel' },
           t('usage.title'),
-          computing ? h('span', { className: 'mvp_usageComputing' }, t('usage.computing')) : null,
+          computing ? h('span', { className: 'mvp_usageComputing', role: 'status' }, t('usage.computing')) : null,
         ),
         h(
           'span',
           { className: 'mvp_usageRanges' },
-          windows.map(([key, labelKey, titleKey]) =>
-            h(
+          windows.map(([key, labelKey, titleKey]) => {
+            const range = ranges?.[key]
+            const total = totalOf(range)
+            // Zero from a cold or failed scan isn't yet a confirmed zero.
+            const known = Array.isArray(range) && (total > 0 || (!computing && !scanError && !state.error))
+            return h(
               'span',
               {
                 key,
                 className: 'mvp_stat' + (key === 'total' ? ' mvp_stat--total' : ''),
-                title: t(titleKey) + '\n' + detailOf(ranges?.[key], t),
+                title: t(titleKey) + '\n' + detailOf(range, t),
               },
               h('span', { className: 'mvp_statLabel' }, t(labelKey)),
-              h('span', { className: 'mvp_statValue' }, formatTokens(totalOf(ranges?.[key]))),
-            ),
-          ),
+              h('span', { className: 'mvp_statValue' }, known ? formatTokens(total) : t('usage.none')),
+            )
+          }),
         ),
         h(
           'span',
@@ -3598,7 +4081,8 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'mvp_button mvp_button--quiet',
               title: t('usage.exportUsageTitle'),
-              onClick: () => download(`${API}/export?type=usage`),
+              disabled: exporting !== null,
+              onClick: () => startExport('usage'),
             },
             t('usage.exportUsage'),
           ),
@@ -3608,14 +4092,18 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'mvp_button mvp_button--quiet',
               title: t('usage.exportModelsTitle'),
-              onClick: () => download(`${API}/export?type=models`),
+              disabled: exporting !== null,
+              onClick: () => startExport('models'),
             },
             t('usage.exportModels'),
           ),
         ),
-        state.error !== null
-          ? h('span', { className: 'mvp_usageHint mvp_usageHint--warn' }, state.error)
-          : null,
+        exporting !== null ? h('span', { className: 'mvp_usageHint', role: 'status' },
+          t(exporting === 'usage' ? 'usage.exportingUsage' : 'usage.exportingModels')) : null,
+        (state.error || scanError) ? h('span', { className: 'mvp_usageHint mvp_usageHint--warn', role: 'alert' },
+          t('usage.readFailed', { message: state.error || scanError })) : null,
+        exportError !== null ? h('span', { className: 'mvp_usageHint mvp_usageHint--warn', role: 'alert' },
+          t('usage.exportFailed', { message: exportError })) : null,
       )
     }
 
@@ -3668,17 +4156,16 @@ window.__ModuleLoader__.load({
         const disposers = []
         disposers.push(
           ctx.on('connection/reset', () => {
-            catalog.refresh()
+            catalog.afterChange()
             overrides.load()
             usage.refresh()
+            verify.load()
           }),
         )
         if (ctx.remote !== undefined && typeof ctx.remote.$on === 'function') {
-          disposers.push(
-            ctx.remote.$on('llm/adapters-updated', () => {
-              catalog.refresh()
-            }),
-          )
+          for (const event of ['llm/adapters-updated', 'llm/models-updated']) {
+            disposers.push(ctx.remote.$on(event, () => { void catalog.afterChange() }))
+          }
           for (const event of [
             'settings/document-updated',
             'credentials/record-updated',
@@ -3686,7 +4173,9 @@ window.__ModuleLoader__.load({
           ]) {
             disposers.push(
               ctx.remote.$on(event, () => {
-                catalog.load()
+                // Supersede a stale browser GET, but do not force new relay probes
+                // for unrelated settings edits (for example a visibility toggle).
+                void catalog.afterChange({ fresh: false })
               }),
             )
           }
