@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Model Visibility",
-    "description": "Choose which models appear in the chat composer's model list, toggle or collapse whole provider groups, and read each model's real capabilities (adapter declarations, relay model lists, built-in catalog, vendor corrections) with colour-coded image, video and embedding labels, plus a hard re-fetch of every model's modalities and reasoning efforts, manual per-model overrides for kind, context window, input modalities and effort levels (optionally written back into the model provider's settings), and optional image-input alignment for verified relay routes that do not explicitly disallow images."
+    "title": "Model visibility",
+    "description": "Open Settings → Model visibility to organize the chat picker and inspect capability sources and token usage. Compatible settings are written only on explicit action; optional online verification may use model and search quota. Hiding a model does not disable its route."
   }
 }

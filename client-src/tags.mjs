@@ -1,5 +1,15 @@
 import { kindOf, sourceOf, sourceLabel, isInferredSource, formatContext, effortNames, defaultEffortName, modalityNames, modalityLabel, resolutionOf, manualFieldsOf } from './format.mjs'
 
+// Evidence belongs to a field, never to a whole row: a context alias is not proof of a ladder.
+function withEvidence(tag, model, field, t) {
+  const fact = model.fieldEvidence?.[field]
+  const alias = fact?.alias === true || (field === 'referenceReasoning' && model.referenceReasoningAlias === true)
+  if (!fact && !alias) return tag
+  const details = [tag.title, fact?.catalog, fact?.lookupId ? t('tag.lookupId', { id: fact.lookupId }) : null, alias ? t(fact?.source === 'provider' ? 'tag.relayAliasTitle' : 'tag.aliasReferenceTitle') : null]
+  return { ...tag, evidenceField: field, label: tag.label + (alias ? ' · ' + t('tag.aliasReference') : ''), title: details.filter(Boolean).join(' · '),
+    inferred: Boolean(tag.inferred || alias || isInferredSource(fact?.source)) }
+}
+
 function manualTag(model, t) {
   return manualFieldsOf(model).length === 0
     ? null
@@ -47,7 +57,7 @@ function generationTags(model, t) {
   }
   const manual = manualTag(model, t)
   if (manual !== null) tags.push(manual)
-  return tags
+  return tags.map((tag) => tag.key === 'kind' || tag.key === 'image-input' ? withEvidence(tag, model, tag.key === 'kind' ? 'kind' : 'modalities', t) : tag)
 }
 
 /**
@@ -102,14 +112,22 @@ function capabilityTags(model, t) {
   if (model.reasoningWireDisabled === true) {
     tags.push({ key: 'effort-wire-off', tone: 'muted', label: t('tag.effortWireOff'), title: t('tag.effortWireOffTitle') })
   }
-  if (model.learned?.publicAlias) {
-    tags.push({ key: 'public-alias', tone: 'muted', inferred: true,
-      label: t('tag.aliasReference'), title: t('tag.aliasReferenceTitle') })
-  }
-  if (referenceLevels.length > 0 && !sameLadder) {
+  const published = effortNames(model.referenceReasoning)
+  const sameLevels = (a, b) => a.length === b.length && a.every((level, index) => level === b[index])
+  if (referenceLevels.length > 0 && !sameLadder && !sameLevels(referenceLevels, published)) {
+    const ladderSource = model.fieldEvidence?.reasoningEfforts?.source || model.sources?.reasoningEfforts || reasoningSource
     tags.push({ key: 'reference-effort', tone: 'muted', inferred: true,
-      label: t(model.reasoningCatalog ? 'tag.effortPublicReference' : 'tag.effortReference') + ' ' + referenceLevels.join('/'),
-      title: t('tag.effortReferenceTitle', { source: model.reasoningCatalog ?? sourceLabel(reasoningSource, t) }) })
+      label: t(model.reasoningCatalog || ladderSource === 'public' ? 'tag.effortPublicReference' : 'tag.effortReference') + ' ' + referenceLevels.join('/'),
+      title: t('tag.effortReferenceTitle', { source: model.reasoningCatalog ?? sourceLabel(ladderSource, t) }) })
+  }
+  // A trusted directory can advertise a different ladder *alongside* the actual adapter ladder.
+  if (published.length && !sameLevels(published, requestLevels)) {
+    const fact = model.fieldEvidence?.referenceReasoning
+    const raw = model.referenceReasoningSource
+    const label = fact?.catalog || (raw && !['public', 'snapshot', 'catalog'].includes(raw) ? raw : sourceLabel(fact?.source || raw || 'snapshot', t))
+    tags.push({ key: 'published-effort', tone: 'muted', inferred: true,
+      label: t(fact?.source === 'public' || (typeof raw === 'string' && !['snapshot', 'manual'].includes(raw)) ? 'tag.effortPublicReference' : 'tag.effortReference') + ' ' + published.join('/'),
+      title: t('tag.effortReferenceTitle', { source: label }) })
   }
 
   const contextSource = sourceOf(model, 'context')
@@ -171,7 +189,12 @@ function capabilityTags(model, t) {
   }
   const manual = manualTag(model, t)
   if (manual !== null) tags.push(manual)
-  return tags
+  return tags.map((tag) => {
+    const field = { context: 'context', modality: 'modalities', 'reference-no-reasoning': 'reasoning',
+      'reference-effort': model.fieldEvidence?.reasoningEfforts ? 'reasoningEfforts' : 'reasoning', 'published-effort': 'referenceReasoning' }[tag.key]
+      || (tag.key === 'reasoning' && !requestLevels.length ? 'reasoning' : undefined)
+    return field ? withEvidence(tag, model, field, t) : tag
+  })
 }
 
 function tagClassOf(tag) {

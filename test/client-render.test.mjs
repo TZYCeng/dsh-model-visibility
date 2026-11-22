@@ -11,7 +11,7 @@
  * interactive control. A thrown handler fails the test.
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -85,9 +85,10 @@ const CATALOG = {
  * @returns the harness: render(), elements collected in the last pass, and every
  *   handler that threw (which the test asserts is empty).
  */
-function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-model'], applyInput: true }, writable = true, overrideRead } = {}) {
+function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-model'], applyInput: true }, writable = true, revision = 7, overrideRead, overrideWrite, collapsed = [] } = {}) {
   const postedOverrides = []
   const editorState = []
+  const usageFrame = []
   let slots
   const elements = []
   const effects = []
@@ -123,22 +124,35 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
       return slots[slot] ??= { current: value }
     },
     useId: () => 'test-id-' + cursor++,
-    useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
+    useSyncExternalStore: (subscribe, getSnapshot) => {
+      const slot = cursor++
+      if (!(slot in slots)) slots[slot] = subscribe(() => {})
+      return getSnapshot()
+    },
   }
 
-  const formState = { value: { ...formValue }, writable }
+  const formState = { value: { ...formValue }, writable, status: 'ready', revision }
   const writes = []
   const form = {
     getSnapshot: () => formState,
     subscribe: () => () => {},
+    mutate(ops, expectedRevision) {
+      assert.equal(ops.length, 1); assert.equal(ops[0].op, 'set'); assert.deepEqual(plain(ops[0].path), ['hidden'])
+      if (!formState.writable || expectedRevision !== formState.revision) return Promise.resolve(false)
+      const field = 'hidden', value = plain(ops[0].value)
+      writes.push({ field, value, expectedRevision }); formState.value = { ...formState.value, [field]: value }; formState.revision++
+      return Promise.resolve(true)
+    },
     set(field, value) {
-      writes.push({ field, value })
+      assert.notEqual(field, 'hidden', 'visibility must never replace the whole form through unrevisioned set')
+      writes.push({ field, value }); formState.value = { ...formState.value, [field]: value }; formState.revision++
       return Promise.resolve(true)
     },
   }
 
   const registrations = { section: null }
   const remoteEvents = new Map()
+  const lifecycleEvents = new Map()
   const fetches = []
   const effectScope = {
     effect: (fn) => {
@@ -155,7 +169,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
         if (typeof dispose === 'function') dispose()
       }
     },
-    on: () => () => {},
+    on: (name, handler) => { lifecycleEvents.set(name, handler); return () => lifecycleEvents.delete(name) },
     inject: (_deps, callback) =>
       callback({ modelDirectories: { directoryFor: (id) => id }, effect: effectScope.effect }),
     locale: { register: () => () => {}, bind: () => (key) => key },
@@ -183,7 +197,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
           })
         },
       },
-      localStorage: { getItem: () => null, setItem: () => {} },
+      localStorage: { getItem: (key) => key.includes('collapsed-groups') ? JSON.stringify(collapsed) : null, setItem: () => {} },
     },
     document: {
       baseURI: 'http://127.0.0.1:1/',
@@ -192,7 +206,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
       body: { appendChild() {}, removeChild() {} },
       querySelector: () => null,
     },
-    URL,
+    URL, AbortController, AbortSignal, DOMException,
     console,
     setTimeout,
     clearTimeout,
@@ -201,8 +215,9 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
     fetch: async (url, init) => {
       fetches.push(String(url))
       if (String(url).endsWith('/overrides') && init?.method === 'POST') {
-        postedOverrides.push(JSON.parse(init.body))
-        return { ok: true, status: 200, json: async () => ({ ok: true, value: { overrides: [], revisions: [] } }) }
+        const body = JSON.parse(init.body)
+        postedOverrides.push(body)
+        return overrideWrite ? overrideWrite(body) : Response.json({ ok: true, value: { overrides: [], revisions: [] } })
       }
       if (String(url).endsWith('/overrides') && overrideRead) return overrideRead()
       return ({
@@ -235,7 +250,8 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
   const Section = registrations.section
   if (typeof Section !== 'function') throw new Error('the settings section did not register')
 
-  const t = (key) => key
+  const t = (key, params) => /^(group\.(count|matchCount|show|hide)|row\.visibilityNamed|page\.(show|confirm|doEnable|doDisable|matchCount)|override\.(providerWritten|providerSkipped|localOnly|localRetained|unresolvedEfforts|reusedEfforts|referencePreservedEfforts))/.test(key) && params
+    ? key + ':' + JSON.stringify(params) : key
   const editorT = (key, values) => values ? `${key}: ${JSON.stringify(values)}`
     : key.startsWith('effort.') ? key.slice('effort.'.length) : key
   const render = () => {
@@ -243,6 +259,11 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
     slots = state
     cursor = 0
     return Section({ t })
+  }
+  const renderUsage = (snapshot) => {
+    render(); const toolbar = elements.find(node => node.type?.name === 'UsageToolbar'); assert.ok(toolbar)
+    slots = usageFrame; cursor = 0; elements.length = 0
+    return toolbar.type({ ...toolbar.props, usage: { getSnapshot: () => ({ snapshot }), subscribe: () => () => {} } })
   }
   const renderEditor = () => {
     render()
@@ -263,7 +284,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
         element.props.disabled !== true,
     )
 
-  return { render, renderEditor, effects, elements, controls, writes, postedOverrides, exported, formState, t, remoteEvents, fetches }
+  return { render, renderEditor, renderUsage, effects, elements, controls, writes, postedOverrides, exported, formState, t, remoteEvents, lifecycleEvents, fetches }
 }
 
 /** Run data effects so the section sees a loaded catalog. */
@@ -307,78 +328,85 @@ test('every enabled control in the header and filters is safe to click', async (
   assert.deepEqual(thrown, [])
 })
 
-test('the per-model switch writes the hidden list (the FIELD regression)', async () => {
-  const harness = createHarness()
-  harness.render()
-  await settle(harness)
-  harness.render()
-  const switches = harness.elements.filter(
-    (element) => element.type === 'button' && element.props.role === 'switch' && element.props['aria-label'] === 'grok-4.7',
-  )
-  assert.equal(switches.length, 1, 'the model row must expose a switch')
-  // This is the exact call that threw `ReferenceError: FIELD is not defined`.
-  switches[0].props.onClick()
-  assert.equal(harness.writes.length, 1)
-  assert.equal(harness.writes[0].field, 'hidden')
-  assert.deepEqual(plain(harness.writes[0].value).sort(), ['relay/grok-4.7', 'relay/plain-model'])
+const pause = () => new Promise(setImmediate)
+const byClass = (harness, name) => harness.elements.find(node => node.props.className?.split(' ').includes(name))
+const hasKey = (child, key) => typeof child === 'string' && (child === key || child.startsWith(key + ':'))
+const byText = (harness, key) => harness.elements.find(node => node.props.children.some(child => hasKey(child, key)))
+const byRole = (harness, name) => harness.elements.find(node => node.type?.name === name)
+const settingField = (harness, key) => harness.elements.find(node => node.props['aria-label'] === key)
+const titles = (harness) => harness.elements.filter(node => node.props.className === 'mvp_rowTitle').map(node => node.props.children[0])
+async function loaded(config) { const harness = createHarness(config); harness.render(); await settle(harness); harness.render(); return harness }
+const toggleFor = (harness, name) => harness.elements.find(node => node.props.role === 'switch' && node.props['aria-label']?.includes('"name":"' + name + '"'))
+const search = (harness, value) => { harness.render(); settingField(harness, 'page.searchPlaceholder').props.onInput({ target: { value } }); harness.render() }
+
+test('the per-model switch commits an explicit, revisioned visibility edit (the FIELD regression)', async () => {
+  const ui = await loaded()
+  const toggle = toggleFor(ui, 'grok-4.7')
+  assert.ok(toggle); toggle.props.onClick(); await pause()
+  assert.deepEqual(plain(ui.writes), [{ field: 'hidden', expectedRevision: 7, value: ['relay/plain-model', 'relay/grok-4.7'] }])
 })
 
-test('the group and page-level visibility buttons write the hidden list', async () => {
-  const harness = createHarness()
-  harness.render()
-  await settle(harness)
-  harness.render()
-  const groupButton = harness.elements.find(
-    (element) =>
-      element.type === 'button' &&
-      String(element.props.className).includes('mvp_button') &&
-      Array.isArray(element.props.children) &&
-      String(element.props.children[0]).startsWith('group.'),
-  )
-  assert.ok(groupButton !== undefined, 'the group toggle must render')
-  groupButton.props.onClick()
-  assert.equal(harness.writes.length, 1)
-  assert.equal(harness.writes[0].field, 'hidden')
-
-  const showAll = harness.elements.find(
-    (element) =>
-      element.type === 'button' &&
-      Array.isArray(element.props.children) &&
-      element.props.children[0] === 'page.showAll',
-  )
-  assert.ok(showAll !== undefined, 'the show-all control must render')
-  showAll.props.onClick()
-  assert.deepEqual(plain(harness.writes.at(-1).value), [])
+test('both group and page-level changes list affected identities and can be cancelled without writing', async () => {
+  const ui = await loaded({ formValue: { hidden: ['relay/plain-model', 'missing-provider/keep-this'] } })
+  for (const button of ['group.showAll', 'page.showAll']) {
+    assert.match(byText(ui, button).props.children[0], /"count":1/)
+    byText(ui, button).props.onClick(); ui.render()
+    const dialog = byRole(ui, 'SettingsConfirm'); assert.ok(dialog)
+    assert.deepEqual(plain(dialog.props.targets), [{ provider: 'relay', model: 'plain-model' }]); assert.match(dialog.props.title, /"count":1/)
+    assert.deepEqual(ui.writes, []); dialog.props.onCancel(); ui.render(); assert.equal(byRole(ui, 'SettingsConfirm'), undefined)
+  }
+  byText(ui, 'page.showAll').props.onClick(); ui.render(); byRole(ui, 'SettingsConfirm').props.onConfirm(); await pause()
+  assert.equal(ui.writes.length, 1); assert.deepEqual(plain(ui.writes[0].value), ['missing-provider/keep-this'])
 })
 
-test('visibility and other filters scope the group action to matching models', async () => {
-  const harness = createHarness()
-  const byLabel = (label) => harness.elements.find((element) => element.props['aria-label'] === label)
-  const byText = (label) => harness.elements.find((element) => element.props.children[0] === label)
-  const titles = () => harness.elements
-    .filter((element) => element.props.className === 'mvp_rowTitle')
-    .map((element) => element.props.children[0])
-  harness.render()
-  await settle(harness)
-  harness.render()
-  assert.equal(byLabel('page.visibility.label').props.value, 'all')
-  byLabel('page.visibility.label').props.onChange({ target: { value: 'disabled' } })
-  harness.render()
-  assert.deepEqual(titles(), ['plain-model'])
-  byLabel('page.searchPlaceholder').props.onInput({ target: { value: 'grok' } })
-  harness.render()
-  assert.deepEqual(titles(), [])
-  assert.ok(byText('page.filterEmpty'))
-  byLabel('page.visibility.label').props.onChange({ target: { value: 'enabled' } })
-  harness.render()
-  assert.deepEqual(titles(), ['grok-4.7'])
-  assert.equal(byText('group.hideAll'), undefined)
-  byText('group.hideFiltered').props.onClick()
-  assert.equal(harness.writes[0].field, 'hidden')
-  assert.deepEqual(plain(harness.writes[0].value).sort(), ['relay/grok-4.7', 'relay/plain-model'])
-  byLabel('page.visibility.label').props.onChange({ target: { value: 'all' } })
-  harness.render()
-  assert.ok(byText('group.hideFiltered'), 'a search alone changes group wording')
+test('filtering to two of 239 hidden routes never presents a global reset or writes a nonmatch', async () => {
+  const catalog = structuredClone(CATALOG)
+  const models = Array.from({ length: 239 }, (_, i) => ({ id: i < 2 ? `match-${i}` : `other-${i}`, name: i < 2 ? `match-${i}` : `other-${i}`, kind: 'chat' }))
+  catalog.value.groups = [{ id: 'relay', name: 'Relay', models }]
+  const ui = await loaded({ catalog, formValue: {hidden: models.map(m => 'relay/' + m.id)}, collapsed:['relay'] })
+  assert.deepEqual(titles(ui), []); search(ui, 'match-')
+  assert.deepEqual(titles(ui), ['match-0', 'match-1'], 'folded hits expand temporarily')
+  assert.match(byText(ui, 'group.matchCount').props.children[0], /"matches":2,"total":239,"enabled":0/)
+  assert.equal(byText(ui, 'page.showAll'), undefined); assert.match(byText(ui, 'page.showMatches').props.children[0], /"count":2/)
+  byText(ui, 'page.showMatches').props.onClick(); ui.render(); const dialog = byRole(ui, 'SettingsConfirm')
+  assert.deepEqual(plain(dialog.props.targets).map(x => x.model), ['match-0', 'match-1']); assert.deepEqual(ui.writes, [])
+  dialog.props.onConfirm(); await pause(); assert.deepEqual(plain(ui.writes[0].value), models.slice(2).map(m => 'relay/' + m.id))
+  search(ui, ''); assert.deepEqual(titles(ui), [], 'clearing the search restores the unfiltered fold preference')
+})
+
+test('when the confirmed targets change identity but not count, confirmation is invalidated', async () => {
+  const ui = await loaded()
+  byText(ui, 'page.showAll').props.onClick(); ui.render()
+  ui.formState.value = { hidden: ['relay/glm-5.3'] }; ui.formState.revision++
+  ui.render(); const { props } = byRole(ui, 'SettingsConfirm'); assert.ok(props.changed)
+  props.onConfirm(); await pause(); assert.deepEqual(ui.writes, [])
+})
+
+test('visibility, keyword and capability filters scope the group action; read-only forms cannot write', async () => {
+  const ui = await loaded()
+  settingField(ui, 'page.visibility.label').props.onChange({ target: { value: 'disabled' } }); ui.render()
+  assert.deepEqual(titles(ui), ['plain-model']); search(ui, 'grok'); assert.deepEqual(titles(ui), []); assert.ok(byText(ui, 'page.filterEmpty'))
+  settingField(ui, 'page.visibility.label').props.onChange({ target: { value: 'enabled' } }); ui.render()
+  assert.deepEqual(titles(ui), ['grok-4.7']); assert.equal(byText(ui, 'group.hideAll'), undefined)
+  byText(ui, 'group.hideFiltered').props.onClick(); ui.render(); byRole(ui, 'SettingsConfirm').props.onConfirm(); await pause()
+  assert.deepEqual(plain(ui.writes[0].value).sort(), ['relay/grok-4.7', 'relay/plain-model'])
+  const oldForm = await loaded({ revision: null }); const oldToggle = toggleFor(oldForm, 'grok-4.7'); assert.equal(oldToggle.props.disabled, true)
+  oldToggle.props.onClick(); await pause(); assert.deepEqual(oldForm.writes, [])
+})
+
+test('cold, scanning, failed and settled usage share the same reserved status row', async () => {
+  const { CSS } = await import('../client-src/css.mjs'); const ui = await loaded()
+  const layout = snapshot => {
+    const tree = ui.renderUsage(snapshot); const status = byClass(ui, 'mvp_usageStatus')
+    assert.ok(status && status.props.role === 'status'); assert.equal(tree.props.children.at(-1), status)
+    return tree.props.children.map(node => node.props.className)
+  }
+  const initial = layout(null)
+  for (const state of [{ computing: true }, { computing: false, error: 'long diagnostic' }, { computing: false, ranges: { today: [12, 2, 0, 0] } }]) {
+    assert.deepEqual(layout(state), initial)
+  }
+  assert.match(CSS, /\.mvp_usageStatus\s*\{[^}]*\bheight:[^;}]+/)
+  assert.match(CSS, /\.mvp_usageStatus\s*\{[^}]*overflow:auto/)
 })
 
 test('the applyInput switch writes its own field', async () => {
@@ -419,14 +447,12 @@ test('a verified (snapshot) source renders a dashed tag, not a declaration', asy
 })
 
 test('every referenced mvp_ class has a CSS rule and every rule is used', async () => {
-  const { CSS } = await import('../client-src/css.mjs')
-  const harness = createHarness()
-  harness.render()
-  await settle(harness)
-  harness.render()
-  const moduleSources = ['settings-section', 'checker-view', 'usage-view', 'override-editor', 'tags'].map((name) =>
-    readFileSync(path.join(root, 'client-src', name + '.mjs'), 'utf8'),
-  )
+  const dir = path.join(root, 'client-src')
+  const files = readdirSync(dir).filter(name => name.endsWith('.mjs'))
+  const styleFiles = files.filter(name => name === 'css.mjs' || name.endsWith('-style.mjs') || name.endsWith('-styles.mjs') || name.endsWith('-css.mjs'))
+  const moduleSources = files.filter(name => !styleFiles.includes(name)).map(name => readFileSync(path.join(dir, name), 'utf8'))
+  const localStyles = moduleSources.flatMap(source => [...source.matchAll(/const css = `([^`]+)`/g)].map(match => match[1]))
+  const CSS = [...styleFiles.map(name => readFileSync(path.join(dir, name), 'utf8')), ...localStyles].join('\n')
   const used = new Set()
   for (const source of moduleSources) {
     for (const match of source.matchAll(/mvp_[A-Za-z]+/g)) used.add(match[0])
@@ -467,7 +493,11 @@ async function renderVerifyPanel(verifyValue, { pick, extraFeatures = [] } = {})
     useLayoutEffect: (fn) => {
       effects.push(fn)
     },
-    useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
+    useSyncExternalStore: (subscribe, getSnapshot) => {
+      const index = currentFrame.cursor++
+      if (!(index in currentFrame.slots)) currentFrame.slots[index] = subscribe(() => {})
+      return getSnapshot()
+    },
     useState(initial) {
       const frame = currentFrame
       if (frame === undefined) throw new Error('useState outside a component')
@@ -555,7 +585,7 @@ async function renderVerifyPanel(verifyValue, { pick, extraFeatures = [] } = {})
       body: { appendChild() {}, removeChild() {} },
       querySelector: () => null,
     },
-    URL,
+    URL, AbortController, AbortSignal, DOMException,
     console,
     setTimeout,
     clearTimeout,
@@ -742,7 +772,7 @@ test('override editor stays closed until a revisioned list arrives', async () =>
   assert.equal(editor().props.revision, 'r1')
 })
 
-async function referenceEditor({ eligible = true, currentHost = true, nonChat = false, allSelected = false } = {}) {
+async function referenceEditor({ eligible = true, currentHost = true, nonChat = false, allSelected = false, blank = false, provenance = false, overrideWrite } = {}) {
   const catalog = structuredClone(CATALOG)
   const [model] = catalog.value.groups[0].models
   if (nonChat) model.kind = 'embedding'
@@ -750,122 +780,169 @@ async function referenceEditor({ eligible = true, currentHost = true, nonChat = 
   model.referenceReasoningSource = 'OpenRouter'
   model.referenceReasoning = { efforts: ['high', 'medium', 'off', 'none', 'opaque'].map((id) => ({ id, name: id })) }
   catalog.value.learned.features.push('standardEffort', 'reasoningMappings')
-  if (currentHost) catalog.value.learned.features.push('referencePrefill')
+  if (currentHost) catalog.value.learned.features.push('referencePrefill', 'effortDirect')
   const override = { provider: 'relay', model: model.id, contextWindow: 2048, input: ['text'], defaultEffort: 'high',
-    efforts: (allSelected ? ['high', 'medium', 'off', 'none', 'opaque'] : ['high']).map((id) => ({ id })) }
-  const harness = createHarness({ catalog, overrideRead: () => Response.json({ ok: true, value: {
-    overrides: [override], revisions: [{ provider: override.provider, model: override.model, revision: 'r1' }],
+    ...(provenance ? { referencePrefill: true } : {}), efforts: (allSelected ? ['high', 'medium', 'off', 'none', 'opaque'] : ['high']).map((id) => ({ id })) }
+  const harness = await loaded({ catalog, overrideWrite, overrideRead: () => Response.json({ ok: true, value: {
+    overrides: blank ? [] : [override], revisions: blank ? [] : [{ provider: override.provider, model: override.model, revision: 'r1' }],
   } }) })
-  harness.render()
-  await settle(harness)
-  harness.render()
   const focused = []
-  harness.elements.find((node) => node.props['aria-label'] === 'row.edit: grok-4.7').props.onClick({ currentTarget: { focus: () => focused.push('edit') } })
+  settingField(harness, 'row.edit: grok-4.7').props.onClick({ currentTarget: { focus: () => focused.push('edit') } })
   const element = (match) => harness.elements.find(match)
   const text = (key) => element((node) => node.props.children.some((child) => typeof child === 'string' && (child === key || child.startsWith(key + ': '))))
-  const button = (key) => element((node) => node.type === 'button' && node.props.children.includes(key))
-  const check = (key) => element((node) => node.type === 'label' && node.props.children.some((child) => child === key || child?.props?.children?.includes(key)))?.props.children[0]
+  const button = (key) => element((node) => node.type === 'button' && node.props.children.some((child) => typeof child === 'string' && (child === key || child.startsWith(key + ' · '))))
   const field = (key) => element((node) => node.props['aria-label'] === key || node.props['aria-label']?.startsWith(key + ': '))
   const wire = (level) => field(`override.wireValue: {"level":"${level}"}`)
   const render = () => harness.renderEditor()
   const click = (key) => { const node = button(key); assert.ok(node && node.props.disabled !== true, key); node.props.onClick(); render() }
-  const toggle = (key, checked) => { const node = check(key); assert.ok(node && node.props.disabled !== true, key); node.props.onChange({ target: { checked } }); render() }
   render()
-  return { harness, render, element, text, field, wire, button, check, click, toggle, focused }
+  return { harness, render, element, text, field, wire, button, click, focused }
 }
 
-test('reference preview is reversible; only confirmed levels enter local draft', async () => {
+test('reference preview is reversible; only confirmed levels enter a local draft with preserved provenance and revision', async () => {
   const ui = await referenceEditor()
-  ui.click('override.useReference')
-  assert.equal(ui.button('override.useReference').props['aria-expanded'], true)
-  assert.ok(ui.text('override.referenceSource').props.children[0].includes('OpenRouter'))
-  assert.ok(ui.text('override.referenceDraft').props.children[0].includes('opaque'))
-  assert.equal(ui.button('medium').props['aria-pressed'], false)
-  assert.equal(ui.button('override.saveLocal').props.disabled, true)
-  ui.element((node) => node.props.className === 'mvp_editor').props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} })
-  ui.render()
-  assert.equal(ui.button('override.useReference').props['aria-expanded'], false)
-  assert.equal(ui.button('medium').props['aria-pressed'], false)
-  assert.deepEqual(ui.harness.postedOverrides, [])
-  ui.click('override.useReference')
-  ui.click('override.confirmReference')
-  assert.equal(ui.button('medium').props['aria-pressed'], true)
-  assert.equal(ui.field('override.defaultEffort').props.value, 'high')
-  assert.equal(ui.check('override.provider').props.checked, false)
-  assert.match(ui.wire('high').props.placeholder, /referenceWireBlank.*high/)
-  assert.equal(ui.wire('high').props.value, '')
-  assert.equal(ui.wire('off').props.placeholder, 'override.wireKeep')
-  const saveLocal = ui.button('override.saveLocal')
-  saveLocal.props.onClick()
+  assert.equal(ui.wire('high'), undefined); assert.equal(ui.element(n => n.type === 'input' && n.props.type === 'checkbox'), undefined)
+  ui.click('override.useReference'); assert.equal(ui.button('override.useReference').props['aria-expanded'], true)
+  assert.match(ui.text('override.referenceSource').props.children[0], /OpenRouter/); assert.match(ui.text('override.referenceDraft').props.children[0], /opaque/)
+  assert.equal(ui.button('medium').props['aria-pressed'], false); assert.equal(ui.button('override.saveLocal').props.disabled, true)
+  ui.element((node) => node.props.className === 'mvp_editor').props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); ui.render()
+  assert.equal(ui.button('override.useReference').props['aria-expanded'], false); assert.equal(ui.button('medium').props['aria-pressed'], false)
+  assert.deepEqual(ui.harness.postedOverrides, []); ui.click('override.useReference'); ui.click('override.confirmReference')
+  assert.equal(ui.button('medium').props['aria-pressed'], true); assert.equal(ui.field('override.defaultEffort').props.value, 'high')
+  ui.button('override.saveLocal').props.onClick(); await pause()
   assert.deepEqual(ui.harness.postedOverrides, [{ provider: 'relay', model: 'grok-4.7', contextWindow: 2048, input: ['text'],
-    efforts: ['high', 'medium', 'off', 'none', 'opaque'].map((id) => ({ id })), defaultEffort: 'high', applyToProvider: false, expectedRevision: 'r1' }])
+    efforts: ['high', 'medium', 'off', 'none', 'opaque'].map((id) => ({ id })), defaultEffort: 'high', applyToProvider: false, referencePrefill: true, expectedRevision: 'r1' }])
 })
 
-test('Provider save reconfirms and sends only explicit wire values plus Host fallback intent', async () => {
+test('one direct click uses Host intent and optional explicit mapping; prefill does not replace a custom value', async () => {
   const ui = await referenceEditor({ allSelected: true })
-  ui.toggle('override.provider', true)
-  ui.wire('high').props.onChange({ target: { value: 'typed-value' } })
-  ui.render()
-  ui.click('override.useReference')
-  assert.match(ui.text('override.referenceFallbacks').props.children[0], /medium/)
-  assert.doesNotMatch(ui.text('override.referenceFallbacks').props.children[0], /high|off|none|opaque/)
-  ui.click('override.confirmReference')
-  assert.equal(ui.wire('high').props.value, 'typed-value')
-  assert.equal(ui.check('override.standardWire').props.checked, false)
-  ui.toggle('override.standardWire', true)
-  ui.click('override.saveProvider')
-  assert.equal(ui.button('override.saveProvider').props['aria-expanded'], true)
-  assert.match(ui.text('override.providerMappings').props.children[0], /typed-value/)
-  assert.ok(ui.text('override.providerContext'))
-  assert.ok(ui.text('override.providerInput'))
-  assert.ok(ui.text('override.providerLocalDefault'))
-  assert.ok(ui.text('override.providerStandardEnable'))
-  assert.deepEqual(ui.harness.postedOverrides, [])
-  ui.click('override.backToDraft')
-  assert.equal(ui.wire('high').props.value, 'typed-value')
-  ui.click('override.saveProvider')
-  ui.button('override.confirmProviderSave').props.onClick()
-  assert.equal(ui.harness.postedOverrides.length, 1)
-  assert.deepEqual(ui.harness.postedOverrides[0].reasoningEffortMappings, { high: 'typed-value' })
-  assert.equal(ui.harness.postedOverrides[0].applyToProvider, true)
-  assert.equal(ui.harness.postedOverrides[0].referencePrefill, true)
-  assert.equal(ui.harness.postedOverrides[0].standardEffort, true)
+  assert.equal(ui.button('override.saveProvider').props.disabled, false)
+  assert.equal(ui.element(n => n.props.children.includes('override.standardWire') || n.props.children.includes('override.provider')), undefined)
+  ui.click('override.writeDetails'); ui.wire('high').props.onChange({ target: { value: 'typed-value' } }); ui.render()
+  ui.click('override.useReference'); ui.click('override.confirmReference'); assert.equal(ui.wire('high').props.value, 'typed-value')
+  assert.equal(ui.wire('off').props.value, ''); assert.equal(ui.wire('opaque'), undefined)
+  const write = ui.button('override.saveProvider'); write.props.onClick(); write.props.onClick(); await pause()
+  assert.equal(ui.harness.postedOverrides.length, 1); const [payload] = ui.harness.postedOverrides
+  assert.deepEqual(payload.reasoningEffortMappings, { high: 'typed-value' }); assert.equal(payload.applyToProvider, true); assert.equal(payload.directEffort, true)
+  assert.equal(payload.referencePrefill, true); assert.equal(payload.standardEffort, undefined); assert.equal(payload.expectedRevision, 'r1')
 })
 
-test('opaque routes have no standard mapping suggestion; old Host and non-chat fall back safely', async () => {
-  const opaque = await referenceEditor({ eligible: false })
-  opaque.click('override.useReference')
-  assert.ok(opaque.text('override.referenceManualScope'))
-  assert.equal(opaque.text('override.referenceFallbacks'), undefined)
-  opaque.click('override.confirmReference')
-  opaque.toggle('override.provider', true)
-  assert.equal(opaque.check('override.standardWire'), undefined)
-  assert.equal(opaque.wire('opaque'), undefined)
-  opaque.click('override.saveProvider')
-  opaque.button('override.confirmProviderSave').props.onClick()
-  const [payload] = opaque.harness.postedOverrides
-  assert.equal(payload.referencePrefill, true)
-  assert.equal(payload.standardEffort, undefined)
-  assert.equal(payload.reasoningEffortMappings, undefined)
-
-  const old = await referenceEditor({ currentHost: false })
-  old.toggle('override.provider', true)
-  old.click('override.useReference')
-  assert.ok(old.text('override.referenceOldHost'))
-  old.click('override.confirmReference')
-  assert.equal(old.check('override.provider').props.checked, false)
-  assert.equal(old.check('override.provider').props.disabled, true)
-  assert.ok(old.button('override.saveLocal'))
-
-  const nonChat = await referenceEditor({ nonChat: true })
-  assert.equal(nonChat.button('override.useReference'), undefined)
-  assert.ok(nonChat.field('override.kind'), 'manual kind editing is still available')
+test('an untouched model with advisory levels can write them with a single explicit click; editing context never auto-adds levels', async () => {
+  const ui = await referenceEditor({ blank: true })
+  assert.match(ui.text('override.directReference').props.children[0], /medium/); assert.equal(ui.button('override.saveLocal').props.disabled, true)
+  ui.button('override.saveProvider').props.onClick(); await pause(); const [p] = ui.harness.postedOverrides
+  assert.equal(p.expectedRevision, null); assert.equal(p.referencePrefill, true); assert.equal(p.directEffort, true)
+  assert.deepEqual(p.efforts.map(e => e.id), ['high', 'medium', 'off', 'none', 'opaque']); assert.equal(p.reasoningEffortMappings, undefined)
+  const edited = await referenceEditor({ blank: true }); edited.field('override.context').props.onInput({ target: { value: '12345' } }); edited.render()
+  assert.equal(edited.text('override.directReference'), undefined); edited.button('override.saveProvider').props.onClick(); await pause()
+  assert.deepEqual(edited.harness.postedOverrides[0], { provider: 'relay', model: 'grok-4.7', contextWindow: 12345, applyToProvider: true, directEffort: true, expectedRevision: null })
 })
 
-test('the browser observes llm/models-updated and requests a fresh catalog', async () => {
-  const harness = createHarness()
-  assert.equal(typeof harness.remoteEvents.get('llm/models-updated'), 'function')
-  harness.remoteEvents.get('llm/models-updated')()
-  await new Promise(setImmediate)
-  assert.deepEqual(harness.fetches.map((url) => url.slice(url.lastIndexOf('/'))), ['/models?fresh=1'])
+test('opaque, old and non-chat routes retain conservative behavior, and reopening retains protected reference provenance', async () => {
+  const opaque = await referenceEditor({ eligible: false, provenance: true })
+  assert.ok(opaque.text('override.referenceApplied')); assert.equal(opaque.wire('opaque'), undefined)
+  opaque.button('override.saveProvider').props.onClick(); await pause(); const [p] = opaque.harness.postedOverrides
+  assert.equal(p.directEffort, true); assert.equal(p.referencePrefill, true); assert.equal(p.standardEffort, undefined); assert.equal(p.reasoningEffortMappings, undefined)
+  const old = await referenceEditor({ currentHost: false }); assert.equal(old.button('override.saveProvider').props.disabled, true)
+  old.button('override.saveProvider').props.onClick(); old.click('override.useReference'); old.click('override.confirmReference')
+  assert.equal(old.button('override.saveProvider').props.disabled, true); assert.ok(old.text('override.directOldHost')); assert.deepEqual(old.harness.postedOverrides, [])
+  old.button('override.saveLocal').props.onClick(); await pause(); assert.equal(old.harness.postedOverrides[0].applyToProvider, false); assert.equal(old.harness.postedOverrides[0].referencePrefill, true)
+  const nonChat = await referenceEditor({ nonChat: true }); assert.equal(nonChat.button('override.useReference'), undefined); assert.ok(nonChat.field('override.kind'))
+})
+
+test('a partial provider receipt names confirmed fields, local fields and unresolved/protected levels, not full success', async () => {
+  const provider = { written: true, fields: ['contextWindow'], localOnly: ['reasoningEfforts'], unresolvedEfforts: ['opaque'], protectedEfforts: ['high'] }
+  const ui = await referenceEditor({ overrideWrite: () => Response.json({ ok: true, value: { overrides: [], revisions: [], provider } }) })
+  ui.button('override.saveProvider').props.onClick(); await pause(); ui.harness.render(); search(ui.harness, 'no-such-model')
+  const note = byClass(ui.harness, 'mvp_receipt'); assert.equal(note.props.role, 'status'); const message = note.props.children.filter(x => typeof x === 'string').join(' ')
+  assert.match(message, /providerWritten.*contextWindow/); assert.match(message, /localOnly.*reasoningEfforts/); assert.match(message, /unresolvedEfforts.*opaque/); assert.match(message, /referencePreservedEfforts.*high/)
+  const missing = await referenceEditor(); missing.button('override.saveProvider').props.onClick(); await pause(); missing.harness.render()
+  assert.match(byClass(missing.harness, 'mvp_receipt').props.children.join(' '), /providerUnconfirmed/)
+})
+
+test('confirmed reuse is not called a new write, a skip or an entirely local ladder', async () => {
+  const receipt = async (provider) => {
+    const ui = await referenceEditor({ overrideWrite: () => Response.json({ ok: true, value: { overrides: [], revisions: [], provider } }) })
+    ui.button('override.saveProvider').props.onClick(); await pause(); ui.harness.render()
+    return byClass(ui.harness, 'mvp_receipt').props.children.filter(x => typeof x === 'string').join(' ')
+  }
+  const same = await receipt({ written: false, fields: [], reason: 'already-mapped', reusedEfforts: ['high'] })
+  assert.match(same, /reason\.already-mapped/); assert.match(same, /reusedEfforts.*high/)
+  assert.doesNotMatch(same, /providerSkipped|providerWritten|"fields":"[^"]*reasoningEfforts/)
+  const mixed = await receipt({ written: true, fields: ['contextWindow'], localOnly: ['reasoningEfforts'], unresolvedEfforts: ['opaque'], reusedEfforts: ['high'] })
+  assert.match(mixed, /providerWritten:.*contextWindow/); assert.match(mixed, /reusedEfforts.*high/); assert.match(mixed, /unresolvedEfforts.*opaque/)
+  assert.match(mixed, /ladderRetained/); assert.doesNotMatch(mixed, /partialEfforts|"fields":"[^"]*reasoningEfforts/)
+})
+
+test('an overlapping written/local reasoning map reports partial coverage only, with exact omitted and protected levels', async () => {
+  const provider = { written: true, fields: ['contextWindow', 'reasoningEfforts'], localOnly: ['reasoningEfforts'], unresolvedEfforts: ['opaque'], protectedEfforts: ['high'] }
+  const ui = await referenceEditor({ overrideWrite: () => Response.json({ ok: true, value: { overrides: [], revisions: [], provider } }) })
+  ui.button('override.saveProvider').props.onClick(); await pause(); ui.harness.render()
+  const msg = byClass(ui.harness, 'mvp_receipt').props.children.filter(x => typeof x === 'string').join(' ')
+  assert.match(msg, /override\.partialEfforts/); assert.match(msg, /providerWritten:\{"fields":"contextWindow"\}/)
+  assert.doesNotMatch(msg, /"fields":"[^"]*reasoningEfforts/); assert.match(msg, /unresolvedEfforts.*opaque/); assert.match(msg, /referencePreservedEfforts.*high/)
+})
+
+test('the same keyed editor stays mounted through collapse, search and visibility changes; hidden models remain editable', async () => {
+  const ui = await loaded()
+  const edit = () => settingField(ui, 'row.edit: plain-model')
+  assert.equal(edit().props.disabled, false); assert.equal(toggleFor(ui, 'plain-model').props['aria-checked'], false)
+  edit().props.onClick(); ui.renderEditor()
+  settingField(ui, 'override.context').props.onInput({ target: { value: '54321' } })
+  let originalKey
+  const check = (detached) => {
+    ui.render(); const editor = byRole(ui, 'ModelOverrideEditor'); assert.ok(editor); assert.equal(editor.props.detached, detached)
+    const parent = byClass(ui, 'mvp_groups'); assert.ok(parent.props.children.includes(editor), 'draft must retain the same parent even when its row is gone')
+    if (!originalKey) originalKey = editor.props.key
+    assert.equal(editor.props.key, originalKey); ui.renderEditor(); assert.equal(settingField(ui, 'override.context').props.value, '54321')
+  }
+  check(false); ui.render(); byClass(ui, 'mvp_groupTitle').props.onClick(); check(true)
+  search(ui, 'grok'); check(true); search(ui, 'plain'); check(false)
+  ui.render(); settingField(ui, 'page.visibility.label').props.onChange({ target: { value: 'enabled' } }); check(true)
+  ui.render(); byText(ui, 'page.clearFilters').props.onClick(); check(true)
+  ui.render(); byClass(ui, 'mvp_groupTitle').props.onClick(); check(false)
+  ui.render(); settingField(ui, 'row.edit: grok-4.7').props.onClick(); ui.render(); assert.ok(byRole(ui, 'SettingsConfirm'), 'switching away from a dirty draft requires consent')
+  byRole(ui, 'SettingsConfirm').props.onCancel(); check(false); assert.deepEqual(ui.writes, []); assert.deepEqual(ui.postedOverrides, [])
+})
+
+test('a reconnect preserves a draft but fences the old Host even when the model and revision are identical', async () => {
+  const ui = await referenceEditor({ blank: true }); ui.field('override.context').props.onInput({ target: { value: '54321' } })
+  ui.harness.lifecycleEvents.get('connection/reset')(); await pause(); ui.render()
+  assert.equal(ui.field('override.context').props.value, '54321'); assert.ok(ui.text('override.conflict'))
+  assert.equal(ui.button('override.saveProvider').props.disabled, true); ui.button('override.saveProvider').props.onClick(); await pause(); assert.deepEqual(ui.harness.postedOverrides, [])
+})
+
+test('field-level aliases remain advisory and do not contaminate an adapter ladder', async () => {
+  const catalog = structuredClone(CATALOG); const row = catalog.value.groups[0].models[0]
+  row.requestReasoning = row.reasoning; row.learned = { publicAlias: true }; row.fieldEvidence = { context: { source: 'public', alias: true, lookupId: 'vendor/candidate' } }; row.sources.context = 'public'
+  const ui = await loaded({ catalog }); const tagged = ui.elements.filter(x => x.props.className?.split(' ').includes('mvp_tag'))
+  const alias = tagged.filter(x => String(x.props.children[0]).includes('tag.aliasReference'))
+  assert.equal(alias.length, 1); assert.ok(alias[0].props.children[0].startsWith('tag.context')); assert.ok(alias[0].props.className.includes('mvp_tag--inferred'))
+  assert.ok(tagged.some(x => String(x.props.children[0]).startsWith('tag.effort Low/High') && !x.props.className.includes('mvp_tag--inferred')))
+})
+
+test('the published ladder and the reasoning support flag cite their own fields', async () => {
+  const catalog = structuredClone(CATALOG); const row = catalog.value.groups[0].models[1]
+  row.requestReasoning = null; row.reasoningSupported = true; row.reasoning = { efforts: [{ id: 'high', name: 'HIGH' }] }
+  row.fieldEvidence = { reasoning: { source: 'config' }, reasoningEfforts: { source: 'public', alias: true, catalog: 'Example catalog' } }
+  const ui = await loaded({ catalog }); const tags = ui.elements.filter(n => n.props.className?.split(' ').includes('mvp_tag'))
+  const ladder = tags.find(n => n.props.children[0].startsWith('tag.effortPublicReference HIGH'))
+  assert.ok(ladder); assert.match(ladder.props.children[0], /tag.aliasReference/); assert.match(ladder.props.title, /Example catalog/)
+  assert.ok(!tags.find(n => n.props.children[0] === 'tag.reasoningReference')?.props.title.includes('tag.aliasReferenceTitle'))
+  settingField(ui, 'row.edit: plain-model').props.onClick(); ui.render(); assert.equal(byRole(ui, 'ModelOverrideEditor').props.referenceAlias, true)
+  assert.equal(byRole(ui, 'ModelOverrideEditor').props.referenceSource, 'Example catalog')
+})
+
+test('Debug is above the catalog and About follows verification as the very last section', async () => {
+  const ui = await loaded(); const children = ui.render().props.children
+  assert.ok(children.findIndex(c => c?.type?.name === 'DebugPanel') < children.findIndex(c => c?.props.className === 'mvp_groups')); assert.equal(children.at(-1).type.name, 'AboutPanel')
+  assert.equal(children.at(-2).type.name, 'VerifyPanel')
+})
+
+test('model updates are observed lazily and refresh only an active settings catalog', async () => {
+  const ui = createHarness(); const notify = ui.remoteEvents.get('llm/models-updated'); assert.equal(typeof notify, 'function')
+  notify(); await pause(); assert.deepEqual(ui.fetches, [], 'no requests while the page is not observing')
+  ui.render(); await settle(ui); const urls = () => ui.fetches.map((url) => url.slice(url.lastIndexOf('/')))
+  assert.equal(urls().filter(x => x === '/models?fresh=1').length, 1)
+  notify(); await pause(); assert.equal(urls().filter(x => x === '/models?fresh=1').length, 2)
 })

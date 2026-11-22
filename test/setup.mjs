@@ -14,4 +14,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'mv-test-home-'))
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'mv-test-home-'))
+process.env.DSH_HOME = scratch
+// Tests use a private, legacy-shaped home unless explicitly exercising a profile migration.
+delete process.env.DSH_PROFILE_DIR
+delete process.env.DSH_PROFILE
+process.once('exit', () => { try { fs.rmSync(scratch, { recursive: true, force: true }) } catch { /* Windows may briefly retain a file handle. */ } })

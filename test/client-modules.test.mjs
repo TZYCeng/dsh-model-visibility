@@ -23,7 +23,8 @@ import {
 } from '../client-src/pure.mjs'
 import { DICT } from '../client-src/dict.mjs'
 import { CSS } from '../client-src/css.mjs'
-import { createUsageApi, createVerifyApi } from '../client-src/catalog-store.mjs'
+import { createCatalog, createOverrides, createUsageApi, createVerifyApi, createBulkEffortsApi } from '../client-src/catalog-store.mjs'
+import { CHECKER_EN, CHECKER_ZH } from '../client-src/checker-dict.mjs'
 import { patchDirectoryStore } from '../client-src/composer-filter.mjs'
 
 test('formatTokens rounds into K/M readings', () => {
@@ -260,6 +261,113 @@ test('the usage store reads the ledger snapshot', async () => {
   } finally {
     globalThis.fetch = original
   }
+})
+
+const json = value => Response.json({ ok: true, value })
+const countsOf = rows => Object.fromEntries(['pending', 'written', 'skipped', 'failed'].map(k => [k, rows.filter(r => r.status === k).length]))
+const emptyBulk = () => ({ enabled: false, running: false, scopeCount: 0, rows: [], counts: countsOf([]) })
+const tick = () => new Promise(setImmediate)
+
+test('unobserved invalidations stay lazy; the first subscriber loads one current generation, then an obsolete body cannot publish', async t => {
+  const calls = []
+  t.mock.method(globalThis, 'fetch', (url, init) => { const d = Promise.withResolvers(); calls.push({ ...d, url, init }); return d.promise })
+  const stores = [createCatalog({}), createOverrides(), createUsageApi(), createVerifyApi(), createBulkEffortsApi()]
+  t.after(() => stores.forEach(s => s.dispose()))
+  const values = [{ groups: [{ id: 'current', models: [] }] }, { overrides: [], revisions: [] }, { generatedAt: 2 }, { state: { runId: 'new' } }, emptyBulk()]
+  for (const [i, s] of stores.entries()) {
+    const base = calls.length
+    await s.invalidate({ fresh: true }); await s.invalidate({ reset: true }); await tick()
+    assert.equal(calls.length, base, 'global event does not read an unobserved store')
+    const off = s.subscribe(() => {}); const offAgain = s.subscribe(() => {})
+    assert.equal(calls.length, base + 1, 'subscribers share the request')
+    const stale = s.load(), old = calls.at(-1)
+    // Coalesce several notices in one turn; only interested stores are reloaded.
+    void s.invalidate({ fresh: true }); const refreshed = s.invalidate({ reset: true }); await tick()
+    assert.equal(old.init.signal.aborted, true); assert.equal(calls.length, base + 2)
+    calls.at(-1).resolve(json(values[i])); await refreshed
+    const accepted = s.getSnapshot(); assert.equal(accepted.epoch, 2); assert.equal(accepted.status, 'ready')
+    old.resolve(json({ bad: 'stale payload' })); await stale; await tick(); assert.equal(s.getSnapshot(), accepted)
+    off(); offAgain(); await s.invalidate(); assert.equal(calls.length, base + 2)
+    const end = s.subscribe(() => {}); assert.equal(calls.length, base + 3, 'a new visit reloads')
+    const last = calls.at(-1); end(); assert.ok(last.init.signal.aborted); last.resolve(json(values[i])); await tick()
+  }
+})
+
+test('a stale run ID is never substituted with a newer one, and cancellation sends the exact known ID only', async t => {
+  const posts = []
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    if (init.method === 'POST') posts.push(JSON.parse(init.body))
+    return json({ state: { runId: 'newer', running: !init.method } })
+  })
+  const v = createVerifyApi(); t.after(() => v.dispose()); await v.load()
+  await assert.rejects(v.cancel('older'), { status: 409 }); await assert.rejects(v.cancel(), { status: 409 })
+  assert.deepEqual(posts, []); await v.cancel('newer'); assert.deepEqual(posts, [{ cancel: true, runId: 'newer' }])
+  await v.invalidate({ reset: true }); await assert.rejects(v.cancel('newer'), { status: 409 })
+  assert.equal(posts.length, 1, 'old-Host cancellation cannot hit the new Host before its first read')
+})
+
+test('a stalled POST body releases pending and aborts transport even when the underlying promise never rejects', async t => {
+  const body = Promise.withResolvers(), calls = []
+  t.mock.method(globalThis, 'fetch', (_url, init) => { calls.push(init); return { ok: true, json: () => body.promise } })
+  const api = createVerifyApi({ timeoutMs: 15 }); t.after(() => api.dispose())
+  const posted = api.start({ mode: 'public' }); assert.ok(api.getSnapshot().pending)
+  await assert.rejects(posted, { name: 'TimeoutError' }); assert.equal(api.getSnapshot().pending, false)
+  assert.equal(calls.length, 1); assert.ok(calls[0].signal.aborted)
+  body.resolve({ ok: true, value: { state: { runId: 'obsolete' } } }); await tick(); assert.equal(api.getSnapshot().snapshot, null)
+})
+
+test('bulk requests only hit the same-origin Host, store no ticket, and return a full per-route receipt', async t => {
+  const rows = [{ provider: 'a/b', model: 'c', authorized: true, status: 'pending', reason: 'ready' },
+    { provider: 'a', model: 'b/c', authorized: true, status: 'skipped', reason: 'awaiting-evidence' }]
+  const preview = { ...emptyBulk(), rows, total: 2, eligible: 1, skipped: 1, scopeCount: 2, counts: countsOf(rows), expiresAt: Date.now()+60_000, ticket: 'private-preview-ticket' }
+  const written = [{ ...rows[0], status: 'written' }, rows[1]]
+  const receipt = { enabled: true, running: false, rows: written, counts: countsOf(written), scopeCount: 2 }
+  const calls = []
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    calls.push({ url, init }); const action = init.body && JSON.parse(init.body).action
+    return json(action === 'preview' ? preview : action === 'enable' ? receipt : emptyBulk())
+  })
+  const s = createBulkEffortsApi(); t.after(() => s.dispose()); await s.load()
+  const plan = await s.preview(); assert.equal(s.getSnapshot().snapshot.enabled, false)
+  assert.equal(JSON.stringify(s.getSnapshot()).includes(plan.ticket), false)
+  await assert.rejects(s.enable(''), /ticket/); await s.enable(plan.ticket); assert.deepEqual(s.getSnapshot().snapshot.rows, written); await s.disable()
+  assert.deepEqual(calls.map(c => c.init.body ? JSON.parse(c.init.body) : 'GET'), ['GET', { action: 'preview' }, { action: 'enable', ticket: plan.ticket }, { action: 'disable' }])
+  assert.ok(calls.every(c => c.url === '/api/dsh-model-visibility/bulk-efforts' && c.init.credentials === 'same-origin' && c.init.signal instanceof AbortSignal))
+  const pristine = [...rows]
+  for (const patch of [{ scopeCount: 0 }, { eligible: 2, skipped: 0 }, { rows: [rows[0], rows[0]] }, { rows: [null, rows[1]] },
+    { rows: [{ ...rows[0], status: 'new-status' }, rows[1]] }, { rows: [{ ...rows[0], authorized: false }, rows[1]] }, { expiresAt: undefined }]) {
+    Object.assign(preview, { scopeCount: 2, eligible: 1, skipped: 1, rows: pristine, expiresAt: Date.now()+60_000 }, patch)
+    await assert.rejects(s.preview(), /Incomplete/)
+  }
+  assert.equal(calls.filter(({ init }) => init.body?.includes('"action":"enable"')).length, 1, 'a corrupt preview never writes')
+  receipt.rows = [null]; await assert.rejects(s.enable('reviewed-ticket'), /Incomplete bulk-effort receipt/)
+  assert.equal(s.getSnapshot().status, 'error'); assert.equal(s.getSnapshot().pending, false)
+})
+
+test('resetting while bulk enable is in flight clears authority, preserves only an uncertainty notice and ignores the delayed Host', async t => {
+  const deferred = Promise.withResolvers()
+  const posts = []
+  t.mock.method(globalThis, 'fetch', async (_url, init) => { if (init.method === 'POST') { posts.push(init); return deferred.promise }; return json(emptyBulk()) })
+  const s = createBulkEffortsApi(); t.after(() => s.dispose()); const off = s.subscribe(() => {}); await s.load()
+  const submitting = assert.rejects(s.enable('ticket'), { name: 'AbortError' })
+  await s.invalidate({ reset: true }); await submitting
+  assert.equal(s.getSnapshot().lostReply, true); assert.equal(s.getSnapshot().snapshot.enabled, false)
+  assert.equal(posts.length, 1); assert.ok(posts[0].signal.aborted)
+  deferred.resolve(json({ ...emptyBulk(), enabled: true })); await tick(); assert.equal(s.getSnapshot().snapshot.enabled, false)
+  s.clearLostReply(); assert.equal(s.getSnapshot().lostReply, false); off()
+})
+
+test('the dedicated checker dictionary covers disclosure, outcome statuses and row-level reasons in both languages', () => {
+  assert.deepEqual(Object.keys(CHECKER_ZH).sort(), Object.keys(CHECKER_EN).sort())
+  for (const language of [CHECKER_ZH, CHECKER_EN]) {
+    for (const section of ['target','evidence','routes','cost','undo','privacy','limit']) {
+      assert.ok(language['bulk.terms.' + section + '.title']); assert.ok(language['bulk.terms.' + section + '.body'])
+    }
+    for (const status of ['pending','written','skipped','failed']) assert.ok(language['bulk.status.' + status])
+  }
+  assert.match(CHECKER_ZH['bulk.terms.privacy.body'], /不对外联网.*不计费/)
+  assert.match(CHECKER_ZH['bulk.terms.limit.title'], /免死金牌/)
+  assert.match(CHECKER_EN['bulk.terms.undo.body'], /already written persist/)
 })
 
 test('patchDirectoryStore rewrites snapshots in place and restores', () => {

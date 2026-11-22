@@ -315,6 +315,20 @@ test('a revision conflict does not apply an index captured before model reorder'
   assert.equal(providers.relay.models.every((model) => model.contextWindow === undefined), true)
 })
 
+test('provider pre-dispatch rechecks the draft after asynchronous native-model identity work', async () => {
+  const providers = sampleProviders(); providers.relay.api = 'openai-completions'
+  const settings = fakeSettings(providers)
+  const gate = Promise.withResolvers(), ready = Promise.withResolvers()
+  const llm = { ...routeOwner('relay', false), discoverModels: () => { ready.resolve(); return gate.promise } }
+  let currentRevision = 'submitted'
+  const op = writeCapabilities(settings, { provider: 'relay', model: 'mystery-model', efforts: ['high'] }, {
+    llm, directEffort: true, beforeDispatch: () => currentRevision === 'submitted',
+  })
+  await ready.promise; currentRevision = 'removed-in-the-other-editor'; gate.resolve([{ id: 'unrelated-native-id' }])
+  const result = await op
+  assert.equal(result.reason, 'override-changed'); assert.equal(settings.calls.length, 0)
+})
+
 test('partial writeback preserves custom ladders and a standalone manual default', async () => {
   for (const efforts of [['off', 'high'], ['custom', 'high', 'off']]) {
     const providers = sampleProviders()
@@ -496,6 +510,91 @@ test('standard eligibility requires ownership, an exact unique model, and the se
   const refused = await writeCapabilities(settings, { provider: 'relay', model: modelId, efforts: ['low'] }, { standardEffort: true, llm: routeOwner() })
   assert.equal(refused.written, false)
   assert.equal(settings.calls.length, 0)
+})
+
+test('direct confirmation needs no second format switch: completions pins compat, Responses never writes it', async () => {
+  for (const api of ['openai-completions', 'openai-responses']) {
+    const providers = sampleProviders()
+    const { relay } = providers
+    relay.api = api
+    const [model] = relay.models
+    model.reasoningEfforts = { low: 'vendor-brief', off: null }
+    const settings = fakeSettings(providers)
+    const result = await writeCapabilities(settings, { provider: 'relay', model: model.id, efforts: ['high', 'custom'] }, { directEffort: true })
+    assert.equal(result.written, true)
+    assert.deepEqual(result.unresolvedEfforts, ['custom'])
+    assert.deepEqual(result.localOnly, ['reasoningEfforts'])
+    assert.deepEqual(model.reasoningEfforts, { off: null, low: 'vendor-brief', high: 'high' })
+    assert.deepEqual(model.compat, api === 'openai-completions' ? { thinkingFormat: 'openai', supportsReasoningEffort: true } : undefined)
+  }
+})
+
+test('direct mode on nonstandard protocols reuses model wire values or explicit input; no guessed gaps', async () => {
+  const providers = sampleProviders(), settings = fakeSettings(providers)
+  const { relay } = providers; relay.api = 'anthropic-messages'
+  const [model] = relay.models
+  model.reasoningEfforts = { low: 'brief', high: 'detailed', unknownFuture: 'keep' }
+  const override = { provider: 'relay', model: model.id, efforts: ['low', 'max'] }
+  const already = await writeCapabilities(settings, { ...override, efforts: ['low'] }, { directEffort: true })
+  assert.equal(already.reason, 'already-mapped'); assert.deepEqual(already.reusedEfforts, ['low'])
+  const partial = await writeCapabilities(settings, override, { directEffort: true })
+  assert.equal(partial.written, false)
+  assert.deepEqual(partial.reusedEfforts, ['low']); assert.equal(settings.calls.length, 0)
+  assert.deepEqual(partial.unresolvedEfforts, ['max'])
+  await writeCapabilities(settings, override, { directEffort: true, reasoningEffortMappings: { max: 'vendor-ultra' } })
+  assert.deepEqual(model.reasoningEfforts, { low: 'brief', high: 'detailed', unknownFuture: 'keep', max: 'vendor-ultra' })
+  assert.equal(model.compat, undefined)
+})
+
+test('ordinary direct advanced mappings cannot replace the exact high/off values or erase an existing ladder', async () => {
+  const providers = sampleProviders(), settings = fakeSettings(providers)
+  const { relay } = providers; relay.api = 'openai-completions'
+  const [model] = relay.models
+  model.reasoningEfforts = { off: null, high: 'verbose' }
+  const id = { provider: 'relay', model: model.id }
+  const result = await writeCapabilities(settings, { ...id, efforts: ['off', 'high', 'max'] }, {
+    directEffort: true, reasoningEffortMappings: { off: 'forbidden', high: 'do-not-replace', max: 'vendor-max' },
+  })
+  assert.equal(result.written, true)
+  assert.deepEqual(result.protectedEfforts, ['off', 'high'])
+  assert.deepEqual(result.localOnly, ['reasoningEfforts'])
+  assert.deepEqual(model.reasoningEfforts, { off: null, high: 'verbose', max: 'vendor-max' })
+  const attempt = await writeCapabilities(settings, { ...id, reasoningSupported: false }, { directEffort: true })
+  assert.equal(attempt.written, false)
+  assert.deepEqual(model.reasoningEfforts, { off: null, high: 'verbose', max: 'vendor-max' })
+  assert.equal(settings.calls.length, 1)
+})
+
+test('direct mode refuses disabled and inherited policies and reference edits survive an omitted request flag', async () => {
+  const providers = sampleProviders(), settings = fakeSettings(providers)
+  const { relay } = providers; relay.api = 'openai-completions'
+  const [model] = relay.models
+  const override = { provider: 'relay', model: model.id, efforts: ['low', 'high'], referencePrefill: true }
+  for (const plane of [model, relay]) {
+    plane.compat = { supportsReasoningEffort: false }
+    const result = await writeCapabilities(settings, override, { directEffort: true, referencePrefill: false })
+    assert.equal(result.reasoningConflict, 'reference-disabled'); delete plane.compat
+  }
+  const inherited = await writeCapabilities(settings, override, { directEffort: true, llm: routeOwner('relay', false) })
+  assert.equal(inherited.reasoningConflict, 'inherited-ladder')
+  assert.equal(settings.calls.length, 0)
+  model.reasoningEfforts = { low: 'vendor-low' }
+  const result = await writeCapabilities(settings, override, { directEffort: true, referencePrefill: false,
+    reasoningEffortMappings: { low: 'do-not-overwrite' } })
+  assert.deepEqual(model.reasoningEfforts, { low: 'vendor-low', high: 'high' })
+  assert.deepEqual(result.protectedEfforts, ['low'])
+  assert.equal(stripWrittenFields(override, result.fields, result.localOnly).referencePrefill, true)
+})
+
+test('direct plan refuses an expression under a map or behind the selected protocol or endpoint', async () => {
+  for (const subpath of [['models', '0', 'reasoningEfforts', 'low'], ['api'], ['baseURL'], ['compat', 'thinkingFormat']]) {
+    const providers = sampleProviders(), settings = fakeSettings(providers), { relay } = providers
+    relay.api = 'openai-completions'; relay.models[0].reasoningEfforts = { low: 'vendor-low' }
+    const raw = structuredClone({ providers }); applyOp(raw, ['providers', 'relay', ...subpath], { __jsExpr: 'inert' })
+    const configEditor = { configuration: () => [{ entry: { options: { id: 'llm-pi-ai', config: raw } }, override: raw }] }
+    const result = await writeCapabilities(settings, { provider: 'relay', model: relay.models[0].id, efforts: ['high'] }, { directEffort: true, configEditor })
+    assert.equal(result.reason, 'expression-backed'); assert.equal(settings.calls.length, 0)
+  }
 })
 
 test('an automated result cannot opt in to standard wire fields', async () => {

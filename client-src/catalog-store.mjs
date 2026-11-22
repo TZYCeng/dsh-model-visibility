@@ -1,569 +1,329 @@
 import { API } from './constants.mjs'
+import { clientTrace, tracedFetch } from './diagnostic-events.mjs'
 
 /** A separate key space from the composer visibility keys. */
 export function overrideIdentity(provider, model) {
   return JSON.stringify([provider, model])
 }
 
-export function createCatalog(ctx) {
+const failureText = (error) => String(error?.message ?? error)
+const record = (value) => value != null && typeof value === 'object' && !Array.isArray(value)
+const abortReason = () => Object.assign(new Error('The Host connection or request changed.'), { name: 'AbortError' })
+
+async function httpFailure(response) {
+  let code, message
+  try {
+    const error = (await response.json())?.error
+    code = error?.code
+    message = error?.message
+  } catch { /* a non-JSON error still has an HTTP status */ }
+  return Object.assign(new Error(`HTTP ${response.status}${code || message ? ` (${[code, message].filter(Boolean).join(': ')})` : ''}`),
+    { status: response.status, code })
+}
+
+/** Scope the deadline to the *whole* operation, including a stalled body or a Remote fallback that ignores abort. */
+function bounded(controller, timeoutMs, operation) {
+  const { signal } = controller
+  let rejectAbort
+  const aborted = new Promise((_, reject) => { rejectAbort = () => reject(signal.reason ?? abortReason()) })
+  signal.addEventListener('abort', rejectAbort, { once: true })
+  const timer = setTimeout(() => controller.abort(Object.assign(new Error('Host request timed out.'), { name: 'TimeoutError' })), timeoutMs)
+  let task
+  try { signal.throwIfAborted(); task = operation(signal) } catch (error) { task = Promise.reject(error) }
+  return Promise.race([task, aborted]).finally(() => {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', rejectAbort)
+  })
+}
+
+async function request(path, signal, payload) {
+  const response = await tracedFetch(API + path, {
+    headers: payload === undefined ? { accept: 'application/json' } : { accept: 'application/json', 'content-type': 'application/json' },
+    credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal,
+    ...(payload === undefined ? {} : { method: 'POST', body: JSON.stringify(payload) }),
+  })
+  if (!response.ok) throw await httpFailure(response)
+  const body = await response.json()
+  if (body?.ok !== true || !record(body.value)) throw new Error('Malformed Host response.')
+  return body.value
+}
+
+/**
+ * All four mirrors share the same ownership rules. Explicit UI refresh is allowed;
+ * unsolicited events only mark a mirror dirty. Only an observer may start that
+ * background read/poll. A connection reset invalidates *writes* as well as reads:
+ * losing a response does not revoke a mutation the former Host already received.
+ */
+function mirror({ name, initial, read, cadence, warnOnLost, timeoutMs = 25_000 }) {
+  let state = { ...initial, epoch: 0 }, reader = null, writer = null
+  let dirty = 0, queued = null, timer = null, period = 0, disposed = false, lostReply = false
   const listeners = new Set()
-  let state = {
-    status: 'idle',
-    groups: [],
-    failures: [],
-    providers: [],
-    learned: null,
-    error: null,
-    detailsError: null,
-    source: null,
-    generatedAt: 0,
+  const publish = (patch) => {
+    state = { ...patch, epoch: state.epoch, ...(warnOnLost ? { lostReply } : {}) }
+    for (const fn of listeners) fn()
   }
-  let inflight = null
-  let generation = 0
-
-  const publish = (next) => {
-    state = next
-    for (const listener of listeners) listener()
+  const stopTimer = () => { clearInterval(timer); timer = null; period = 0 }
+  const rearm = () => {
+    const next = !disposed && listeners.size > 0 ? cadence?.(state) ?? 0 : 0
+    if (next === period) return
+    stopTimer()
+    if (next > 0) {
+      period = next
+      timer = setInterval(() => { void load() }, next)
+      timer?.unref?.()
+    }
   }
-
-  /** Message of a failed Remote envelope. */
-  const failureMessage = (response) => {
-    const failure = response && response.error
-    return failure
-      ? String(failure.code) + ': ' + String(failure.message)
-      : 'unknown error'
+  const dropReader = () => {
+    const previous = reader
+    reader = null
+    if (previous) previous.controller.abort(abortReason())
   }
-
-  /**
-   * Read the enriched catalog from the Host half. It carries the same
-   * groups as `session.modelCatalog` plus context windows and modalities.
-   */
-  const fetchHostCatalog = async (fresh, reload) => {
-    const query = reload ? '?fresh=1&reload=1' : fresh ? '?fresh=1' : ''
-    const response = await fetch(API + '/models' + query, {
-      method: 'GET',
-      headers: { accept: 'application/json' },
-      credentials: 'same-origin',
-      cache: 'no-store',
-      redirect: 'error',
+  const load = (options = {}) => {
+    if (disposed || writer) return Promise.resolve()
+    const priority = Math.max(dirty, options.reload ? 2 : options.fresh ? 1 : 0)
+    if (reader && !options.reload && !options.supersede && priority <= reader.priority) return reader.promise
+    dropReader()
+    dirty = -1
+    const job = { controller: new AbortController(), priority }
+    reader = job
+    const traceRead = !cadence || state.status !== 'ready' || priority > 0
+    if (traceRead) clientTrace(name, 'read', { mode: priority === 2 ? 'reload' : priority === 1 ? 'fresh' : 'normal' })
+    job.promise = bounded(job.controller, timeoutMs, (signal) => read(signal, priority)).then((next) => {
+      if (reader !== job) return
+      publish({ ...initial, ...next, status: 'ready', error: null, refreshing: false })
+      if (traceRead) clientTrace(name, 'received', { status: 'ready' })
+    }).catch((error) => {
+      if (reader !== job) { if (traceRead) clientTrace(name, 'discard', {}); return }
+      publish({ ...state, status: 'error', refreshing: false, error: failureText(error) })
+      clientTrace(name, 'read-failed', { status: error.status })
+    }).finally(() => { if (reader === job) reader = null; rearm() })
+    // Do not wake a whole section for every successful poll's intermediate state.
+    if (!cadence || state.status !== 'ready') publish({ ...state, status: state.status === 'ready' ? 'ready' : 'loading', refreshing: true })
+    return job.promise
+  }
+  const scheduleRead = () => {
+    if (!listeners.size || writer || disposed) return Promise.resolve()
+    return queued ??= Promise.resolve().then(() => {
+      queued = null
+      if (!disposed && listeners.size && dirty >= 0) return load()
     })
-    if (!response.ok) throw await httpFailure(response)
-    const body = await response.json()
-    const value = body && body.ok === true ? body.value : null
-    if (!Array.isArray(value?.groups)) {
-      throw new Error('malformed capability catalog')
-    }
-    return value
   }
-
-  /** Read the shipped catalog; the fallback when the route is unavailable. */
-  const fetchOfficialCatalog = async () => {
-    const response = await ctx.remote.session.modelCatalog()
-    if (!response || response.ok !== true) throw new Error(failureMessage(response))
-    const value = response.value || {}
-    return {
-      // Only the official Session catalog's reasoning ladder comes from the
-      // adapter. Do not infer request settings from enriched reference data.
-      groups: Array.isArray(value.groups) ? value.groups.map((group) => ({
-        ...group,
-        models: Array.isArray(group.models) ? group.models.map((model) =>
-          Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0
-            ? { ...model, requestReasoning: model.reasoning }
-            : model) : [],
-      })) : [],
-      failures: Array.isArray(value.failures) ? value.failures : [],
-      generatedAt: 0,
+  const invalidate = ({ fresh = false, reset = false } = {}) => {
+    if (disposed) return Promise.resolve()
+    dirty = Math.max(dirty, reader?.priority ?? 0, fresh ? 1 : 0)
+    dropReader()
+    if (reset) {
+      const previous = writer
+      writer = null
+      if (previous && warnOnLost?.(previous.action)) lostReply = true
+      previous?.controller.abort(abortReason())
+      state = { ...initial, epoch: state.epoch + 1 }
+      publish(state)
+      rearm()
     }
+    return scheduleRead()
   }
-
-  const load = (options) => {
-    const fresh = options?.fresh === true
-    const reload = options?.reload === true
-    const priority = reload ? 2 : fresh ? 1 : 0
-    // A fresh read must not join an older browser GET. A known Host change
-    // can also supersede a read of equal priority, without another hard purge.
-    if (inflight !== null && !reload && !options?.supersede && priority <= inflight.priority) return inflight.run
-    const token = ++generation
-    const run = Promise.resolve().then(async () => {
-      try {
-        const value = await fetchHostCatalog(fresh, reload)
-        if (token !== generation) return
-        publish({
-          status: 'ready',
-          groups: Array.isArray(value.groups) ? value.groups : [],
-          failures: Array.isArray(value.failures) ? value.failures : [],
-          providers: Array.isArray(value.providers) ? value.providers : [],
-          // The section reads `state.learned` (the learned-snapshot meta with
-          // its feature flags); this store is its only source, so the field
-          // name must stay in lock-step with lib/model-info.js's response.
-          learned: value.learned && typeof value.learned === 'object' ? value.learned : null,
-          error: null,
-          detailsError: null,
-          source: 'host',
-          generatedAt: Number.isFinite(value.generatedAt) ? value.generatedAt : 0,
-        })
-        return
-      } catch (detailError) {
-        if (token !== generation) return
-        const detail = String(detailError && detailError.message ? detailError.message : detailError)
-        try {
-          const value = await fetchOfficialCatalog()
-          if (token !== generation) return
-          publish({
-            status: 'ready',
-            groups: value.groups,
-            failures: value.failures,
-            providers: [],
-            learned: null,
-            error: null,
-            detailsError: detail,
-            source: 'catalog',
-            generatedAt: value.generatedAt,
-          })
-        } catch (error) {
-          if (token !== generation) return
-          publish({
-            ...state,
-            status: 'error',
-            error: String(error && error.message ? error.message : error),
-          })
-        }
-      } finally {
-        if (inflight?.run === run) inflight = null
+  const mutate = async (action, operation, accept, onError, signal) => {
+    if (disposed || writer) throw new Error('A Host request is unavailable or already pending.')
+    if (signal?.aborted) throw signal.reason ?? abortReason()
+    dropReader()
+    const job = { controller: new AbortController(), action }
+    writer = job
+    const abort = () => job.controller.abort(signal.reason ?? abortReason())
+    signal?.addEventListener('abort', abort, { once: true })
+    publish({ ...state, pending: true, refreshing: false, error: null })
+    // Never log request bodies, tickets, config values, headers, URLs, or error text.
+    clientTrace(name, action + '.send', {})
+    try {
+      const value = await bounded(job.controller, timeoutMs, operation)
+      if (writer !== job || disposed) throw abortReason()
+      const next = accept?.(value) ?? state
+      publish({ ...next, pending: false, refreshing: false, error: null })
+      clientTrace(name, action + '.settled', { enabled: value?.enabled, written: value?.counts?.written, runId: value?.state?.runId })
+      return value
+    } catch (error) {
+      if (writer === job) {
+        const next = onError?.(error) ?? state
+        publish({ ...next, pending: false, refreshing: false })
+        clientTrace(name, action + '.not-confirmed', { status: error.status })
       }
-    })
-    inflight = { priority, run }
-    if (state.status !== 'ready') publish({ ...state, status: 'loading', error: null })
-    return run
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', abort)
+      if (writer === job) {
+        writer = null
+        if (dirty >= 0) void scheduleRead()
+      }
+      rearm()
+    }
   }
-
   return {
+    getSnapshot: () => state, load, invalidate, mutate,
+    clearLostReply() { if (lostReply) { lostReply = false; publish(state) } },
     subscribe(fn) {
+      if (disposed) return () => {}
+      const first = !listeners.size
       listeners.add(fn)
+      if (first) { void load(); rearm() }
       return () => {
         listeners.delete(fn)
+        if (!listeners.size) {
+          dirty = Math.max(dirty, reader?.priority ?? 0)
+          dropReader()
+          stopTimer()
+        }
       }
     },
-    getSnapshot() {
-      return state
-    },
-    load,
-    refresh() {
-      return load({ fresh: true })
-    },
-    reload() {
-      return load({ reload: true })
-    },
-    afterChange({ fresh = true } = {}) {
-      return load({ supersede: true, fresh })
+    dispose() {
+      disposed = true; listeners.clear(); stopTimer(); dropReader()
+      const previous = writer
+      writer = null
+      previous?.controller.abort(abortReason())
     },
   }
 }
 
-/**
- * Manual capability overrides, persisted by the Host half.
- *
- * The page only edits one model at a time; the store keeps the whole list so
- * every row knows whether it already has an override. An older Host half
- * answers 404 and the editor stays hidden behind the `overrides` feature
- * flag.
- */
-export function createOverrides() {
-  const listeners = new Set()
-  const unavailable = { status: 'ready', entries: [], revisions: null, available: false, error: null, pending: false, refreshing: false }
-  let state = { ...unavailable, status: 'idle', available: null }
-  let inflight = null
-  let generation = 0
+export function createCatalog(ctx, options) {
+  const initial = { status: 'idle', groups: [], failures: [], providers: [], learned: null, error: null, detailsError: null, source: null, generatedAt: 0 }
+  const store = mirror({ name: 'catalog', initial, timeoutMs: options?.timeoutMs ?? 90_000,
+    read: async (signal, priority) => {
+      try {
+        const query = priority === 2 ? '?fresh=1&reload=1' : priority === 1 ? '?fresh=1' : ''
+        const value = await request('/models' + query, signal)
+        if (!Array.isArray(value.groups)) throw new Error('Malformed capability catalog.')
+        return { groups: value.groups, failures: Array.isArray(value.failures) ? value.failures : [],
+          providers: Array.isArray(value.providers) ? value.providers : [], learned: record(value.learned) ? value.learned : null,
+          source: 'host', generatedAt: Number.isFinite(value.generatedAt) ? value.generatedAt : 0 }
+      } catch (error) {
+        signal.throwIfAborted()
+        const response = await ctx.remote.session.modelCatalog()
+        if (response?.ok !== true) throw new Error(failureText(response?.error?.message ?? 'Catalog unavailable.'))
+        const value = response.value ?? {}
+        // Only genuine adapter declarations belong in the request ladder.
+        const groups = Array.isArray(value.groups) ? value.groups.map((group) => ({ ...group,
+          models: Array.isArray(group.models) ? group.models.map((model) => Array.isArray(model.reasoning?.efforts) && model.reasoning.efforts.length > 0
+            ? { ...model, requestReasoning: model.reasoning } : model) : [] })) : []
+        return { groups, failures: Array.isArray(value.failures) ? value.failures : [], source: 'catalog', detailsError: failureText(error) }
+      }
+    },
+  })
+  return { ...store, refresh: () => store.load({ fresh: true }), reload: () => store.load({ reload: true }),
+    afterChange: ({ fresh = true } = {}) => store.load({ fresh, supersede: true }) }
+}
 
-  const publish = (next) => {
-    state = next
-    for (const listener of listeners) listener()
-  }
-
-  const readValue = async (response) => {
-    if (!response.ok) throw await httpFailure(response)
-    const body = await response.json()
-    const value = body?.ok === true ? body.value : null
-    if (!Array.isArray(value?.overrides)) throw new Error('malformed override list')
-    return value
-  }
-
+export function createOverrides(options) {
+  const initial = { status: 'idle', entries: [], revisions: null, available: null, error: null, pending: false, refreshing: false }
+  const unavailable = { ...initial, status: 'ready', available: false }
   const readyState = (value) => {
-    // A legacy Host cannot guard a full-entry replacement against lost edits.
+    if (!Array.isArray(value?.overrides)) throw new Error('Malformed override list.')
     if (!Array.isArray(value.revisions)) return unavailable
     const revisions = new Map()
     for (const item of value.revisions) {
       if (typeof item?.provider !== 'string' || typeof item.model !== 'string' ||
-          typeof item.revision !== 'string' || item.revision === '') throw new Error('malformed override revisions')
+          typeof item.revision !== 'string' || item.revision === '') throw new Error('Malformed override revisions.')
       const key = overrideIdentity(item.provider, item.model)
-      if (revisions.has(key)) throw new Error('duplicate override revision')
+      if (revisions.has(key)) throw new Error('Duplicate override revision.')
       revisions.set(key, item.revision)
     }
     if (value.overrides.length !== revisions.size || value.overrides.some((entry) =>
-      !revisions.has(overrideIdentity(entry?.provider, entry?.model)))) {
-      throw new Error('missing override revision')
-    }
+      !revisions.has(overrideIdentity(entry?.provider, entry?.model)))) throw new Error('Missing override revision.')
     return { ...unavailable, available: true, entries: value.overrides, revisions }
   }
-
-  const load = () => {
-    if (state.pending) return Promise.resolve()
-    if (inflight !== null) return inflight
-    const token = ++generation
-    const run = Promise.resolve().then(async () => {
-      try {
-        const response = await fetch(API + '/overrides', {
-          method: 'GET',
-          headers: { accept: 'application/json' },
-          credentials: 'same-origin',
-          cache: 'no-store',
-          redirect: 'error',
-        })
-        const next = response.status === 404 ? unavailable : readyState(await readValue(response))
-        if (token === generation) publish(next)
-      } catch (error) {
-        if (token === generation) publish({ ...state, status: 'error', error: failureText(error), refreshing: false })
-      } finally {
-        if (inflight === run) inflight = null
+  const store = mirror({ name: 'overrides', initial, timeoutMs: options?.timeoutMs,
+    read: async (signal) => {
+      try { return readyState(await request('/overrides', signal)) } catch (error) {
+        if (error.status === 404) return unavailable
+        throw error
       }
-    })
-    inflight = run
-    publish({ ...state, status: state.status === 'ready' ? 'ready' : 'loading', error: null, refreshing: true })
-    return run
-  }
-
-  /** Send the revision captured when the draft opened, not the latest one. */
+    },
+  })
   const write = async (payload, expectedRevision) => {
-    if (state.status !== 'ready' || state.available !== true || state.pending) {
-      throw new Error('Override list is not ready.')
-    }
-    const key = overrideIdentity(payload.provider, payload.model)
-    if ((state.revisions.get(key) ?? null) !== expectedRevision) {
+    const state = store.getSnapshot()
+    if (state.status !== 'ready' || !state.available || state.pending) throw new Error('Override list is not ready.')
+    if ((state.revisions.get(overrideIdentity(payload.provider, payload.model)) ?? null) !== expectedRevision) {
       throw Object.assign(new Error('Override changed.'), { status: 409 })
     }
-    generation += 1
-    inflight = null
-    publish({ ...state, pending: true, refreshing: false })
-    try {
-      const response = await fetch(API + '/overrides', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        credentials: 'same-origin',
-        cache: 'no-store',
-        redirect: 'error',
-        body: JSON.stringify({ ...payload, expectedRevision }),
-      })
-      const value = await readValue(response)
-      publish(readyState(value))
+    return store.mutate(payload.remove ? 'remove' : 'save', (signal) => request('/overrides', signal, { ...payload, expectedRevision }), readyState,
+      (error) => error.status === 404 ? unavailable : { ...state, status: 'error', error: failureText(error) })
+  }
+  return { ...store, save: write, remove: (provider, model, revision) => write({ remove: true, provider, model }, revision) }
+}
+
+const emptySnapshot = () => ({ status: 'idle', snapshot: null, error: null, pending: false })
+const snapshotOf = (value) => ({ status: 'ready', snapshot: value })
+
+export function createUsageApi(options) {
+  const store = mirror({ name: 'usage', initial: emptySnapshot(), timeoutMs: options?.timeoutMs,
+    read: async (signal) => snapshotOf(await request('/usage', signal)),
+    cadence: (state) => state.snapshot?.computing ? 3_000 : 30_000,
+  })
+  return { ...store, refresh: () => store.load() }
+}
+
+function verifyValue(value) {
+  if (!record(value?.state)) throw new Error('Malformed verification snapshot.')
+  return snapshotOf(value)
+}
+
+export function createVerifyApi(options) {
+  const store = mirror({ name: 'verify', initial: emptySnapshot(), timeoutMs: options?.timeoutMs,
+    read: async (signal) => verifyValue(await request('/verify', signal)),
+    cadence: ({ snapshot }) => snapshot?.state?.running || snapshot?.state?.pendingWrite ? 2_000 : 60_000,
+  })
+  const post = (action, payload) => store.mutate(action, (signal) => request('/verify', signal, payload), verifyValue,
+    (error) => ({ ...store.getSnapshot(), status: 'error', error: failureText(error) })).catch((error) => {
+    // Timeout does not mean the Host rejected the write. Refresh observed state; never replay a start/cancel.
+    if (error?.name !== 'AbortError') void store.invalidate()
+    throw error
+  })
+  const bulk = createBulkEffortsApi(options)
+  return { ...store, bulk, start: (payload) => post('start', payload),
+    cancel(runId) {
+      const current = store.getSnapshot().snapshot?.state?.runId
+      // Do not silently substitute the latest ID: the user clicked *their* displayed run.
+      if ((current ?? undefined) !== runId) return Promise.reject(Object.assign(new Error('The verification run changed.'), { status: 409 }))
+      return post('cancel', runId === undefined ? { cancel: true } : { cancel: true, runId })
+    },
+    dispose() { store.dispose(); bulk.dispose() },
+  }
+}
+
+/** The preview ticket lives only in the open confirmation, never in preferences, traces, or a cached GET. */
+export function createBulkEffortsApi(options) {
+  const outcomes = ['pending', 'written', 'skipped', 'failed']
+  const count = (n) => Number.isSafeInteger(n) && n >= 0
+  const validRows = (rows) => Array.isArray(rows) && rows.every(row => record(row) && outcomes.includes(row.status) &&
+    typeof row.provider === 'string' && row.provider !== '' && typeof row.model === 'string' && row.model !== '') &&
+    new Set(rows.map(row => overrideIdentity(row.provider, row.model))).size === rows.length
+  const valueOf = (value) => {
+    if (typeof value?.enabled !== 'boolean' || typeof value.running !== 'boolean') throw new Error('Malformed bulk-effort status.')
+    const { rows, counts } = value
+    if (!validRows(rows) || !record(counts) || !outcomes.every(k => count(counts[k]) && counts[k] === rows.filter(r => r.status === k).length) ||
+        (value.enabled && !count(value.scopeCount))) throw Object.assign(new Error('Incomplete bulk-effort receipt.'), { code: 'bulk/receipt' })
+    return snapshotOf(value)
+  }
+  const store = mirror({ name: 'bulk-efforts', initial: emptySnapshot(), timeoutMs: options?.timeoutMs, warnOnLost: (action) => action !== 'preview',
+    read: async (signal) => valueOf(await request('/bulk-efforts', signal)),
+    cadence: (state) => state.snapshot?.running ? 2_000 : state.snapshot?.enabled ? 10_000 : 60_000,
+  })
+  const change = (action, ticket) => store.mutate(action, (signal) => request('/bulk-efforts', signal, ticket ? { action, ticket } : { action }),
+    valueOf, (error) => ({ ...store.getSnapshot(), status: 'error', error: failureText(error) }))
+  return { ...store,
+    async preview(signal) {
+      const value = await store.mutate('preview', (requestSignal) => request('/bulk-efforts', requestSignal, { action: 'preview' }), null, null, signal)
+      const { rows, scopeCount, total, eligible, skipped, expiresAt } = value
+      if (typeof value.ticket !== 'string' || !value.ticket || !Number.isFinite(expiresAt) ||
+          ![total, eligible, skipped, scopeCount].every(count) || eligible + skipped !== total || !validRows(rows) || rows.length !== total ||
+          rows.some(row => typeof row.authorized !== 'boolean' || row.status === 'written' || (row.status === 'pending' && !row.authorized)) ||
+          rows.filter(row => row.status === 'pending').length !== eligible || rows.filter(row => row.authorized).length !== scopeCount) {
+        throw new Error('Incomplete bulk-effort preview; nothing was authorized.')
+      }
       return value
-    } catch (error) {
-      if (error.status === 404) publish(unavailable)
-      else publish({ ...state, status: 'error', error: failureText(error), pending: false })
-      throw error
-    }
-  }
-
-  return {
-    subscribe(fn) {
-      listeners.add(fn)
-      return () => {
-        listeners.delete(fn)
-      }
     },
-    getSnapshot() {
-      return state
+    enable(ticket) {
+      if (typeof ticket !== 'string' || !ticket) return Promise.reject(new Error('A confirmed preview ticket is required.'))
+      return change('enable', ticket)
     },
-    load,
-    save(entry, expectedRevision) {
-      return write(entry, expectedRevision)
-    },
-    remove(provider, model, expectedRevision) {
-      return write({ remove: true, provider, model }, expectedRevision)
-    },
-  }
-}
-
-/* ------------------------------------------------------ composer filter */
-
-/** Common failure text for envelopes and HTTP errors. */
-function failureText(error) {
-  return String(error && error.message ? error.message : error)
-}
-
-async function httpFailure(response) {
-  let detail = ''
-  try {
-    const { error } = await response.json()
-    if (error) detail = ' (' + String(error.code) + ': ' + String(error.message) + ')'
-  } catch (_error) {
-    // The status is still useful when a proxy returns a non-JSON body.
-  }
-  return Object.assign(new Error('HTTP ' + response.status + detail), { status: response.status })
-}
-
-/**
- * Token-usage store behind the page's stats strip.
- *
- * Reads are cheap; the Host keeps a ledger and rescans on its own schedule,
- * so the client only polls and prints. An older Host answers 404 and the
- * strip renders its "host is stale" hint.
- */
-export function createUsageApi() {
-  const listeners = new Set()
-  let state = { status: 'idle', snapshot: null, error: null }
-  let inflight = null
-  let timer = null
-  let timerMs = null
-
-  const publish = (next) => {
-    state = next
-    for (const listener of listeners) listener()
-  }
-
-  const read = async () => {
-    if (inflight !== null) return inflight
-    const run = Promise.resolve().then(async () => {
-      try {
-        const response = await fetch(API + '/usage', {
-          headers: { accept: 'application/json' },
-          credentials: 'same-origin',
-          cache: 'no-store',
-          redirect: 'error',
-        })
-        if (!response.ok) throw await httpFailure(response)
-        const body = await response.json()
-        const value = body && body.ok === true ? body.value : null
-        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('malformed usage snapshot')
-        publish({ status: 'ready', snapshot: value, error: null })
-      } catch (error) {
-        publish({ ...state, status: 'error', error: failureText(error) })
-      } finally {
-        if (inflight === run) inflight = null
-      }
-    })
-    inflight = run
-    return run
-  }
-
-  /**
-   * Poll cadence follows the ledger's own progress: a cold scan of the session
-   * tree takes seconds, so the strip asks again quickly until it settles
-   * instead of showing em dashes for half a minute.
-   */
-  const LIVE_POLL_MS = 3_000
-  const POLL_MS = 30_000
-  const rearm = () => {
-    // Same rule as the verify store: no observer, no armed timer.
-    if (listeners.size === 0) {
-      stopTimer()
-      return
-    }
-    const wantMs = state.snapshot?.computing === true ? LIVE_POLL_MS : POLL_MS
-    if (timer !== null && timerMs === wantMs) return
-    if (timer !== null) clearInterval(timer)
-    timerMs = wantMs
-    timer = setInterval(() => {
-      void read().then(rearm, rearm)
-    }, wantMs)
-    if (typeof timer === 'object' && timer !== null && typeof timer.unref === 'function') timer.unref()
-  }
-  const stopTimer = () => {
-    if (timer !== null) {
-      clearInterval(timer)
-      timer = null
-      timerMs = null
-    }
-  }
-
-  return {
-    subscribe(fn) {
-      const first = listeners.size === 0
-      listeners.add(fn)
-      // Read once immediately: waiting a full poll interval is why the strip
-      // looked empty on every first visit.
-      if (first) {
-        void read().then(rearm, rearm)
-      }
-      return () => {
-        listeners.delete(fn)
-        if (listeners.size === 0) stopTimer()
-      }
-    },
-    getSnapshot() {
-      return state
-    },
-    load() {
-      return read().then(
-        (value) => {
-          rearm()
-          return value
-        },
-        (error) => {
-          rearm()
-          throw error
-        },
-      )
-    },
-    refresh() {
-      // A POST rescan is never needed: the Host rescan throttle refreshes on
-      // reads anyway. A plain read is enough here.
-      return this.load()
-    },
-  }
-}
-
-/**
- * The verify sweep's client store: read progress, start, cancel. The Host
- * keeps the run in memory, so the store just mirrors its snapshots and keeps
- * one 2 s poll alive while a sweep is running (or being observed).
- */
-export function createVerifyApi() {
-  const listeners = new Set()
-  let state = { status: 'idle', snapshot: null, error: null, pending: false }
-  let inflight = null
-  let generation = 0
-  let timer = null
-  /** Cadence the armed timer currently runs at, so rearm can compare. */
-  let timerMs = null
-
-  const publish = (next) => {
-    state = next
-    for (const listener of listeners) listener()
-  }
-
-  const read = async () => {
-    // A GET sent while a POST is pending can still capture pre-POST state.
-    if (state.pending) return
-    if (inflight !== null) return inflight
-    const token = generation
-    const run = Promise.resolve().then(async () => {
-      try {
-        const response = await fetch(API + '/verify', {
-          headers: { accept: 'application/json' },
-          credentials: 'same-origin',
-          cache: 'no-store',
-          redirect: 'error',
-        })
-        if (!response.ok) throw new Error('HTTP ' + response.status)
-        const body = await response.json()
-        const value = body && body.ok === true ? body.value : null
-        if (value === null || typeof value !== 'object') throw new Error('malformed verify snapshot')
-        if (token === generation) publish({ status: 'ready', snapshot: value, error: null, pending: false })
-      } catch (error) {
-        if (token === generation) publish({ ...state, status: 'error', error: failureText(error) })
-      } finally {
-        if (token === generation) inflight = null
-      }
-    })
-    inflight = run
-    return run
-  }
-
-  const post = async (payload) => {
-    const response = await fetch(API + '/verify', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      credentials: 'same-origin',
-      cache: 'no-store',
-      redirect: 'error',
-      body: JSON.stringify(payload ?? {}),
-    })
-    if (response.status === 404) throw new Error('HTTP 404')
-    if (!response.ok) {
-      let detail = ''
-      try {
-        const body = await response.json()
-        if (body?.error) detail = String(body.error.code) + ': ' + String(body.error.message)
-      } catch (_error) {
-        // Non-JSON error body: the status code is enough.
-      }
-      throw new Error('HTTP ' + response.status + detail)
-    }
-    const body = await response.json()
-    if (body?.ok === true && body.value !== null && typeof body.value === 'object') return body.value
-    if (body?.ok === true) throw new Error('malformed verify snapshot')
-    throw new Error(failureText(body?.error))
-  }
-
-  const mutate = async (payload) => {
-    if (state.pending) throw new Error('A verification request is already pending.')
-    // Drop the old GET without waiting for it. Its result (or error) no longer
-    // describes the state this POST is changing.
-    generation += 1
-    inflight = null
-    publish({ ...state, error: null, pending: true })
-    try {
-      const value = await post(payload)
-      publish({ status: 'ready', snapshot: value, error: null, pending: false })
-      return value
-    } catch (error) {
-      publish({ ...state, pending: false })
-      throw error
-    } finally {
-      rearm()
-    }
-  }
-
-  const SWEEP_POLL_MS = 2_000
-  const IDLE_POLL_MS = 60_000
-  /** Re-arm the timer at the cadence the *current* snapshot needs. */
-  const rearm = () => {
-    // Never arm a timer nobody will observe: a bare `load()` (a test, an
-    // explicit refresh) must not leave an interval holding the page alive.
-    if (listeners.size === 0) {
-      stopTimer()
-      return
-    }
-    const wantFast = state.snapshot?.state?.running === true || state.snapshot?.state?.pendingWrite != null
-    const wantMs = wantFast ? SWEEP_POLL_MS : IDLE_POLL_MS
-    if (timer !== null && timerMs === wantMs) return
-    if (timer !== null) clearInterval(timer)
-    timerMs = wantMs
-    timer = setInterval(() => {
-      void read().then(rearm, rearm)
-    }, wantMs)
-    // A polling strip must not keep a non-browser process alive.
-    if (typeof timer === 'object' && timer !== null && typeof timer.unref === 'function') timer.unref()
-  }
-  const stopTimer = () => {
-    if (timer !== null) {
-      clearInterval(timer)
-      timer = null
-      timerMs = null
-    }
-  }
-
-  return {
-    subscribe(fn) {
-      const first = listeners.size === 0
-      listeners.add(fn)
-      if (first) {
-        void read().then(rearm, rearm)
-        rearm()
-      }
-      return () => {
-        listeners.delete(fn)
-        if (listeners.size === 0) stopTimer()
-      }
-    },
-    getSnapshot() {
-      return state
-    },
-    load() {
-      return read().then(
-        (value) => {
-          rearm()
-          return value
-        },
-        (error) => {
-          rearm()
-          throw error
-        },
-      )
-    },
-    start: mutate,
-    cancel() {
-      return mutate({ cancel: true })
-    },
+    disable: () => change('disable'),
   }
 }

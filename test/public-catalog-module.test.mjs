@@ -21,7 +21,7 @@ const publicExports = [
 ]
 
 test('the standalone public catalog keeps every legacy export compatible', () => {
-  assert.deepEqual(Object.keys(publicCatalog).sort(), [...publicExports, 'lookupPublicMatch'].sort())
+  assert.deepEqual(Object.keys(publicCatalog).sort(), [...publicExports, 'lookupPublicMatch', 'publicEvidence'].sort())
   for (const name of publicExports) {
     assert.strictEqual(checkCatalog[name], publicCatalog[name], `${name} must be a re-export`)
   }
@@ -58,7 +58,8 @@ test('standalone public parsers merge only the same exact identity and preserve 
     publicCatalog.publicOnlyFacts(['model-b', 'vendor/model-b', 'unknown'], ['VENDOR/model-b'], merged, { fuzzy: true }),
     [
       { id: 'model-b', fact: { id: 'model-b', type: 'image', publicLookupId: 'vendor/model-b' }, origins: ['public'], writeFact: null, publicAlias: true },
-      { id: 'vendor/model-b', fact: { id: 'vendor/model-b', type: 'image', publicLookupId: 'vendor/model-b' }, origins: ['public'], writeFact: { type: 'image' } },
+      { id: 'vendor/model-b', fact: { id: 'vendor/model-b', type: 'image', publicLookupId: 'vendor/model-b',
+        publicFacts: { type: 'image', publicLookupId: 'vendor/model-b', fieldSources: { type: 'Hugging Face' } } }, origins: ['public'], writeFact: { type: 'image' } },
     ],
   )
 })
@@ -80,7 +81,8 @@ test('nested provider records stay separate and ambiguous bare rows are never el
     assert.equal(publicCatalog.lookupPublicMatch(index, model, { fuzzy: true }), undefined, model)
   }
   assert.deepEqual(publicCatalog.publicOnlyFacts(['shared', 'vendorB/shared'], [], index, { fuzzy: true }), [{
-    id: 'vendorB/shared', fact: { id: 'vendorB/shared', input: ['text'], contextWindow: 123, publicLookupId: 'vendorB/shared' },
+    id: 'vendorB/shared', fact: { id: 'vendorB/shared', input: ['text'], contextWindow: 123, publicLookupId: 'vendorB/shared',
+      publicFacts: { input: ['text'], contextWindow: 123, publicLookupId: 'vendorB/shared', fieldSources: { input: 'models.dev', contextWindow: 'models.dev' } } },
     origins: ['public'], writeFact: { input: ['text'], contextWindow: 123 },
   }])
 })

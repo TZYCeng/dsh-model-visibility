@@ -10,33 +10,27 @@ const React = require('react')
 const h = React.createElement
 
 import { API } from './constants.mjs'
-import { formatTokens } from './pure.mjs'
+import { bucketTotalOf, formatTokens } from './pure.mjs'
 import { useSource } from './hooks.mjs'
-
-/** Total of one bucket tuple (input + output + cache read + cache write). */
-function totalOf(range) {
-  if (!Array.isArray(range)) return 0
-  return range.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0)
-}
 
 /** Detail line for one window: input / output / cache split. */
 function detailOf(range, t) {
-  if (!Array.isArray(range) || totalOf(range) === 0) return t('usage.none')
-  const input = (range[0] ?? 0) + (range[2] ?? 0) + (range[3] ?? 0)
-  const output = range[1] ?? 0
+  if (!Array.isArray(range)) return t('usage.none')
+  // Exactly the four non-overlapping buckets exported to CSV, unrounded.
   return t('usage.detail', {
-    input: formatTokens(input),
-    output: formatTokens(output),
-    cacheRead: formatTokens(range[2] ?? 0),
-    cacheWrite: formatTokens(range[3] ?? 0),
+    input: range[0] ?? 0,
+    output: range[1] ?? 0,
+    cacheRead: range[2] ?? 0,
+    cacheWrite: range[3] ?? 0,
   })
 }
 
 /** Download only a successful CSV response, not a Host JSON error document. */
-async function download(type) {
+async function download(type, signal) {
   const response = await fetch(API + '/export?type=' + type, {
-    headers: { accept: 'text/csv' }, credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+    headers: { accept: 'text/csv' }, credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal,
   })
+  signal.throwIfAborted()
   if (!response.ok) {
     let detail = ''
     try { detail = (await response.json())?.error?.message ?? '' } catch (_error) { /* status is enough */ }
@@ -44,7 +38,9 @@ async function download(type) {
   }
   if (!/^text\/csv(?:;|$)/i.test(response.headers.get('content-type') ?? '')) throw new Error('Expected a CSV response.')
   const filename = /filename="([A-Za-z0-9_.-]+\.csv)"/i.exec(response.headers.get('content-disposition') ?? '')?.[1]
-  const href = URL.createObjectURL(await response.blob())
+  const blob = await response.blob()
+  signal.throwIfAborted() // A fetch shim may ignore abort and still resolve its body.
+  const href = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   try {
     anchor.href = href
@@ -59,6 +55,25 @@ async function download(type) {
   }
 }
 
+// Cover headers, error documents and the final blob. Release the UI even if
+// a nonconforming transport ignores abort; download guards its side effects.
+async function boundedDownload(type, controller) {
+  const { signal } = controller
+  const timer = setTimeout(() => controller.abort(new Error('CSV download timed out')), 120_000)
+  let stop
+  const aborted = new Promise((_, reject) => {
+    stop = () => reject(signal.reason)
+    signal.addEventListener('abort', stop, { once: true })
+  })
+  try {
+    signal.throwIfAborted()
+    await Promise.race([download(type, signal), aborted])
+  } finally {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', stop)
+  }
+}
+
 export function UsageToolbar({ usage, t, features }) {
   const state = useSource(usage)
   const supported = features.length === 0 || features.includes('usage')
@@ -67,13 +82,26 @@ export function UsageToolbar({ usage, t, features }) {
   const scanError = state.snapshot?.error
   const [exporting, setExporting] = React.useState(null)
   const [exportError, setExportError] = React.useState(null)
+  const activeExport = React.useRef(null)
+  React.useEffect(() => () => {
+    const controller = activeExport.current
+    activeExport.current = null
+    controller?.abort()
+  }, [])
 
   const startExport = (type) => {
-    if (exporting !== null) return
+    if (activeExport.current !== null) return
+    const controller = new AbortController()
+    activeExport.current = controller
     setExporting(type)
     setExportError(null)
-    void download(type).catch((error) => setExportError(String(error?.message ?? error)))
-      .finally(() => setExporting(null))
+    void boundedDownload(type, controller).catch(error => {
+      if (activeExport.current === controller) setExportError(String(error?.message ?? error))
+    }).finally(() => {
+      if (activeExport.current !== controller) return
+      activeExport.current = null
+      setExporting(null)
+    })
   }
 
   if (!supported) {
@@ -87,21 +115,23 @@ export function UsageToolbar({ usage, t, features }) {
     ['total', 'usage.total', 'usage.totalTitle'],
   ]
 
+  const notices = [
+    computing && t('usage.computing'),
+    exporting !== null && t(exporting === 'usage' ? 'usage.exportingUsage' : 'usage.exportingModels'),
+    (state.error || scanError) && t('usage.readFailed', { message: state.error || scanError }),
+    exportError !== null && t('usage.exportFailed', { message: exportError }),
+  ].filter(Boolean)
+
   return h(
     'div',
     { className: 'mvp_usage' },
-    h(
-      'span',
-      { className: 'mvp_usageLabel' },
-      t('usage.title'),
-      computing ? h('span', { className: 'mvp_usageComputing', role: 'status' }, t('usage.computing')) : null,
-    ),
+    h('span', { className: 'mvp_usageLabel' }, t('usage.title')),
     h(
       'span',
       { className: 'mvp_usageRanges' },
       windows.map(([key, labelKey, titleKey]) => {
         const range = ranges?.[key]
-        const total = totalOf(range)
+        const total = bucketTotalOf(range)
         // Zero from a cold or failed scan isn't yet a confirmed zero.
         const known = Array.isArray(range) && (total > 0 || (!computing && !scanError && !state.error))
         return h(
@@ -109,7 +139,7 @@ export function UsageToolbar({ usage, t, features }) {
           {
             key,
             className: 'mvp_stat' + (key === 'total' ? ' mvp_stat--total' : ''),
-            title: t(titleKey) + '\n' + detailOf(range, t),
+            title: t(titleKey) + '\n' + (known ? detailOf(range, t) : t('usage.none')),
           },
           h('span', { className: 'mvp_statLabel' }, t(labelKey)),
           h('span', { className: 'mvp_statValue' }, known ? formatTokens(total) : t('usage.none')),
@@ -142,11 +172,8 @@ export function UsageToolbar({ usage, t, features }) {
         t('usage.exportModels'),
       ),
     ),
-    exporting !== null ? h('span', { className: 'mvp_usageHint', role: 'status' },
-      t(exporting === 'usage' ? 'usage.exportingUsage' : 'usage.exportingModels')) : null,
-    (state.error || scanError) ? h('span', { className: 'mvp_usageHint mvp_usageHint--warn', role: 'alert' },
-      t('usage.readFailed', { message: state.error || scanError })) : null,
-    exportError !== null ? h('span', { className: 'mvp_usageHint mvp_usageHint--warn', role: 'alert' },
-      t('usage.exportFailed', { message: exportError })) : null,
+    h('span', { className: 'mvp_usageStatus', role: 'status', 'aria-live': 'polite', 'aria-atomic': true,
+      title: notices.length ? notices.join('\n') : undefined, tabIndex: exporting || state.error || scanError || exportError ? 0 : undefined },
+      notices.map((text, i) => h('span', { key: i, className: 'mvp_usageStatusText' }, text))),
   )
 }

@@ -148,7 +148,7 @@ test('search-heavy batches get a tool-free fifth completion and one format repai
         assert.match(input, /Official page: image is an input modality/)
         if (requests.length === 5) yield text('Format error fixture')
         else {
-          assert.match(input, /Correct these format errors/)
+          assert.match(input, /Repair only rows from the current reference map/)
           yield text([{ ...unknown('model-a'), input: ['text', 'image'], contextWindow: 99_999, evidence: [
             { url: vendor, fields: ['input'] },
             { url: 'https://fabricated.example/unsupported', fields: ['contextWindow'] },

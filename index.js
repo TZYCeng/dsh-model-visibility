@@ -1,7 +1,8 @@
 /**
  * Host half of the model-visibility plugin.
  *
- * Two jobs:
+ * Wires the directory, verifier, guarded reasoning operations, diagnostics and
+ * usage ledger. Visibility preferences have two additional lifecycle rules:
  *
  * 1. Own the `model-visibility` settings namespace: `hidden` is a volatile
  *    Config field, so the Host settings document persists the browser's choices
@@ -9,7 +10,7 @@
  *    configuration page is disabled because the plugin's own settings section
  *    is the editing surface.
  * 2. Keep a shadow copy of that list outside the profile patch layer
- *    (`$DSH_HOME/dsh-model-visibility/hidden.json`), because the patch layer is
+ *    (profile-scoped `hidden.json` from profile-store.js), because the patch layer is
  *    rebuilt from scratch in several ordinary situations — a profile repair,
  *    a plugin reinstall, or any write whose value equals the inherited default
  *    (the settings writer then deletes the row). Without a shadow copy the row
@@ -22,19 +23,23 @@
  * @module index.js
  */
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import { createModelInfoService } from './lib/model-info.js'
 import { createLearnedCatalog } from './lib/learned-catalog.js'
 import { createOverrideStore } from './lib/model-overrides.js'
-import { createCapabilityVerifier, VERIFY_SOURCE_MODES } from './lib/check-catalog.js'
+import { createCapabilityVerifier } from './lib/check-catalog.js'
 import { createCheckerSearchBridge } from './lib/checker-search-bridge.js'
-import { toModelListCsv, toUsageCsv } from './lib/export-csv.js'
 import { createUsageLedger } from './lib/usage-ledger.js'
 import { createProviderProbe, readProviderProfiles } from './lib/provider-probe.js'
-import { stripWrittenFields, writeCapabilities } from './lib/provider-write.js'
+import { registerCoreRoutes } from './lib/host-routes.js'
+import { API, registerSupportRoutes, wrapConnection } from './lib/host-http.js'
+import { createDebugTrace } from './lib/debug-trace.js'
+import { createVersionInfo } from './lib/version-info.js'
+import { createBulkEffortService } from './lib/bulk-efforts.js'
+import { profileDataFile, storageRoot } from './lib/profile-store.js'
+import { withStoreLock } from './lib/store-lock.js'
 import { installImageInputGate } from './lib/image-input-gate.js'
 
 /** Settings namespace this entry owns; also the loader row id. */
@@ -42,15 +47,11 @@ const ENTRY = 'model-visibility'
 /** Config field carrying the hidden model keys. */
 const FIELD = 'hidden'
 /** Shadow store location below `$DSH_HOME`. */
-const STORE_DIR = 'dsh-model-visibility'
 const STORE_FILE = 'hidden.json'
-/** Authenticated same-origin route prefix used by the settings page. */
-const API = '/api/dsh-model-visibility'
 
 /** Absolute path of the shadow copy. */
 function storeFile() {
-  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
-  return path.join(home, STORE_DIR, STORE_FILE)
+  return profileDataFile(STORE_FILE)
 }
 
 /** Keep only string entries, so a hand-edited file can never break the schema. */
@@ -72,10 +73,18 @@ function readStored() {
 /** Replace the shadow copy atomically; a failure must never break the plugin. */
 function writeStored(list) {
   const file = storeFile()
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  const temp = `${file}.${process.pid}.tmp`
-  fs.writeFileSync(temp, `${JSON.stringify({ [FIELD]: list }, null, 2)}\n`)
-  fs.renameSync(temp, file)
+  withStoreLock(file, () => {
+    // An incomplete external edit is not an empty list. Leave its contents intact.
+    if (fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (!Array.isArray(parsed) && !Array.isArray(parsed?.[FIELD])) throw new Error('Unreadable visibility backup')
+    }
+    const temp = `${file}.${process.pid}.tmp`
+    try {
+      fs.writeFileSync(temp, `${JSON.stringify({ [FIELD]: list }, null, 2)}\n`, { mode: 0o600 })
+      fs.renameSync(temp, file)
+    } finally { try { fs.unlinkSync(temp) } catch (e) { if (e.code !== 'ENOENT') throw e } }
+  })
 }
 
 /**
@@ -114,7 +123,10 @@ export function apply(ctx, config) {
   // Manual capability overrides live in their own file: they are structured,
   // change independently of the hidden list, and the request-side image gate
   // needs a synchronous read. See `lib/model-overrides.js`.
-  const overrides = createOverrideStore({ logger })
+  const diagnostics = createDebugTrace()
+  const { trace } = diagnostics
+  ctx.effect(() => () => diagnostics.dispose(), 'model-visibility: debug journal')
+  const overrides = createOverrideStore({ file: profileDataFile('overrides.json'), logger, trace })
 
   // The learned capability snapshot replaces the abandoned static catalog:
   // the online verification run seeds it, and every same-named model served
@@ -123,7 +135,7 @@ export function apply(ctx, config) {
   let learned = null
   const learnedFor = () => {
     if (learned !== null) return learned
-    learned = createLearnedCatalog({ logger })
+    learned = createLearnedCatalog({ file: profileDataFile('learned.json'), logger, trace })
     return learned
   }
   /** Current hidden keys, read through the stable volatile reference. */
@@ -147,13 +159,15 @@ export function apply(ctx, config) {
   let written
   const persist = () => {
     const list = liveList()
-    const signature = list.join('\u0000')
+    const signature = JSON.stringify(list)
     if (signature === written) return
     try {
       writeStored(list)
+      trace('visibility', 'shadow.saved', { count: list.length })
       written = signature
     } catch (error) {
       if (typeof logger.warn === 'function') {
+        trace('visibility', 'shadow.failed', { ok: false })
         logger.warn('model-visibility: could not write the shadow copy')
         logger.warn(error)
       }
@@ -232,7 +246,7 @@ export function apply(ctx, config) {
     const probeEnabled = config?.probe !== false && process.env.MODEL_VISIBILITY_PROBE !== '0'
     const probe =
       probeEnabled && settings !== undefined
-        ? createProviderProbe({ settings, llm: scope.llm, configEditor, credentials, logger })
+        ? createProviderProbe({ settings, llm: scope.llm, configEditor, credentials, logger, trace })
         : null
 
     // Even with the relay probe disabled, the request-side gate still needs the
@@ -265,8 +279,8 @@ export function apply(ctx, config) {
     })
     const service = createModelInfoService(scope.llm, {
       settings,
-      configEditor,
-      enrichment: probe === null ? localEnrichment : ({ fresh }) => probe.read({ fresh }),
+      configEditor, trace,
+      enrichment: probe === null ? localEnrichment : request => probe.read(request),
       fallbackEnrichment: localEnrichment,
       overrides,
       learned: learnedService,
@@ -277,6 +291,7 @@ export function apply(ctx, config) {
     // multimodal. The patch is read-only: an explicit provider declaration
     // still wins, and the settings switch can turn the behaviour off.
     const imageInput = installImageInputGate(scope.llm, {
+      trace,
       allow: (provider, model, name, snapshotRoute) =>
         liveConfig('applyInput', true) !== false && service.imageInputAllowed(provider, model, name, snapshotRoute),
       warn: (error) => {
@@ -291,7 +306,8 @@ export function apply(ctx, config) {
     // Token-usage ledger behind the page's stats strip: session logs are read
     // incrementally in a background pass, the check sweep records its own
     // spend into the same buckets.
-    const usageLedger = createUsageLedger({ logger, sessionPersistence: scope.get?.('sessionPersistence') })
+    const usageLedger = createUsageLedger({ logger, trace, sessionPersistence: scope.get?.('sessionPersistence'),
+      file: profileDataFile('usage-ledger.json', { importLegacy: false }), legacyFile: path.join(storageRoot().legacy, 'usage-ledger.json') })
     let lastRescanAt = -Infinity
     const nowMs = () => Date.now()
     const maybeRescan = () => {
@@ -301,356 +317,52 @@ export function apply(ctx, config) {
       usageLedger.rescan().catch(() => {})
     }
 
+    const refreshAfterWrite = () => {
+      clearFallbackProfiles()
+      probe?.noteSettingsChanged()
+      service.invalidate()
+      imageInput.refresh()
+    }
+    const versions = createVersionInfo({ trace })
+    const bulk = createBulkEffortService({ settings, llm: scope.llm, configEditor, learned: learnedService,
+      overrides, readCatalog: service.peek, onApplied: refreshAfterWrite, trace })
+    const traced = wrapConnection(connection, trace)
+    registerSupportRoutes(scope, { connection: traced, diagnostics, versions, bulk })
     // The online capability verifier: the user's chosen checker model plus
     // two public catalogs fill the learned snapshot and (optionally) write
     // back into the provider settings documents.
     const verifier = createCapabilityVerifier({
       llm: scope.llm,
       settings,
-      configEditor,
+      configEditor, trace,
+      automaticWriteFact: service.automaticWriteFact,
+      onLearned: ({ effortIds, startedAt }) => {
+        if (effortIds?.length && bulk.inspect().enabled) void Promise.resolve().then(() => bulk.reconcile({ modelIds: effortIds, startedAt })).catch(() => trace('bulk', 'reconcile.failed', { ok: false }))
+      },
       onSettled: () => service.invalidate(),
       web: typeof scope.get === 'function' ? scope.get('web') : undefined,
       searchBridge: createCheckerSearchBridge({
-        getTools: () => scope.get?.('tools'),
+        trace, getTools: () => scope.get?.('tools'),
         getSettings: () => scope.get?.('settings'),
       }),
       learned: learnedService,
       ledger: usageLedger,
       logger,
-      onApplied: () => {
-        clearFallbackProfiles()
-        probe?.noteSettingsChanged()
-        service.invalidate()
-        imageInput.refresh()
-      },
+      onApplied: refreshAfterWrite,
     })
     scope.effect(
       () => async () => {
-        try {
-          await verifier.dispose()
-        } finally {
-          await usageLedger.dispose()
-        }
+        // Stop authorization and prevent new work before waiting on workers.
+        bulk.dispose()
+        versions.dispose()
+        const stopping = [probe?.dispose?.(), service.dispose?.(), verifier.dispose()]
+        try { await Promise.allSettled(stopping) } finally { await usageLedger.dispose() }
       },
       'model-visibility: verifier and usage ledger',
     )
-    /** Answer with JSON; the route is diagnostics-friendly on purpose. */
-    const json = (value, status = 200) =>
-      new Response(JSON.stringify(value), {
-        status,
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'no-store',
-        },
-      })
-
-    scope.effect(
-      () =>
-        connection.fetch.register({
-          path: `${API}/models`,
-          methods: ['GET'],
-          requestBody: 'buffered',
-          async fetch(request) {
-            let fresh = false
-            let reload = false
-            try {
-              const params = new URL(request.url).searchParams
-              fresh = params.get('fresh') !== null
-              reload = params.get('reload') !== null
-            } catch (_error) {
-              // A malformed URL simply means "use the cached read".
-            }
-            // A hard reload is the page's "re-fetch capabilities" action: drop
-            // every cache and any sweep already in flight, then read again. A
-            // plain `fresh` read bypasses TTLs but still joins an in-flight
-            // sweep, which can be exactly the stale read the user is trying to
-            // escape.
-            if (reload) {
-              service.invalidate()
-              probe?.invalidate()
-              clearFallbackProfiles()
-              overrides.invalidate()
-              learnedService.invalidate()
-              imageInput.refresh()
-            }
-            try {
-              return json({ ok: true, value: await service.read({ fresh: fresh || reload }) })
-            } catch (error) {
-              if (typeof logger.warn === 'function') {
-                logger.warn('model-visibility: capability probe failed')
-                logger.warn(error)
-              }
-              return json(
-                {
-                  ok: false,
-                  error: {
-                    code: 'model-info/failed',
-                    message: error instanceof Error ? error.message : String(error),
-                  },
-                },
-                500,
-              )
-            }
-          },
-        }),
-      'model-visibility: capability route',
-    )
-
-    scope.effect(
-      () =>
-        connection.fetch.register({
-          path: `${API}/overrides`,
-          methods: ['GET', 'POST'],
-          requestBody: 'buffered',
-          async fetch(request) {
-            const method = String(request.method || 'GET').toUpperCase()
-            if (method === 'GET') {
-              try {
-                return json({ ok: true, value: overrides.read() })
-              } catch (error) {
-                if (typeof logger.warn === 'function') {
-                  logger.warn('model-visibility: could not read model overrides')
-                  logger.warn(error)
-                }
-                return json(
-                  {
-                    ok: false,
-                    error: {
-                      code: 'overrides/failed',
-                      message: error instanceof Error ? error.message : String(error),
-                    },
-                  },
-                  500,
-                )
-              }
-            }
-            if (method !== 'POST') {
-              return json(
-                { ok: false, error: { code: 'overrides/method', message: 'GET or POST' } },
-                405,
-              )
-            }
-            let body
-            try {
-              body = await request.json()
-            } catch (_error) {
-              return json(
-                {
-                  ok: false,
-                  error: { code: 'overrides/body', message: 'expected a JSON override entry' },
-                },
-                400,
-              )
-            }
-            // What the provider schema can express is mirrored into the
-            // provider's own settings, so the composer and the adapter see the
-            // same facts as this page. A refusal is not an error: the local
-            // override still applies, and the response explains the reason.
-            let provider = { written: false, fields: [], reason: 'skipped' }
-            const providerId = typeof body?.provider === 'string' ? body.provider.trim() : ''
-            const modelId = typeof body?.model === 'string' ? body.model.trim() : ''
-            if (!providerId || !modelId || (Object.hasOwn(body, 'expectedRevision')
-              && body.expectedRevision !== null && typeof body.expectedRevision !== 'string')) {
-              return json({ ok: false, error: { code: 'overrides/params', message: 'a provider, model and valid revision are required' } }, 400)
-            }
-            try {
-              // Old clients did not send a revision; acquire the current one
-              // for this request. Current clients submit the editor's revision,
-              // including null for a previously absent override.
-              const expected = Object.hasOwn(body, 'expectedRevision') ? body.expectedRevision : overrides.snapshot(providerId, modelId).revision
-              const local = overrides.compareAndCommit(body.remove === true ? { provider: providerId, model: modelId } : body, expected)
-              if (!local.ok) {
-                return json({ ok: false, error: { code: 'overrides/conflict', message: 'this model override changed; reopen the editor and review the current values' } }, 409)
-              }
-              service.invalidate()
-              if (local.entry && body.applyToProvider === true) {
-                provider = await writeCapabilities(settings, local.entry, {
-                  llm: scope.llm,
-                  configEditor,
-                  reasoningEffortMappings: body.reasoningEffortMappings,
-                  standardEffort: body.standardEffort === true,
-                  referencePrefill: body.referencePrefill === true,
-                })
-                if (provider.written) {
-                  const remaining = stripWrittenFields(local.entry, provider.fields, provider.localOnly)
-                  // Do not prune an independently edited file after an async
-                  // settings write; the same CAS protects concurrent POSTs.
-                  overrides.compareAndCommit(remaining, local.revision)
-                }
-              }
-            } catch (error) {
-              if (typeof logger.warn === 'function') {
-                logger.warn('model-visibility: could not save a model override')
-                logger.warn(error)
-              }
-              return json(
-                {
-                  ok: false,
-                  error: {
-                    code: 'overrides/failed',
-                    message: error instanceof Error ? error.message : String(error),
-                  },
-                },
-                500,
-              )
-            }
-            // The new entry outranks every cached capability fact. A provider
-            // write also changed the settings document: refresh the profile
-            // cache so the page immediately shows the declared values instead
-            // of the stale ones (no network sweep is needed for that).
-            service.invalidate()
-            imageInput.refresh()
-            if (provider.written) {
-              clearFallbackProfiles()
-              probe?.noteSettingsChanged()
-            }
-            try {
-              return json({ ok: true, value: { ...overrides.read(), provider } })
-            } catch (error) {
-              return json({ ok: false, error: { code: 'overrides/read-after-save', message: String(error?.message ?? error) } }, 500)
-            }
-          },
-        }),
-      'model-visibility: override route',
-    )
-
-    // Token-usage read for the page's stats strip; the background scan runs
-    // whenever the ledger could have grown and the page asks for a read.
-    scope.effect(
-      () =>
-        connection.fetch.register({
-          path: `${API}/usage`,
-          methods: ['GET', 'POST'],
-          requestBody: 'buffered',
-          async fetch(request) {
-            if (String(request.method || 'GET').toUpperCase() === 'POST') {
-              lastRescanAt = -Infinity
-            }
-            maybeRescan()
-            try {
-              return json({ ok: true, value: usageLedger.read() })
-            } catch (error) {
-              return json(
-                {
-                  ok: false,
-                  error: {
-                    code: 'usage/failed',
-                    message: error instanceof Error ? error.message : String(error),
-                  },
-                },
-                500,
-              )
-            }
-          },
-        }),
-      'model-visibility: usage route',
-    )
-
-    // One-click exports: the token ledger and the visible-model capability
-    // list, both as CSV downloads through the same-origin route.
-    scope.effect(
-      () =>
-        connection.fetch.register({
-          path: `${API}/export`,
-          methods: ['GET'],
-          requestBody: 'buffered',
-          async fetch(request) {
-            const params = new URL(request.url).searchParams
-            const which = params.get('type') === 'models' ? 'models' : 'usage'
-            let body
-            let name
-            try {
-              if (which === 'usage') {
-                // Join an active scan or finish the first scan before creating
-                // a CSV. Do not silently download a cold, all-zero snapshot.
-                await usageLedger.ensureScanned()
-                const usage = usageLedger.read()
-                body = toUsageCsv(usage)
-                name = `model-visibility-usage-${new Date().toISOString().slice(0, 10)}.csv`
-              } else {
-                const catalog = await service.read()
-                body = toModelListCsv(catalog, { hidden: liveList() })
-                name = `model-visibility-models-${new Date().toISOString().slice(0, 10)}.csv`
-              }
-            } catch (error) {
-              return json(
-                {
-                  ok: false,
-                  error: {
-                    code: 'export/failed',
-                    message: error instanceof Error ? error.message : String(error),
-                  },
-                },
-                500,
-              )
-            }
-            return new Response(body, {
-              status: 200,
-              headers: {
-                'Content-Type': 'text/csv; charset=utf-8',
-                'Content-Disposition': `attachment; filename="${name}"`,
-                'Cache-Control': 'no-store',
-              },
-            })
-          },
-        }),
-      'model-visibility: export route',
-    )
-
-    // The verify sweep: state reads are instant, a start posts and the Host
-    // runs batches in the background without holding the HTTP call open.
-    scope.effect(
-      () =>
-        connection.fetch.register({
-          path: `${API}/verify`,
-          methods: ['GET', 'POST'],
-          requestBody: 'buffered',
-          async fetch(request) {
-            const method = String(request.method || 'GET').toUpperCase()
-            if (method === 'GET') {
-              return json({ ok: true, value: { state: verifier.snapshot(), learned: learnedService.meta() } })
-            }
-            let body
-            try {
-              body = await request.json()
-            } catch (_error) {
-              body = {}
-            }
-            if (body !== null && typeof body === 'object' && body.cancel === true) {
-              verifier.cancel()
-              return json({ ok: true, value: { state: verifier.snapshot() } })
-            }
-            const provider = typeof body?.provider === 'string' ? body.provider : undefined
-            const model = typeof body?.model === 'string' ? body.model : undefined
-            const mode = body?.mode
-            if (mode !== undefined && !VERIFY_SOURCE_MODES.includes(mode)) {
-              return json({ ok: false, error: { code: 'verify/params', message: 'invalid verification mode' } }, 400)
-            }
-            const useChecker = mode === undefined ? body?.useChecker !== false : mode !== 'public'
-            if (useChecker && (!provider?.trim() || !model?.trim())) {
-              return json(
-                { ok: false, error: { code: 'verify/params', message: 'provider and model are required' } },
-                400,
-              )
-            }
-            // The sweep runs in the background: the response only reports that
-            // it was accepted, and polling GET observes the progress state.
-            // `concurrency` is a per-run choice (how many checker calls may be
-            // in flight), so a fast relay can use more threads than the default.
-            const concurrency = Number.isFinite(body?.concurrency) ? body.concurrency : undefined
-            if (verifier.isRunning()) {
-              return json({ ok: false, error: { code: 'verify/running', message: 'a verification run is already active' } }, 409)
-            }
-            void verifier.start({
-              mode, checker: useChecker ? { provider, model } : undefined, useChecker,
-              fuzzyMatch: typeof body?.fuzzyMatch === 'boolean' ? body.fuzzyMatch : undefined, writeBack: body?.writeBack === true,
-              webSearch: useChecker && body?.webSearch !== false, fullScan: body?.fullScan === true, concurrency,
-            }).catch(error => logger.warn?.('model-visibility: could not start verification', error))
-            return json({ ok: true, value: { state: verifier.snapshot(), accepted: true } })
-          },
-        }),
-      'model-visibility: verify route',
-    )
+    registerCoreRoutes(scope, { connection: traced, service, probe, clearFallbackProfiles, overrides, learnedService,
+      imageInput, usageLedger, maybeRescan, resetRescan: () => { lastRescanAt = -Infinity }, verifier,
+      settings, configEditor, logger, liveList, trace })
 
     // A route/credential change invalidates both the capability cache and (when
     // it actually changed routing facts) the relay-probe cache. Ordinary

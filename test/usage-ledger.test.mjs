@@ -391,7 +391,7 @@ test('an optional persistence service supplies the supported root/format, and a 
     { type: 'request/header', seq: 0, time, data: { header: { config: { provider: 'custom', model: 'backend' } } } },
     JSON.parse(messageEvent({ time, turn: 0, step: 0, input: 7, output: 1 })),
     JSON.parse(attemptEvent({ time, turn: 1, step: 0, input: 2, output: 1 })),
-  ]
+  ].map((event, seq) => ({ ...event, seq })) // The public handle supplies contiguous seq and bounded slices.
   let listCalls = 0
   let openCalls = 0
   let closed = 0
@@ -411,7 +411,7 @@ test('an optional persistence service supplies the supported root/format, and a 
       assert.equal(id, 'custom')
       assert.equal(access, 'read')
       return { header: { createdAt: time }, inheritedEventCount: 2,
-        async read() { if (readFails) throw new Error('private backend data'); return { events } },
+        async read(offset, length) { if (readFails) throw new Error('private backend data'); return { events: events.slice(offset, offset + length) } },
         async close() { closed += 1 },
       }
     },

@@ -170,15 +170,16 @@ test('each learned field keeps only the citation for its winning declaration', (
   assert.deepEqual(reopened.evidence, [context])
 })
 
-test('snapshot publication commits memory and footer metadata only after disk succeeds', () => {
+test('snapshot publication commits memory and footer metadata only after disk succeeds', t => {
   const home = tempHome()
   const file = path.join(home, 'learned.json')
   const checker = { provider: 'relay', model: 'checker' }
   const store = createLearnedCatalog({ file, now: () => 50 })
-  fs.mkdirSync(`${file}.${process.pid}.tmp`)
+  const rename = t.mock.method(fs, 'renameSync', () => { throw new Error('simulated read-only target') })
   assert.throws(() => store.upsertEntries({ id: 'a', input: ['text'] }, { checker }), /Could not save/)
   assert.equal(store.meta().models, 0)
-  fs.rmdirSync(`${file}.${process.pid}.tmp`)
+  assert.deepEqual(fs.readdirSync(home), [], 'failure cleans up its own random temp file and lock')
+  rename.mock.restore()
   store.upsertEntries({ id: 'a', input: ['text'] }, { checker })
   assert.deepEqual(store.meta(), { file, models: 1, updatedAt: 50, checker })
   assert.deepEqual(createLearnedCatalog({ file }).meta(), store.meta())

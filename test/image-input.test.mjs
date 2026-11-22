@@ -9,7 +9,7 @@ import test from 'node:test'
 
 import { installImageInputGate } from '../lib/image-input-gate.js'
 import { createModelInfoService, describeModel, imageInputDecision } from '../lib/model-info.js'
-import { readProviderProfiles } from '../lib/provider-probe.js'
+import { parseModelListing, readProviderProfiles } from '../lib/provider-probe.js'
 
 /** A relay profile whose per-model `input` is the empty DSH default. */
 function relayProfile(models) {
@@ -38,7 +38,7 @@ function piAiAdapter(input = ['text']) {
 test('imageInputDecision follows the same evidence as the page', () => {
   const profile = relayProfile(['deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3', 'mystery-model'])
   const learned = {
-    id: 'deepseek-v4.1-flash',
+    id: 'deepseek/deepseek-v4.1-flash',
     type: 'chat',
     input: ['text', 'image'],
     reasoning: true,
@@ -64,6 +64,18 @@ test('a public name alias is available for display and diagnostics but cannot ad
   assert.equal(display.learned.publicAlias, true)
   assert.deepEqual(display.learned.origins, ['public'])
   assert.equal(imageInputDecision('relay', id, { profile, learned }).allowed, false)
+})
+
+test('a relay display name without an advertised ID is a reference, not a request fact', async () => {
+  const id = 'opaque-label'
+  const profile = relayProfile([id])
+  const discovered = parseModelListing({ data: [{ name: id, input_modalities: ['text', 'image'] }] })
+  assert.ok(discovered.get(id).nameOnly)
+  const context = { profile, discovered, learned: {} }
+  const shown = await describeModel({ resolveModelInfo: async () => ({}) }, 'relay', { id }, context)
+  assert.deepEqual(shown.inputModalities, ['text', 'image'])
+  assert.equal(shown.fieldEvidence.modalities.alias, true)
+  assert.equal(imageInputDecision('relay', id, context).allowed, false)
 })
 
 test('an explicit text-only provider declaration blocks the gate', () => {
@@ -110,7 +122,7 @@ test('catalog modelOverrides enforce exact Provider declarations with or without
   }
 })
 
-test('the image gate receives the actual adapter display name for an exact relay model', () => {
+test('a tempting adapter display name alone cannot change real request admission', () => {
   const id = 'model-without-family-in-id'
   const adapter = piAiAdapter()
   const profile = { ...relayProfile([id]), catalogModels: false, inputProvenance: true, adapter, adapterSnapshot: adapter.current() }
@@ -122,7 +134,7 @@ test('the image gate receives the actual adapter display name for an exact relay
   assert.equal(service.imageInputAllowed('relay', id), false)
   const gate = installImageInputGate(llm, { allow: service.imageInputAllowed })
   try {
-    assert.deepEqual(adapter.modelOf(adapter.current(), 'relay', id).input, ['text', 'image'])
+    assert.deepEqual(adapter.modelOf(adapter.current(), 'relay', id).input, ['text'])
     assert.deepEqual(adapter.modelOf(adapter.current(), 'relay', 'other').input, ['text'])
   } finally {
     gate.dispose()
@@ -138,7 +150,7 @@ test('createModelInfoService exposes the same image decision', () => {
         profiles: new Map([['relay', profile]]),
         discovered: new Map(),
         learned: {
-          id: 'deepseek-v4.1-flash',
+          id: 'deepseek/deepseek-v4.1-flash',
           type: 'chat',
           input: ['text', 'image'],
           reasoning: true,
@@ -192,7 +204,7 @@ test('the UI and gate agree on raw listing aliases, exact rows and ambiguity', a
   const other = { id: 'Other/mystery-model:free', inputModalities: ['text'] }
   const profile = relayProfile([text.id])
   for (const [entries, allowed, source] of [
-    [[vision], true, 'provider'],
+    [[vision], false, 'provider'],
     [[vision, text], false, 'provider'],
     [[vision, other], false, 'unknown'],
   ]) {
@@ -257,7 +269,7 @@ test('qualified aliases reject other vendors even when a bare row advertises vis
   await run('x/model', ['y/model'], false, 'unknown')
   await run('x/model', ['model', 'y/model', 'x/model'], true, 'provider')
   await run('model', ['model', 'y/model'], true, 'provider')
-  await run('X/MODEL:free', ['x/model:fast', 'y/model'], true, 'provider')
+  await run('X/MODEL:free', ['x/model:fast', 'y/model'], false, 'provider')
   await run('x/MODEL:free', ['x/model:thinking', 'y/model'], false, 'unknown')
   await run('x/model', ['x/model:free', 'x/model:fast', 'model'], false, 'unknown')
   for (const suffix of ['-preview', '-27b', '-4k', '-2k', ':batch', ':thinking']) {

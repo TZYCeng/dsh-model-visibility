@@ -3,8 +3,13 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
-import { DICT } from '../client-src/dict.mjs'
+import { DICT as BASE } from '../client-src/dict.mjs'
+import { CHECKER_EN, CHECKER_ZH } from '../client-src/checker-dict.mjs'
+import { CHECKER_CSS } from '../client-src/checker-style.mjs'
 import { CSS } from '../client-src/css.mjs'
+import * as diagnosticEvents from '../client-src/diagnostic-events.mjs'
+
+const DICT = { en: { ...BASE.en, ...CHECKER_EN }, zh: { ...BASE.zh, ...CHECKER_ZH } }
 import * as pure from '../client-src/pure.mjs'
 import * as format from '../client-src/format.mjs'
 import * as constants from '../client-src/constants.mjs'
@@ -31,11 +36,12 @@ function loadComponent(name, requireModule, window, globals = {}) {
 function renderPanel(progress = {}, options = {}) {
   const { pick, storage, language = 'en', canFullScan = true, canSetMode = false, canSetSourceMode = false,
     pending = false, canUse = true, groups = [{ id: 'relay', name: 'Relay', models: [{ id: 'checker' }] }],
-    startError, loadError = null } = options
+    startError, loadError = null, features = [], bulk } = options
   const slots = []
   const writes = []
   const starts = []
   const cancels = []
+  const layouts = []
   let cursor = 0
   let loads = 0
   let tree
@@ -47,6 +53,7 @@ function renderPanel(progress = {}, options = {}) {
       return [slots[index], (value) => { slots[index] = value }]
     },
     useCallback: (fn) => fn,
+    useMemo: (fn) => fn(),
     useId: () => `test-id-${cursor++}`,
     useRef(initial) {
       const index = cursor++
@@ -55,6 +62,7 @@ function renderPanel(progress = {}, options = {}) {
     },
     useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
     useEffect: () => {},
+    useLayoutEffect: (fn) => { layouts.push(fn) },
   }
   const window = {
     localStorage: storage ?? {
@@ -68,16 +76,17 @@ function renderPanel(progress = {}, options = {}) {
     return modules[name]
   }
   modules.hooks = loadComponent('hooks', requireModule, window)
+  modules['checker-bulk'] = loadComponent('checker-bulk', requireModule, window, { AbortController, Date, setTimeout, clearTimeout })
   const { VerifyPanel } = loadComponent('checker-view', requireModule, window)
   const verify = {
-    subscribe: () => () => {},
+    bulk, subscribe: () => () => {},
     getSnapshot: () => ({ snapshot: { state: progress }, error: loadError, pending }),
     load: async () => { loads += 1 },
     start: async (payload) => {
       starts.push(JSON.parse(JSON.stringify(payload)))
       if (startError) throw startError
     },
-    cancel: async () => { cancels.push(true) },
+    cancel: async (runId) => { cancels.push(runId) },
   }
   const t = (key, params = {}) => {
     assert.ok(key in DICT[language], `missing ${language} translation: ${key}`)
@@ -88,9 +97,14 @@ function renderPanel(progress = {}, options = {}) {
   }
   const render = () => {
     cursor = 0
+    layouts.length = 0
+    if (options.bulkPart) {
+      tree = modules['checker-bulk'][options.bulkPart]({ api: bulk, t, canUse, ...options.componentProps })
+      return
+    }
     tree = VerifyPanel({
       verify,
-      catalog: { groups },
+      catalog: { groups, learned: { features } },
       t,
       canUse,
       canFullScan,
@@ -115,7 +129,7 @@ function renderPanel(progress = {}, options = {}) {
   }
   render()
   return {
-    render, findAll, byClass, text, writes, starts, cancels, t,
+    render, findAll, byClass, text, writes, starts, cancels, t, layouts,
     open() { byClass('mvp_checkerHead')[0].props.onClick(); render() },
     checkbox(key) { return findAll((node) => node.type === 'input' && node.props['aria-label'] === t(key))[0] },
     field(key) { return findAll((node) => node.type === 'select' && node.props['aria-label'] === t(key))[0] },
@@ -480,7 +494,7 @@ test('verification cancel remains visible when the enriched catalog is unavailab
   assert.equal(cancel.length, 1, 'a running sweep exposes cancel even before expanding')
   assert.equal(cancel[0].props.disabled, false)
   cancel[0].props.onClick()
-  assert.deepEqual(panel.cancels, [true])
+  assert.deepEqual(panel.cancels, [undefined])
   const done = renderPanel({ phase: 'done' }, { canUse: false, pick: { provider: 'relay', model: 'checker' } })
   done.open()
   const start = done.findAll((node) => node.props.title === done.t('checker.startTitle'))[0]
@@ -509,6 +523,196 @@ test('a cancelled sweep still shows a dispatched pending provider write', () => 
   assert.match(settled.text(), /delayed provider write was applied/)
 })
 
+test('known non-chat models are absent from both selectors; invalid stored choices cannot start', () => {
+  const groups = [{ id: 'images', models: [{ id: 'img', kind: 'image' }] }, { id: 'mixed', models: [
+    { id: 'checker', kind: 'chat' }, { id: 'emb', kind: 'embedding' }, { id: 'old-no-kind' }, { id: 'video', kind: 'video' },
+  ] }]
+  const p = renderPanel({}, { groups, canSetSourceMode: true, pick: { provider: 'mixed', model: 'emb' } })
+  p.open()
+  assert.deepEqual(p.findAll(n => n.type === 'option', p.field('checker.provider')).map(n => n.props.value), ['', 'mixed'])
+  assert.deepEqual(p.findAll(n => n.type === 'option', p.field('checker.model')).map(n => n.props.value), ['', 'checker', 'old-no-kind'])
+  assert.equal(p.field('checker.model').props.value, '')
+  assert.ok(p.startControl().props.disabled); p.start(); assert.equal(p.starts.length, 0)
+})
+
+test('scope is visible beside Start, counts deduplicate exact IDs, and warnings stay outside Advanced', () => {
+  const groups = [{ id: 'a', models: [{ id: 'test' }, { id: 'same' }] }, { id: 'b', models: [{ id: 'same' }, { id: 'other' }] }]
+  const p = renderPanel({}, { groups, pick: { provider: 'a', model: 'test', writeBack: true } })
+  p.open()
+  p.checkbox('checker.fullScan').props.onChange({ target: { checked: true } }); p.render()
+  const id = p.startControl().props['aria-describedby']
+  const [scope] = p.findAll(n => n.props.id === id)
+  assert.match(p.text(scope), /2 providers and up to 2 distinct model IDs/)
+  assert.match(p.text(scope), /Provider write-back on.*rechecks existing records/)
+  assert.ok(!p.findAll(n => n.type === 'details').some(n => p.findAll(x => x === scope, n).length))
+})
+
+test('reported catalog matches, exact public imports, source failures and all four token buckets stay distinct', () => {
+  const p = renderPanel({ ...RUNNING, mode: 'supplement', tokenUsage: [100, 200, 300, 400], catalogMatches: 7,
+    publicOnly: 7, publicReliable: 0, aliasMatches: 1, sourceFailures: 2 })
+  p.open()
+  assert.match(p.text(), /7 catalog matches.*Reliably imported this run: 0/)
+  assert.match(p.text(), /1K tokens/); assert.match(p.text(), /2 source reads failed.*not model failures/)
+  assert.match(p.text(), /1 advisory alias matches/); assert.doesNotMatch(p.text(), /Catalog facts for 7 models/)
+})
+
+test('modern cancellation uses the displayed run ID, and a missing promised ID cannot cancel', () => {
+  const p = renderPanel({ ...RUNNING, runId: 'run-7' }, { features: ['runId'] })
+  p.findAll(n => n.props.title === p.t('checker.cancelTitle'))[0].props.onClick()
+  assert.deepEqual(p.cancels, ['run-7'])
+  const missing = renderPanel(RUNNING, { features: ['runId'] })
+  const [blocked] = missing.findAll(n => n.props.title === missing.t('checker.stopNoId'))
+  assert.equal(blocked.props.disabled, true); blocked.props.onClick(); assert.deepEqual(missing.cancels, [])
+})
+
+const PREVIEW = { ticket: 'opaque-one-use', expiresAt: Date.now() + 3600_000, scopeCount: 1,
+  total: 1, eligible: 1, skipped: 0, rows: [{ provider: 'relay', model: 'x', status: 'pending', authorized: true, reason: 'ready' }] }
+const bulkShape = () => ({ status: 'ready', epoch: 1, pending: false, snapshot: { enabled: false, running: false, rows: [],
+  counts: { pending: 0, written: 0, failed: 0, skipped: 0 }, scopeCount: 0 } })
+function bulkFixture(preview = Promise.resolve(PREVIEW)) {
+  const state = bulkShape(), calls = []
+  const api = { subscribe: () => () => {}, getSnapshot: () => state,
+    preview(signal) { calls.push({ action: 'preview', signal }); return preview },
+    async enable(ticket) { calls.push({ action: 'enable', ticket }); state.snapshot.enabled = true },
+    async disable() { calls.push({ action: 'disable' }); state.snapshot.enabled = false },
+    async load() { calls.push({ action: 'status' }) },
+  }
+  const p = renderPanel({}, { bulkPart: 'BulkEffortsControl', bulk: api })
+  return { state, calls, api, p, toggle: () => p.findAll(n => n.props.role === 'switch')[0].props.onClick(),
+    dialog: () => p.findAll(n => n.type?.name === 'BulkConfirmDialog')[0]?.props }
+}
+
+test('only the advertised/enabled panel mounts its bulk control, never an old Host or unopened panel', () => {
+  const ctrls = (p) => p.findAll(n => n.type?.name === 'BulkEffortsControl')
+  const api = bulkFixture().api
+  const old = renderPanel({}, { bulk: api }); old.open(); assert.equal(ctrls(old).length, 0)
+  const now = renderPanel({}, { bulk: api, features: ['bulkEfforts'] }); assert.equal(ctrls(now).length, 0)
+  now.open(); assert.equal(ctrls(now).length, 1)
+})
+
+test('opening the switch only previews; cancellation/Escape cannot authorize a late preview', async () => {
+  const d = Promise.withResolvers(), { calls, p, toggle, dialog } = bulkFixture(d.promise)
+  toggle(); toggle(); p.render()
+  assert.deepEqual(calls.map(x => x.action), ['preview'])
+  assert.equal(p.findAll(n => n.props.role === 'switch')[0].props['aria-checked'], false)
+  const modal = renderPanel({}, { bulkPart: 'BulkConfirmDialog', componentProps: dialog() })
+  const [agree] = modal.findAll(n => n.type === 'button' && modal.text(n) === modal.t('bulk.agree'))
+  assert.equal(agree.props.disabled, true); agree.props.onClick()
+  const root = modal.findAll(n => n.type === 'dialog')[0]
+  root.props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} })
+  assert.equal(calls[0].signal.aborted, true)
+  d.resolve(PREVIEW); await new Promise(setImmediate); p.render()
+  assert.equal(dialog(), undefined); assert.deepEqual(calls.map(x => x.action), ['preview'])
+})
+
+test('only explicit confirmation posts the reviewed ticket once; turning off never posts apply', async () => {
+  const { calls, p, toggle, dialog, state } = bulkFixture()
+  toggle(); await new Promise(setImmediate); p.render()
+  const opts = dialog(); assert.ok(opts)
+  const modal = renderPanel({}, { bulkPart: 'BulkConfirmDialog', componentProps: opts, language: 'zh' })
+  const d = modal.findAll(n => n.type === 'dialog')[0]
+  const [agree] = modal.findAll(n => n.type === 'button' && modal.text(n) === opts.t('bulk.agree'))
+  assert.equal(d.props['aria-modal'], true)
+  assert.ok(modal.text().includes('No external network')); assert.ok(modal.text().includes('Not a free pass'))
+  assert.equal(agree.props.disabled, false); agree.props.onClick(); agree.props.onClick()
+  await new Promise(setImmediate); p.render()
+  assert.deepEqual(calls.map(x => x.action), ['preview', 'enable']); assert.equal(calls[1].ticket, PREVIEW.ticket)
+  assert.equal(state.snapshot.enabled, true)
+  toggle(); await new Promise(setImmediate); p.render(); assert.equal(state.snapshot.enabled, false)
+  assert.deepEqual(calls.map(x => x.action), ['preview', 'enable', 'disable'])
+})
+
+test('a cancelled dialog cannot use its ticket after a new preview is opened on the same Host', async () => {
+  const f = bulkFixture(); f.toggle(); await new Promise(setImmediate); f.p.render(); const previous = f.dialog()
+  previous.close(); f.p.render(); f.toggle(); await new Promise(setImmediate); f.p.render()
+  previous.agree(); assert.deepEqual(f.calls.map(c => c.action), ['preview', 'preview']); assert.ok(f.dialog())
+})
+
+test('an expired, replaced Host or zero-scope preview cannot enable; waiting-only scope can', async () => {
+  for (const mode of ['expired', 'reset', 'empty', 'waiting']) {
+    const data = { ...PREVIEW, ...(mode === 'expired' ? { expiresAt: 1 } : mode === 'empty' ? { scopeCount: 0 } : { eligible: 0, skipped: 1 }) }
+    const f = bulkFixture(Promise.resolve(data)); f.toggle(); await new Promise(setImmediate); f.p.render()
+    const stale = f.dialog(); if (mode === 'reset') f.state.epoch++
+    stale.agree(); await new Promise(setImmediate)
+    assert.equal(f.calls.some(v => v.action === 'enable'), mode === 'waiting', mode)
+  }
+})
+
+for (const language of ['zh', 'en']) {
+  test(`${language}: ending future authorization cannot erase or relabel an earlier confirmed write`, () => {
+    const rows = ['disabled', 'target-changed', 'manual-protected'].map((authorizationReason, i) => ({
+      provider: 'relay', model: `m${i}`, authorized: false, authorizationReason,
+      status: 'written', reason: i === 0 ? 'partial' : 'verified', writtenEfforts: ['high'],
+    }))
+    const state = { ...bulkShape(), snapshot: { ...bulkShape().snapshot, rows, counts: { written: 3, skipped: 0, failed: 0, pending: 0 } } }
+    const receipt = renderPanel({}, { bulkPart: 'BulkEffortsControl', language, bulk: { getSnapshot: () => state } })
+    assert.ok(receipt.text().includes(receipt.t('bulk.receipt', state.snapshot.counts)))
+    const list = renderPanel({}, { bulkPart: 'BulkRows', language, componentProps: { rows } })
+    list.findAll(n => n.type === 'details')[0].props.onToggle({ currentTarget: { open: true } }); list.render()
+    for (const [i,item] of list.findAll(n => n.type === 'li').entries()) {
+      const text = list.text(item)
+      assert.ok(text.includes(list.t('bulk.reason.' + rows[i].reason)))
+      assert.ok(text.includes(list.t('bulk.writtenLevels', { levels: 'high' })))
+      assert.ok(text.includes(list.t('bulk.authorizationStopped', { reason: list.t('bulk.reason.' + rows[i].authorizationReason) })))
+    }
+  })
+  test(`${language}: unverified dispatched writes are separate from confirmed failures, pending writes and protected skips`, () => {
+    const rows = [
+      { provider: 'p', model: 'a', status: 'failed', reason: 'settings-unverified' }, // old Host: read-back-only code
+      { provider: 'p', model: 'b', status: 'failed', reason: 'settings-failed', dispatched: true, outcomeUnknown: true },
+      { provider: 'p', model: 'c', status: 'failed', reason: 'read-unavailable' }, // failed before dispatch
+      { provider: 'p', model: 'd', status: 'pending', reason: 'dispatched', dispatched: true },
+      { provider: 'p', model: 'e', status: 'skipped', reason: 'prior-write-unverified', authorized: false },
+    ]
+    const state = { ...bulkShape(), snapshot: { enabled: false, running: false, scopeCount: 0, rows,
+      unverified: 2, counts: { written: 0, skipped: 1, failed: 3, pending: 1 } } }
+    const p = renderPanel({}, { bulkPart: 'BulkEffortsControl', language, bulk: { getSnapshot: () => state } })
+    // Count each model once; the Host's failed=3 includes the two unknown dispatches, but pending and skipped do not.
+    assert.ok(p.text().includes(p.t('bulk.receiptUnverified', { written: 0, skipped: 1, failed: 1, unverified: 2, pending: 1 })))
+    assert.match(p.text(), language === 'zh' ? /提供商设置逐项核对，勿重试/ : /in its provider settings; do not retry/)
+    assert.doesNotMatch(p.text(), /本地设置已保留|本地已保存|local override was retained/i)
+    const list = renderPanel({}, { bulkPart: 'BulkRows', language, componentProps: { rows } })
+    list.findAll(n => n.type === 'details')[0].props.onToggle({ currentTarget: { open: true } }); list.render()
+    const items = list.findAll(n => n.type === 'li').map(n => list.text(n))
+    assert.ok(items[0].includes(list.t('bulk.status.unverified')) && items[0].includes(list.t('bulk.reason.settings-unverified')))
+    assert.ok(items[1].includes(list.t('bulk.status.unverified')) && items[1].includes(list.t('bulk.reason.dispatch-unconfirmed')))
+    assert.ok(items[2].includes(list.t('bulk.status.failed')) && !items[2].includes(list.t('bulk.status.unverified')))
+    assert.ok(items[3].includes(list.t('bulk.status.pending')) && !items[3].includes(list.t('bulk.status.unverified')))
+    assert.ok(items[4].includes(list.t('bulk.status.skipped')) && items[4].includes(list.t('bulk.reason.prior-write-unverified')))
+    assert.doesNotMatch(list.text(), /本地设置已保留|本地已保存|local override was retained/i)
+    assert.equal(list.findAll(n => n.type === 'button').length, 0, 'a receipt does not offer a write retry')
+  })
+}
+
+test('native modal uses safe initial focus, Tab wrapping, Escape and restoration to the initiator', () => {
+  const calls = []
+  const button = (name) => ({ name, focus() { calls.push(name) }, getClientRects() { return [{}] } })
+  const trigger = { current: { ...button('trigger'), isConnected: true } }
+  const p = renderPanel({}, { bulkPart: 'BulkConfirmDialog', componentProps: { review: { data: PREVIEW }, trigger, close() { calls.push('cancel') }, agree() {} } })
+  const d = p.findAll(n => n.type === 'dialog')[0]
+  const [cancel] = p.findAll(n => n.type === 'button' && n.props.autoFocus)
+  const a = button('first'), b = button('last')
+  d.props.ref.current = { showModal() { calls.push('modal') }, close() { calls.push('closed') },
+    querySelectorAll: () => [a, b], ownerDocument: { activeElement: b } }
+  cancel.props.ref.current = button('safe')
+  const cleanup = p.layouts[0]()
+  const key = (key, shiftKey) => d.props.onKeyDown({ key, shiftKey, preventDefault() {}, stopPropagation() {} })
+  key('Tab'); d.props.ref.current.ownerDocument.activeElement = a; key('Tab', true); key('Escape'); cleanup()
+  assert.deepEqual(calls, ['modal', 'safe', 'first', 'last', 'cancel', 'closed', 'trigger'])
+  assert.match(CHECKER_CSS, /max-height:[^;]+;overflow:auto/); assert.match(CHECKER_CSS, /::backdrop/)
+})
+
+test('full scope and receipts are inspectable in bounded pages without conflating same-name models', () => {
+  const rows = Array.from({ length: 43 }, (_, i) => ({ model: 'same', provider: `p${i}`, authorized: i === 0,
+    status: i ? 'skipped' : 'written', reason: i ? 'awaiting-evidence' : '', source: 'catalog' }))
+  const p = renderPanel({}, { bulkPart: 'BulkRows', componentProps: { rows } })
+  assert.equal(p.findAll(n => n.type === 'li').length, 0)
+  p.findAll(n => n.type === 'details')[0].props.onToggle({ currentTarget: { open: true } }); p.render()
+  assert.equal(p.findAll(n => n.type === 'li').length, 40); assert.match(p.text(), /Within scope.*Written.*Outside scope.*Skipped/)
+  p.findAll(n => n.type === 'button')[0].props.onClick(); p.render()
+  assert.equal(p.findAll(n => n.type === 'li').length, 43); assert.match(p.text(), /Provider: p42.*Model: same/)
+})
+
 function renderUsage(state, fetch) {
   let cursor = 0
   const slots = []
@@ -519,9 +723,11 @@ function renderUsage(state, fetch) {
       if (!(index in slots)) slots[index] = initial
       return [slots[index], (value) => { slots[index] = value }]
     },
+    useRef(initial) { return slots[cursor++] ??= { current: initial } },
+    useEffect: () => {},
   }
   const modules = { react: React, constants, pure, hooks: { useSource: () => state } }
-  const { UsageToolbar } = loadComponent('usage-view', (name) => modules[name], {}, { fetch })
+  const { UsageToolbar } = loadComponent('usage-view', (name) => modules[name], {}, { fetch, AbortSignal, AbortController, setTimeout, clearTimeout })
   const t = (key, params) => DICT.en[key].replace(/\{(\w+)\}/g, (_, name) => params[name])
   return () => {
     cursor = 0
@@ -545,12 +751,12 @@ test('usage distinguishes absent or cold data, measured zero, and scan errors', 
   assert.deepEqual(values(), ['—', '—', '—', '—'])
   state.snapshot = { ranges: { today: [0, 0, 0, 0] }, computing: true }
   assert.deepEqual(values(), ['—', '—', '—', '—'])
-  assert.ok(render().some((node) => node.props.role === 'status' && node.props.children[0] === 'scanning…'))
+  assert.ok(render().some((node) => node.props.role === 'status' && node.props.children.some(child => child?.props?.children.includes('scanning…'))))
   state.snapshot.computing = false
   assert.deepEqual(values(), ['0', '—', '—', '—'])
   state.snapshot.error = 'could not read one log'
   assert.deepEqual(values(), ['—', '—', '—', '—'])
-  assert.ok(render().some((node) => node.props.role === 'alert' && node.props.children[0].includes('one log')))
+  assert.ok(render().some((node) => node.props.role === 'status' && node.props.title?.includes('one log')))
 })
 
 test('cold export shows progress and displays a same-origin CSV request failure', async () => {
@@ -561,11 +767,11 @@ test('cold export shows progress and displays a same-origin CSV request failure'
   button.props.onClick()
   assert.match(calls[0].url, /\/export\?type=usage$/)
   assert.equal(calls[0].init.credentials, 'same-origin')
-  assert.ok(render().some((node) => node.props.role === 'status' && node.props.children[0].includes('preparing')))
+  assert.ok(render().some((node) => node.props.role === 'status' && node.props.title?.includes('preparing')))
   reply.resolve(Response.json({ error: { message: 'scan failed' } }, { status: 500 }))
   await new Promise(setImmediate)
   const failed = render()
-  assert.ok(failed.some((node) => node.props.role === 'alert' && node.props.children[0].includes('scan failed')))
+  assert.ok(failed.some((node) => node.props.role === 'status' && node.props.title?.includes('scan failed')))
   assert.equal(failed.find((node) => node.props.children[0] === 'Usage CSV').props.disabled, false)
 })
 
@@ -585,7 +791,7 @@ test('override editor saves the captured revision and preserves untouched fields
     useId: () => `test-id-${cursor++}`,
     useEffect: () => {},
   }
-  const modules = { react: React, format }
+  const modules = { react: React, format, 'diagnostic-events': diagnosticEvents }
   const { ModelOverrideEditor } = loadComponent('override-editor', (name) => modules[name], {})
   const entry = { provider: 'relay', model: 'org/model', kind: 'chat', contextWindow: 32_000,
     input: ['image', 'text'], efforts: [{ id: 'custom' }, { id: 'high' }, { id: 'low' }], defaultEffort: 'high' }

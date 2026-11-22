@@ -95,7 +95,7 @@ function fakeLlm(replies) {
     listProviders: () => [{ id: 'relay', name: 'Relay' }],
     listConfigurableProviders: () => [{ provider: 'relay', declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'relay'] }],
     listModels: async () => [{ id: 'model-a' }, { id: 'model-b' }, { id: 'checker-x' }],
-    resolveModelInfo: async () => undefined,
+    resolveModelInfo: async (provider, id) => ({ provider, id, name: id }),
     async prepareCall(config, signal, controls) {
       this.calls.push(config)
       controls(config, undefined)
@@ -398,7 +398,7 @@ test('exact qualified public facts write to the corresponding vendor only', asyn
 })
 
 
-test('cancelled writeback stays pending until the actual host mutation settles, without rewriting later sweep state', async () => {
+test('cancelled writeback stays pending until the actual host mutation settles, without rewriting later sweep state', { timeout: 5000 }, async () => {
   const entered = Promise.withResolvers()
   const release = Promise.withResolvers()
   const applyObserved = Promise.withResolvers()

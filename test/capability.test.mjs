@@ -210,7 +210,7 @@ test('a learned fact can supply a reasoning ladder', () => {
     },
   )
   assert.equal(record.reasoningSupported, true)
-  assert.equal(record.sources.reasoning, 'snapshot')
+  assert.equal(record.sources.reasoning, 'public')
   assert.deepEqual(record.reasoning.efforts, [
     { id: 'low', name: 'Low' },
     { id: 'high', name: 'High' },
@@ -314,7 +314,7 @@ test('lookupCorrection targets the exact catalog row, not its variants', () => {
   assert.equal(glm.code, 'glm-5.3-text-only')
   assert.deepEqual(glm.input, ['text'])
   assert.equal(glm.source, 'https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3')
-  assert.equal(lookupCorrection('Z-AI/GLM-5.3-fast')?.code, glm.code)
+  assert.equal(lookupCorrection('Z-AI/GLM-5.3-fast'), undefined, 'time/route variants cannot inherit an exact correction')
   for (const id of ['glm-5.3-flash', 'glm-5.3-preview', 'glm-5.3:batch', 'glm-5.3:thinking', 'glm-53', 'glm-5-3', 'other/glm-5.3', 'openai.glm-5.3']) {
     assert.equal(lookupCorrection(id), undefined, id)
   }
@@ -342,7 +342,7 @@ test('mergeCapabilities lets a vendor correction beat a wrong learned row', () =
   assert.equal(record.correction.code, 'glm-5.3-text-only')
   // The rest of the learned row stays useful.
   assert.equal(record.contextWindow, 1048576)
-  assert.equal(record.sources.context, 'snapshot')
+  assert.equal(record.sources.context, 'public')
 })
 
 test('mergeCapabilities lets a vendor correction beat a relay listing too', () => {

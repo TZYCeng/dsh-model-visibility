@@ -1,9 +1,11 @@
-import { keyOf } from './format.mjs'
+import { hiddenIndex } from './visibility-codec.mjs'
+import { clientTrace } from './diagnostic-events.mjs'
 import { FIELD } from './constants.mjs'
 
+const EMPTY = Object.freeze([])
 function hiddenListOf(snapshot) {
   const value = snapshot && snapshot.value
-  return value && Array.isArray(value[FIELD]) ? value[FIELD] : []
+  return value && Array.isArray(value[FIELD]) ? value[FIELD] : EMPTY
 }
 
 /** Patch one method while preserving its previous own/inherited shape. */
@@ -33,16 +35,16 @@ export function patchDirectoryStore(store, form) {
   let active = true
   let snapshot = null
   let lastBase
-  let lastSignature
+  let lastList
+  let hidden
 
-  const build = (baseSnapshot, hiddenList) => {
-    const hidden = new Set(hiddenList)
+  const build = (baseSnapshot) => {
     const selection = baseSnapshot.current
     const groups = []
     let changed = false
     for (const group of baseSnapshot.groups ?? []) {
       const all = group.models ?? []
-      const models = all.filter((model) => !hidden.has(keyOf(group.id, model.id)) ||
+      const models = all.filter((model) => !hidden.hasRoute(group.id, model.id) ||
         (selection?.provider === group.id && selection.model === model.id))
       if (models.length === all.length) groups.push(group)
       else {
@@ -56,10 +58,10 @@ export function patchDirectoryStore(store, form) {
   const current = () => {
     const baseSnapshot = readBase()
     if (!active) return baseSnapshot
-    const hidden = hiddenListOf(form.getSnapshot())
-    const signature = JSON.stringify(hidden)
-    if (baseSnapshot === lastBase && signature === lastSignature) return snapshot
-    const next = build(baseSnapshot, hidden)
+    const list = hiddenListOf(form.getSnapshot())
+    if (baseSnapshot === lastBase && list === lastList) return snapshot
+    if (list !== lastList) hidden = hiddenIndex(list)
+    const next = build(baseSnapshot)
     // Keep the external-store snapshot stable when a hidden-list edit didn't
     // affect this particular directory (e.g. its current model is retained).
     const sameGroups = baseSnapshot === lastBase && next !== baseSnapshot && snapshot !== baseSnapshot &&
@@ -69,7 +71,7 @@ export function patchDirectoryStore(store, form) {
           group.models.every((model, modelIndex) => model === prior.models[modelIndex]))
       })
     lastBase = baseSnapshot
-    lastSignature = signature
+    lastList = list
     if (!sameGroups) snapshot = next
     return snapshot
   }
@@ -92,7 +94,7 @@ export function patchDirectoryStore(store, form) {
       active = false
       restoreSnapshot()
       if (changed && notifyReaders) notify()
-      snapshot = lastBase = lastSignature = null
+      snapshot = lastBase = lastList = hidden = null
     },
   }
 }
@@ -114,6 +116,7 @@ export function installComposerFilter(scope, form) {
         let restoreDispose
         const stop = (notifyReaders) => {
           records.delete(store)
+          clientTrace('composer', 'detach', { count: records.size })
           restoreDispose?.()
           record.restore({ notifyReaders })
         }
@@ -124,6 +127,7 @@ export function installComposerFilter(scope, form) {
           return dispose.apply(this, args)
         })
         records.set(store, { emit: record.emit, stop })
+        clientTrace('composer', 'attach', { count: records.size })
         record.emit()
       } catch (_error) {
         // An unwritable store or directory must not break model selection.

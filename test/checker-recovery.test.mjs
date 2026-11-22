@@ -106,7 +106,10 @@ test('a cited sibling from the initial answer survives permanent format repair f
     }
     else {
       assert.deepEqual(request.tools, [])
-      assert.match(request.messages[0].content[0].text, /answer only these unresolved IDs \(JSON data\): \["b"\]/)
+      const prompt = request.messages[0].content[0].text
+      assert.match(prompt, /Repair only rows from the current reference map/)
+      assert.deepEqual(JSON.parse(prompt.split('\n')[1]), ['b'])
+      assert.equal(prompt.split('"b"').length - 1, 1)
       yield finish({ kind: 'error', failure: { code: 'TIMEOUT', message: 'Request timed out' } })
     }
   })

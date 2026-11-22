@@ -91,6 +91,25 @@ test('a default-only residual override survives store reload after writeback', (
   }
 })
 
+test('reference provenance survives reopening and old clients, without creating an empty override', () => {
+  const home = tempHome()
+  try {
+    const id = { provider: 'relay', model: 'chat' }
+    const store = createOverrideStore({ home, logger: silent })
+    store.upsert({ ...id, efforts: ['low'], referencePrefill: true, directEffort: true })
+    const reopened = createOverrideStore({ home, logger: silent })
+    const previous = reopened.snapshot(id.provider, id.model)
+    assert.equal(previous.entry.referencePrefill, true)
+    assert.equal(previous.entry.directEffort, undefined)
+    const saved = reopened.compareAndCommit({ ...id, efforts: ['high'], referencePrefill: false }, previous.revision)
+    assert.equal(saved.entry.referencePrefill, true, 'reopening without the bit cannot launder the reference')
+    assert.equal(store.get(id.provider, id.model).referencePrefill, true)
+    const cleared = store.compareAndCommit({ ...id, kind: 'chat' }, saved.revision)
+    assert.equal(cleared.entry.referencePrefill, undefined)
+    assert.equal(sanitizeOverride({ ...id, referencePrefill: true }), undefined)
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
 test('a manual "no reasoning" only needs the identity', () => {
   const override = sanitizeOverride({
     provider: 'relay',

@@ -43,7 +43,11 @@ test('sparse array, wrapper and exact-key forms project the same claims', () => 
 
 test('explicit refs are local, order-independent and not identity guesses', () => {
   const ids = ['Vendor/Å', 'Vendor/B']
-  assert.match(batchPrompt(ids), /\{"1":"Vendor\/Å","2":"Vendor\/B"\}/)
+  const [heading, data, instructions] = batchPrompt(ids).split('\n')
+  assert.match(heading, /1-based numeric ref/)
+  assert.deepEqual(JSON.parse(data), ids)
+  assert.match(instructions, /1-based position/)
+  assert.doesNotMatch(instructions, /Vendor/)
   assert.deepEqual(shape([{ ref: '2', input: ['text'] }, { ref: 1, modelId: ids[0] }], ids).validRows.map(row => row.id), [...ids].reverse())
   for (const bad of [0, '01', ' 1', '1.0', 3, null, true]) {
     assert.deepEqual(shape([{ ref: bad, input: ['text'] }], [ids[0]]).missing, [ids[0]])

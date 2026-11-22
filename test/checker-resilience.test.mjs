@@ -54,12 +54,16 @@ test('cancel and dispose stop a stalled stream without waiting for next()', asyn
   assert.deepEqual(writes, [])
 })
 
-test('healthy half survives a permanently malformed sibling', async () => {
+test('healthy sibling survives one bounded ref-only repair failure without replaying the original batch', async () => {
+  const calls = []
   const { verifier, writes } = setup(async function* (request) {
-    const ids = JSON.parse(request.messages[0].content[0].text.split('\n')[1])
-    yield { type: 'text-delta', text: ids.includes('b') ? 'broken' : '[{"id":"a","kind":"chat"}]' }
+    const ids = JSON.parse(request.messages[0].content[0].text.split('\n')[1]); calls.push(ids)
+    if (calls.length === 1) yield { type: 'text-delta', text: JSON.stringify([{ref:1,kind:'chat'},{ref:2,contextWindow:'invalid'}]) }
+    else { assert.deepEqual(ids,['b']); yield {type:'finish',reason:{kind:'error',failure:{code:'TIMEOUT',message:'repair failed'}}} }
   }, { timeoutMs: 1000 })
   const result = await start(verifier)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(calls,[['a','b'],['b']])
   assert.equal(result.processed, 2)
   assert.equal(result.done, 1)
   assert.equal(result.failed, 1)

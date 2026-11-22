@@ -100,15 +100,26 @@ export function countKinds(models) {
   return counts
 }
 
-/** Checker-model candidates from a loaded catalog state. */
+/** Trust the enriched Host's task classification. Do not guess from names (a vision-chat model can contain “image”). */
+export function checkerModelsOf(group) {
+  return Array.isArray(group?.models) ? group.models.filter((model) =>
+    typeof model?.id === 'string' && model.id.trim() !== '' && kindOf(model) === 'chat') : []
+}
+
 export function checkerRoutesOf(groups) {
-  const routes = []
-  for (const group of groups ?? []) {
-    if (group === null || typeof group !== 'object') continue
-    const models = Array.isArray(group.models) ? group.models : []
-    if (models.length > 0) routes.push({ id: group.id, name: group.name ?? group.id })
+  return (Array.isArray(groups) ? groups : []).filter((group) =>
+    typeof group?.id === 'string' && group.id.trim() !== '' && checkerModelsOf(group).length > 0)
+    .map((group) => ({ id: group.id, name: group.name ?? group.id }))
+}
+
+/** Listing deduplicates exact IDs across providers and excludes the chosen checker ID on every route. */
+export function checkerScopeOf(groups, excludedModel) {
+  const routes = Array.isArray(groups) ? groups : []
+  const ids = new Set()
+  for (const route of routes) for (const model of Array.isArray(route?.models) ? route.models : []) {
+    if (typeof model?.id === 'string' && model.id !== '' && model.id !== excludedModel) ids.add(model.id)
   }
-  return routes
+  return { routes: routes.length, ids: ids.size }
 }
 
 /**

@@ -1,13 +1,10 @@
 import { FIELD } from './constants.mjs'
+import { hiddenIndex, routeKey } from './visibility-codec.mjs'
 
-export function keyOf(provider, model) {
-  return provider + '/' + model
-}
+export const keyOf = routeKey
 
 export function hiddenSetOf(snapshot) {
-  const value = snapshot && snapshot.value
-  const list = value && Array.isArray(value[FIELD]) ? value[FIELD] : []
-  return new Set(list)
+  return hiddenIndex(snapshot?.value?.[FIELD])
 }
 
 export function providerLabel(group, t) {
@@ -96,13 +93,12 @@ export function sourceOf(model, field) {
 /**
  * Sources whose values are completed or inferred rather than declared.
  *
- * `snapshot` is the learned store: facts a checker model or a public catalog
- * reported. Only the adapter, the settings document, the relay's own listing
- * and a vendor correction count as declarations, so a verified row must stay
- * dashed — otherwise an LLM guess would look as trustworthy as a declaration.
+ * `public` is a cited directory, `snapshot` an independently learned result.
+ * Neither is this route's declaration. Keep both dashed: reference material
+ * may be useful without proving the relay accepts the capability.
  */
 export function isInferredSource(source) {
-  return source === 'snapshot' || source === 'inferred'
+  return source === 'snapshot' || source === 'public' || source === 'inferred'
 }
 
 /** Kind with a safe fallback for records from an older Host. */

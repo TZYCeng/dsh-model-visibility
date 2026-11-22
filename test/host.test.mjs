@@ -17,7 +17,10 @@ import path from 'node:path'
 import test from 'node:test'
 
 // index.js reads the shadow copy while the module is evaluated.
-process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'model-visibility-test-'))
+const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'model-visibility-test-'))
+process.env.DSH_HOME = testHome
+let fixtureId = 0
+test.after(() => fs.rmSync(testHome, { recursive: true, force: true }))
 import { apply } from '../index.js'
 import { createLearnedCatalog } from '../lib/learned-catalog.js'
 
@@ -101,12 +104,12 @@ function createHarness() {
       for (const op of ops) applyOp(op.path, op.value)
     },
   }
-  const learned = createLearnedCatalog({ file: path.join(process.env.DSH_HOME, 'learned-host-test.json') })
+  const learned = createLearnedCatalog({ file: path.join(testHome, `learned-host-test-${++fixtureId}.json`) })
   learned.upsertEntries([
-    { id: 'deepseek-v4.1-flash', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['checker'], verifiedAt: 1 },
+    { id: 'deepseek/deepseek-v4.1-flash', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['checker'], verifiedAt: 1 },
     { id: 'deepseek-v4.1-pro', type: 'chat', input: ['text'], reasoning: true, origins: ['checker'], verifiedAt: 1 },
     { id: 'glm-5.3', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['public'], verifiedAt: 1 },
-    { id: 'glm-5.3-flash', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['public'], verifiedAt: 1 },
+    { id: 'glm-5.3-flash', publicLookupId: 'glm-5.3-flash', type: 'chat', input: ['text', 'image'], reasoning: true, origins: ['public'], verifiedAt: 1 },
   ])
 
   const route = {
@@ -115,6 +118,9 @@ function createHarness() {
     usage: null,
     export: null,
     verify: null,
+    diagnostics: null,
+    'bulk-efforts': null,
+    version: null,
   }
   const scope = {
     llm,
@@ -123,11 +129,12 @@ function createHarness() {
       fetch: {
         register(value) {
           const path = String(value.path)
-          if (path.endsWith('/overrides')) route.overrides = value
-          else if (path.endsWith('/usage')) route.usage = value
-          else if (path.endsWith('/export')) route.export = value
-          else if (path.endsWith('/verify')) route.verify = value
-          else route.models = value
+          const name = path.split('/').at(-1)
+          const handler = value.fetch
+          route[name] = { ...value, async fetch(request) {
+            if (value.requestBody === 'streaming' && ['GET','HEAD'].includes(request.method)) return new Response(null, { status: 400 })
+            return handler(request)
+          } }
           return () => {}
         },
       },
@@ -141,6 +148,7 @@ function createHarness() {
   }
   return {
     providers,
+    learned,
     adapter,
     llm,
     route,
@@ -159,6 +167,19 @@ function createHarness() {
     },
   }
 }
+
+test('management routes refuse stale or unidentified cancellations and known non-chat checkers', async () => {
+  resetShadowStore()
+  const harness = createHarness()
+  apply(harness.ctx, { hidden: [], probe: false })
+  const post = (body) => harness.route.verify.fetch(new Request('http://local/verify', { method: 'POST', body: JSON.stringify(body) }))
+  for (const payload of [{ cancel: true }, { cancel: true, runId: 'different' }]) assert.equal((await post(payload)).status, 409)
+  assert.equal((await post({ mode: 'checker', model: 'gpt-image-2', provider: 'relay' })).status, 400)
+  assert.equal((await post(null)).status, 400)
+  const diag = await (await harness.route.diagnostics.fetch(new Request('http://local/diagnostics'))).json()
+  assert.equal(diag.value.enabled, false)
+  assert.equal(harness.settings.calls.length, 0)
+})
 
 test('the Host route exposes the vendor correction and the gate aligns images', async () => {
   resetShadowStore()
@@ -557,6 +578,57 @@ test('Host verify route forwards web access and defaults to read-only provider s
 })
 
 
+test('real HTTP wiring: reviewing/closing cannot mutate; confirming maps only previously previewed reasoning settings', {timeout:3000}, async () => {
+  resetShadowStore()
+  const h = createHarness(), model = h.providers.relay.models.at(-1)
+  h.providers.relay.api = 'openai-completions'
+  h.learned.upsertEntries({id:model.id, type:'chat', origins:['public'], reasoningEfforts:['high'],
+    publicLookupId:model.id, reasoningCatalog:'models.dev', verifiedAt:1})
+  apply(h.ctx,{ hidden:[], probe:false, applyInput:false })
+  const call = async body => (await h.route['bulk-efforts'].fetch(new Request('http://local/bulk-efforts', body ? {method:'POST',body:JSON.stringify(body)} : {}))).json()
+  const original = structuredClone(h.providers.relay.models)
+  assert.equal((await call()).value.enabled,false)
+  const declined = (await call({action:'preview'})).value
+  assert.ok(declined.rows.some(r => r.model === model.id && r.status === 'pending'))
+  await call({action:'disable'})
+  assert.equal((await call({action:'enable',ticket:declined.ticket})).ok,false)
+  assert.deepEqual(h.providers.relay.models,original)
+  const fresh = (await call({action:'preview'})).value
+  assert.equal((await call({action:'enable',ticket:fresh.ticket})).ok,true)
+  let final = (await call()).value
+  for(let i=0;final.running && i<50;i++) { await new Promise(r=>setImmediate(r)); final=(await call()).value }
+  assert.equal(final.running,false); assert.equal(final.counts.written,1); assert.equal(h.settings.calls.length,1)
+  assert.deepEqual(model.reasoningEfforts,{high:'high'}); assert.equal(model.compat.supportsReasoningEffort,true)
+  assert.deepEqual(h.providers.relay.models.slice(0,-1),original.slice(0,-1))
+  assert.equal((await call({action:'disable'})).value.enabled,false); assert.deepEqual(model.reasoningEfforts,{high:'high'})
+})
+
+test('confirmed empty slot + subsequent public verification fills its exact new levels without any checker call', {timeout:3000}, async () => {
+  resetShadowStore()
+  const h = createHarness(), id = 'vendor/waiting-route', held = { id }
+  const profile = h.providers.relay; profile.api='openai-completions';profile.models.push(held)
+  h.llm.listModels = async () => [{ id,provider:'relay',name:id }]
+  h.llm.prepareCall = () => { throw new Error('public mode must not call a model') }
+  const previous = globalThis.fetch
+  let reads=0
+  try {
+    globalThis.fetch = async url => { reads++;return Response.json(String(url).endsWith('/models.json') ? { [id]: { type:'chat',reasoning:true,reasoningEfforts:['low','high'] } } : {}) }
+    apply(h.ctx,{hidden:[],probe:false,applyInput:false})
+    const call = async (name, body) => (await h.route[name].fetch(new Request('http://local/'+name,body?{method:'POST',body:JSON.stringify(body)}:{}))).json()
+    const preview=(await call('bulk-efforts',{action:'preview'})).value
+    assert.equal(preview.rows.find(r=>r.model===id).reason,'awaiting-evidence')
+    assert.equal((await call('bulk-efforts',{action:'enable',ticket:preview.ticket})).ok,true)
+    assert.equal(reads,0);assert.equal(h.settings.calls.length,0)
+    assert.equal((await call('verify',{mode:'public',fuzzyMatch:false})).ok,true)
+    let s
+    for(let i=0;i<80;i++) {s=(await call('verify')).value.state;const b=(await call('bulk-efforts')).value; if(!s.running&&!b.running&&h.settings.calls.length)break;await new Promise(r=>setImmediate(r))}
+    assert.equal(s.phase,'done');assert.equal(s.checkerTargets,0);assert.equal(s.writeBack,false)
+    const row=(await call('bulk-efforts')).value.rows.find(r=>r.model===id)
+    assert.equal(row.status,'written',JSON.stringify(row));assert.deepEqual(held.reasoningEfforts,{low:'low',high:'high'});assert.equal(h.settings.calls.length,1)
+    await call('bulk-efforts',{action:'disable'})
+  } finally {globalThis.fetch=previous}
+})
+
 test('model editor exposes the opt-in and applies request settings only after explicit write-back', async () => {
   resetShadowStore()
   const harness = createHarness()
@@ -568,7 +640,7 @@ test('model editor exposes the opt-in and applies request settings only after ex
   assert.equal(row.standardEffort, true)
   assert.equal(row.requestReasoning, null)
   const post = async applyToProvider => (await harness.route.overrides.fetch(new Request('http://localhost/overrides', {
-    method: 'POST', body: JSON.stringify({ provider: 'relay', model: 'mystery-model', efforts: ['high', 'xhigh', 'max'], standardEffort: true, applyToProvider }),
+    method: 'POST', body: JSON.stringify({ provider: 'relay', model: 'mystery-model', efforts: ['high', 'xhigh', 'max'], directEffort: true, applyToProvider }),
   }))).json()
   assert.equal((await post(false)).value.provider.written, false)
   assert.equal(profile.models.at(-1).compat, undefined)

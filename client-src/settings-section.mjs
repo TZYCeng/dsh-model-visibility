@@ -1,43 +1,30 @@
 const React = require('react')
 const h = React.createElement
 
-import { FIELD } from './constants.mjs'
-import { keyOf, kindOf, isGenerationKind, providerLabel, countModels, sourceOf, sourceLabel, readCollapsedGroups, persistCollapsedGroups } from './format.mjs'
+import { keyOf, kindOf, providerLabel, countModels, sourceOf, sourceLabel, readCollapsedGroups, persistCollapsedGroups } from './format.mjs'
+import { canWriteHidden, writeHiddenRoutes } from './visibility-identity.mjs'
 import { overrideIdentity } from './catalog-store.mjs'
-import { computeFilteredGroups, countKinds, probeOf } from './pure.mjs'
-import { capabilityTags, tagClassOf } from './tags.mjs'
-import { ModelOverrideEditor, providerWriteNote } from './override-editor.mjs'
+import { computeFilteredGroups, countKinds } from './pure.mjs'
+import { ModelOverrideEditor } from './override-editor.mjs'
+import { providerWriteNote } from './editor-receipt.mjs'
+import { modelRow } from './settings-rows.mjs'
+import { SettingsConfirm } from './settings-confirm.mjs'
 import { useHidden, useSource } from './hooks.mjs'
 import { UsageToolbar } from './usage-view.mjs'
 import { VerifyPanel } from './checker-view.mjs'
+import { DebugPanel, AboutPanel } from './support-panels.mjs'
+import { clientTrace } from './diagnostic-events.mjs'
 
-/** Browser-local key for the "about this page" disclosure. */
-const ABOUT_KEY = 'dsh-model-visibility:about-open:v1'
-
-function readAboutOpen() {
-  try {
-    return window.localStorage.getItem(ABOUT_KEY) === '1'
-  } catch (_error) {
-    return false
-  }
+function affectedRoutes(groups, hidden, visible) {
+  return groups.flatMap((group) => (group.models ?? []).filter((model) => hidden.has(keyOf(group.id, model.id)) === visible)
+    .map((model) => ({ provider: group.id, model: model.id })))
 }
 
-function persistAboutOpen(open) {
-  try {
-    window.localStorage.setItem(ABOUT_KEY, open ? '1' : '0')
-  } catch (_error) {
-    // Storage is optional for a preference like this.
-  }
+function focusOrFallback(target, fallback) {
+  if (target && target.isConnected !== false && !target.disabled) target.focus?.()
+  else fallback?.focus?.()
 }
 
-/**
- * The settings page.
- *
- * Layout, in the order a user needs it: a one-line summary with the two
- * primary actions, the token strip, the filter bar, the models, then the
- * diagnostics — and behind a disclosure the long explanation that used to
- * occupy a third of the viewport before the first model row.
- */
 function makeSection(form, catalog, overrides, usage, verify) {
   return function ModelVisibilitySection({ t }) {
     const { hidden, snapshot } = useHidden(form)
@@ -48,711 +35,268 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const [refreshing, setRefreshing] = React.useState(false)
     const [reloading, setReloading] = React.useState(false)
     const [collapsed, setCollapsed] = React.useState(readCollapsedGroups)
-    const [aboutOpen, setAboutOpen] = React.useState(readAboutOpen)
+    const [matchFold, setMatchFold] = React.useState(null)
     const [editing, setEditing] = React.useState(null)
-    const [providerNote, setProviderNote] = React.useState(null)
-    const editTrigger = React.useRef(null)
-
-    const closeEditor = () => setEditing(null)
-    React.useEffect(() => {
-      if (editing === null && editTrigger.current !== null) {
-        editTrigger.current.focus()
-        editTrigger.current = null
-      }
-    }, [editing])
-
-    React.useEffect(() => {
-      catalog.load()
-      overrides.load()
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [])
-
-    const catalogMeta = state.learned && typeof state.learned === 'object' ? state.learned : null
-    const hostFeatures =
-      catalogMeta && Array.isArray(catalogMeta.features) ? catalogMeta.features : []
-    const supportsOverrides = state.source === 'host' && hostFeatures.includes('overrides')
-    const overridesReady = overrideState.status === 'ready' && overrideState.available === true
-    const canOpenEditor = state.status === 'ready' && supportsOverrides && overridesReady && !overrideState.pending && !overrideState.refreshing
-    const hostFeaturesKnown = state.source === 'host' && Array.isArray(catalogMeta?.features)
-    const canSetSourceMode = hostFeatures.includes('verifySourceModes')
-    const supportsVerify = canSetSourceMode || hostFeatures.includes('verifyWeb')
-    const canVerify = hostFeaturesKnown && state.status === 'ready' && supportsVerify
-    const verifyState = verify.getSnapshot()
-    const observeVerify = !hostFeaturesKnown || hostFeatures.includes('verify') || supportsVerify ||
-      verifyState.snapshot?.state?.running === true || verifyState.pending
-    const overrideEntries = new Map(overrideState.entries.map((entry) => [overrideIdentity(entry.provider, entry.model), entry]))
-
-    const writable = snapshot.writable !== false
-    const groups = state.groups
-    const total = countModels(groups)
-    const hiddenCount = groups.reduce(
-      (count, group) =>
-        count +
-        (group.models || []).filter((model) => hidden.has(keyOf(group.id, model.id))).length,
-      0,
-    )
-    const allKinds = countKinds(groups.flatMap((group) => group.models || []))
-    const generationCount = allKinds.image + allKinds.video
+    const [receipt, setReceipt] = React.useState(null)
+    const [confirm, setConfirm] = React.useState(null)
+    const [facts, setFacts] = React.useState(null)
     const [filter, setFilter] = React.useState('all')
     const [visibility, setVisibility] = React.useState('all')
     const [query, setQuery] = React.useState('')
     const [multimodalOnly, setMultimodalOnly] = React.useState(false)
     const [reasoningOnly, setReasoningOnly] = React.useState(false)
     const [minContext, setMinContext] = React.useState(0)
-    const normalizedQuery = query.trim().toLowerCase()
-    const hasActiveFilters =
-      filter !== 'all' || visibility !== 'all' || normalizedQuery !== '' || multimodalOnly || reasoningOnly || minContext > 0
-    const filteredGroups = computeFilteredGroups(groups, {
-      filter,
-      visibility,
-      hidden,
-      query: normalizedQuery,
-      multimodalOnly,
-      reasoningOnly,
-      minContext,
-    })
-    const disabled = busy || !writable
+    const editTrigger = React.useRef(null)
+    const pendingFocus = React.useRef(null)
+    const searchInput = React.useRef(null)
+    const writeLock = React.useRef(false)
+    const editorId = React.useId()
+    const applyHintId = React.useId()
+    const groupId = React.useId()
 
-    const writeField = (field, value) => {
-      if (disabled) return
-      setBusy(true)
-      setError(null)
-      Promise.resolve(form.set(field, value))
-        .then(
-          (accepted) => {
-            if (accepted === false) setError(t('page.saveFailed'))
-          },
-          () => {
-            setError(t('page.saveFailed'))
-          },
-        )
-        .finally(() => {
-          setBusy(false)
-        })
-    }
-
-    const commit = (next) => writeField(FIELD, Array.from(next))
-    const applyInput = !(snapshot.value && snapshot.value.applyInput === false)
-    const commitApply = (next) => writeField('applyInput', next)
-
-    const toggleModel = (group, model) => {
-      const next = new Set(hidden)
-      const key = keyOf(group.id, model.id)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      commit(next)
-    }
-
-    const setGroup = (group, subset, visible) => {
-      const next = new Set(hidden)
-      for (const model of subset) {
-        const key = keyOf(group.id, model.id)
-        if (visible) next.delete(key)
-        else next.add(key)
+    React.useEffect(() => {
+      if (!confirm && pendingFocus.current) {
+        const target = pendingFocus.current; pendingFocus.current = null
+        focusOrFallback(target, searchInput.current)
       }
-      commit(next)
+    }, [confirm, editing?.id])
+
+    const groups = state.groups
+    const meta = state.learned
+    const featuresKnown = state.source === 'host' && Array.isArray(meta?.features)
+    const features = featuresKnown ? meta.features : []
+    const supportsOverrides = features.includes('overrides')
+    const overridesReady = overrideState.status === 'ready' && overrideState.available === true
+    const canOpenEditor = state.status === 'ready' && supportsOverrides && overridesReady && !overrideState.pending && !overrideState.refreshing
+    const canSetSourceMode = features.includes('verifySourceModes')
+    const supportsVerify = canSetSourceMode || features.includes('verifyWeb')
+    const verifyState = verify.getSnapshot()
+    const observeVerify = !featuresKnown || features.includes('verify') || supportsVerify || verifyState.snapshot?.state?.running === true || verifyState.pending
+    const entryById = React.useMemo(() => new Map(overrideState.entries.map((entry) => [overrideIdentity(entry.provider, entry.model), entry])), [overrideState.entries])
+    const catalogById = React.useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups])
+    const total = countModels(groups)
+    const allKinds = React.useMemo(() => countKinds(groups.flatMap((group) => group.models ?? [])), [groups])
+    const hiddenCount = React.useMemo(() => affectedRoutes(groups, hidden, true).length, [groups, hidden])
+    const normalized = query.trim().toLowerCase()
+    const activeFilters = Boolean(filter !== 'all' || visibility !== 'all' || normalized || multimodalOnly || reasoningOnly || minContext)
+    const filterKey = JSON.stringify([filter, visibility, normalized, multimodalOnly, reasoningOnly, minContext])
+    const filtered = React.useMemo(() => computeFilteredGroups(groups, { filter, visibility, query: normalized, multimodalOnly, reasoningOnly, minContext, hidden }),
+      [groups, filter, visibility, normalized, multimodalOnly, reasoningOnly, minContext, hidden])
+    const matchCount = countModels(filtered)
+    const hiddenMatches = React.useMemo(() => affectedRoutes(filtered, hidden, true), [filtered, hidden])
+    // Search results start expanded independently of the user's persisted group layout. Manual folding
+    // inside this one filter still works; clearing/changing it never rewrites unfiltered preferences.
+    const effectiveFold = activeFilters ? matchFold?.key === filterKey ? matchFold.groups : new Set() : collapsed
+    const anyCollapsed = filtered.some((group) => effectiveFold.has(group.id))
+    const setFolds = (next) => {
+      if (activeFilters) setMatchFold({ key: filterKey, groups: next })
+      else { setCollapsed(next); persistCollapsedGroups(next) }
     }
-
-    const runCatalogAction = (action, setActive) => {
-      setActive(true)
-      Promise.resolve()
-        .then(action)
-        .catch(() => {})
-        .finally(() => setActive(false))
+    const resetFilters = () => { setQuery(''); setFilter('all'); setVisibility('all'); setMultimodalOnly(false); setReasoningOnly(false); setMinContext(0); setMatchFold(null) }
+    const foldOne = (id) => {
+      const next = new Set(effectiveFold)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      setFolds(next)
     }
-
-    const refreshCatalog = () => {
-      if (refreshing || reloading) return
-      runCatalogAction(() => catalog.refresh(), setRefreshing)
+    const foldAll = () => {
+      const next = new Set(effectiveFold)
+      for (const group of filtered) { if (anyCollapsed) next.delete(group.id); else next.add(group.id) }
+      setFolds(next)
     }
-
-    // A hard reload may supersede a soft refresh that is still running;
-    // catalog.load() gives it a new run and discards the older result.
-    const reloadCatalog = () => {
-      if (busy || reloading) return
-      setRefreshing(false)
-      runCatalogAction(() => { void overrides.load(); return catalog.reload() }, setReloading)
+    const hiddenWritable = canWriteHidden(form, snapshot)
+    const disabled = busy || !hiddenWritable || state.status !== 'ready'
+    const applyInput = snapshot.value?.applyInput !== false
+    const applyDisabled = busy || snapshot.writable !== true || !features.includes('applyInput') || snapshot.status !== 'ready'
+    const runWrite = (work, failText) => {
+      if (writeLock.current) return
+      writeLock.current = true; setBusy(true); setError(null)
+      const send = async () => {
+        try { if (await work() !== true) setError(t(failText)) }
+        catch { setError(t(failText)) }
+        finally { writeLock.current = false; setBusy(false) }
+      }
+      void send()
     }
-
-    const toggleGroupCollapsed = (id) => {
-      setCollapsed((previous) => {
-        const next = new Set(previous)
-        if (next.has(id)) next.delete(id)
-        else next.add(id)
-        persistCollapsedGroups(next)
-        return next
-      })
+    const changeVisibility = (routes, visible) => {
+      if (disabled || !routes.length) return
+      runWrite(() => writeHiddenRoutes(form, routes, visible), 'page.visibilityFailed')
     }
-
-    const toggleAllCollapsed = () => {
-      setCollapsed((previous) => {
-        const collapsedNow = groups.some((group) => previous.has(group.id))
-        const next = collapsedNow ? new Set() : new Set(groups.map((group) => group.id))
-        persistCollapsedGroups(next)
-        return next
-      })
+    const startConfirm = (spec, event) => { setConfirm({ ...spec, epoch: state.epoch, trigger: event?.currentTarget ?? null }) }
+    const cancelConfirm = () => { pendingFocus.current = confirm?.trigger || searchInput.current; setConfirm(null) }
+    const openEditor = (group, model, trigger) => {
+      if (!canOpenEditor) return
+      const id = overrideIdentity(group.id, model.id)
+      editTrigger.current = trigger; pendingFocus.current = null
+      setEditing({ id, epoch: overrideState.epoch, revision: overrideState.revisions.get(id) ?? null, entry: entryById.get(id) ?? { provider: group.id, model: model.id }, model, dirty: false })
+      clientTrace('editor', 'open', { provider: group.id, model: model.id })
     }
-
-    const toggleAbout = () => {
-      setAboutOpen((previous) => {
-        persistAboutOpen(!previous)
-        return !previous
-      })
+    const closeEditor = () => { pendingFocus.current = editTrigger.current || searchInput.current; setEditing(null); editTrigger.current = null }
+    const askEditor = (group, model, event) => {
+      if (!canOpenEditor || overrideState.pending) return
+      const id = overrideIdentity(group.id, model.id)
+      const target = event?.currentTarget ?? null
+      if (editing?.dirty) { startConfirm({ kind: 'discard', next: editing.id === id ? null : { group, model } }, event); return }
+      if (editing?.id === id) closeEditor(); else openEditor(group, model, target)
     }
-
-    /* ------------------------------------------------------------- groups */
-
+    const runCatalogAction = (hard) => {
+      if (busy || reloading || (!hard && refreshing)) return
+      const set = hard ? setReloading : setRefreshing
+      if (hard) setRefreshing(false)
+      set(true)
+      Promise.resolve().then(() => { if (hard) { void overrides.load(); return catalog.reload() }; return catalog.refresh() })
+        .catch(() => {}).finally(() => set(false))
+    }
+    const activeGroup = editing ? catalogById.get(editing.entry.provider) : null
+    const currentModel = activeGroup?.models?.find((model) => model.id === editing.entry.model)
+    const editorModel = currentModel || editing?.model
+    const editedShown = Boolean(editing && !effectiveFold.has(editing.entry.provider) && filtered.some((group) => group.id === editing.entry.provider && group.models.some((model) => model.id === editing.entry.model)))
+    const currentRevision = editing ? overrideState.revisions?.get(editing.id) ?? null : null
+    const reference = editorModel?.referenceReasoning
+    const evidence = editorModel?.fieldEvidence
+    const proof = reference ? evidence?.referenceReasoning : evidence?.reasoningEfforts ?? evidence?.reasoning
+    const referenceSource = proof?.catalog || (reference ? editorModel.referenceReasoningSource : editorModel?.reasoningCatalog) || proof?.source || sourceOf(editorModel, 'reasoning')
+    const referenceLabel = ['unknown', 'config', 'provider', 'adapter', 'manual', 'inferred', 'official', 'public', 'snapshot', 'catalog'].includes(referenceSource)
+      ? sourceLabel(referenceSource, t) : referenceSource
+    const editor = editing ? h(ModelOverrideEditor, {
+      // Never nest this element inside a group or a row: React tracks this key among the SAME siblings,
+      // even when the row is filtered out, folded, removed or re-ordered by a background catalog read.
+      key: 'draft:' + editing.id, id: editorId, entry: editing.entry, revision: editing.revision, hasOverride: editing.revision !== null,
+      stale: editing.epoch !== overrideState.epoch || (overridesReady && currentRevision !== editing.revision), blocked: !canOpenEditor,
+      detached: !editedShown, missing: state.status === 'ready' && !currentModel, name: editorModel.name || editorModel.id,
+      routeKind: kindOf(editorModel), t, overrides, canMap: features.includes('reasoningMappings'),
+      canDirect: features.includes('effortDirect'), canReferencePrefill: features.includes('referencePrefill'),
+      referenceEfforts: kindOf(editorModel) === 'chat' ? (reference || editorModel.reasoning)?.efforts : [],
+      referenceSource: referenceLabel, referenceAlias: proof?.alias === true || (Boolean(reference) && editorModel.referenceReasoningAlias === true),
+      onDirty: () => setEditing((previous) => previous?.id === editing.id && !previous.dirty ? { ...previous, dirty: true } : previous),
+      onClose: closeEditor,
+      onSaved: (result, action) => {
+        closeEditor()
+        setReceipt({ route: editing.id, epoch: state.epoch, name: editing.entry.provider + ' / ' + editing.entry.model, message: providerWriteNote(result?.provider, t, action) })
+        void catalog.afterChange({ fresh: false })
+      },
+    }) : null
+    const note = receipt && receipt.epoch === state.epoch ? h('div', { key: 'write-receipt', className: 'mvp_receipt', role: 'status' }, h('strong', null, receipt.name), ' · ', receipt.message,
+      h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', onClick: () => setReceipt(null) }, t('page.dismissReceipt'))) : null
+    let placedReceipt = false
     const rows = []
-    for (const group of filteredGroups) {
-      const allGroupModels =
-        (groups.find((candidate) => candidate.id === group.id) || group).models || []
-      const models = group.models || []
-      const shown = allGroupModels.filter((model) => !hidden.has(keyOf(group.id, model.id))).length
-      const allShown = models.every((model) => !hidden.has(keyOf(group.id, model.id)))
-      const kinds = countKinds(allGroupModels)
-      const kindParts = []
-      if (kinds.chat > 0) kindParts.push('chat')
-      if (kinds.image > 0) kindParts.push('image')
-      if (kinds.video > 0) kindParts.push('video')
-      if (kinds.other > 0) kindParts.push('other')
-      const kindNodes = []
-      for (const [index, kindKey] of kindParts.entries()) {
-        if (index > 0) kindNodes.push(h('span', { key: 'sep-' + kindKey, className: 'mvp_sep' }, '·'))
-        kindNodes.push(
-          h(
-            'span',
-            {
-              key: kindKey,
-              className:
-                'mvp_kindCount' +
-                (kindKey === 'chat' ? '' : ' mvp_kindCount--' + kindKey),
-              title: t('page.filter.' + kindKey) + ' ' + kinds[kindKey],
-            },
-            kinds[kindKey],
-          ),
-        )
+    if (editor && !editedShown) rows.push(editor)
+    for (const [index, group] of filtered.entries()) {
+      const models = group.models
+      const allCount = catalogById.get(group.id)?.models?.length ?? models.length
+      const name = providerLabel(group, t) || group.id
+      const folded = effectiveFold.has(group.id)
+      const countId = groupId + '-' + index
+      const off = affectedRoutes([group], hidden, true)
+      const visible = off.length > 0
+      const routes = visible ? off : affectedRoutes([group], hidden, false)
+      const actionKey = visible ? activeFilters ? 'group.showFiltered' : 'group.showAll' : activeFilters ? 'group.hideFiltered' : 'group.hideAll'
+      rows.push(h('div', { key: 'head:' + group.id, className: 'mvp_groupHead' },
+        h('button', { type: 'button', className: 'mvp_groupTitle', 'aria-expanded': !folded, 'aria-describedby': countId,
+          'aria-label': t(folded ? 'group.expandNamed' : 'group.collapseNamed', { name }), onClick: () => foldOne(group.id) },
+          h('span', { className: 'mvp_chevron', 'aria-hidden': true }, folded ? '▸' : '▾'),
+          h('span', { className: 'mvp_groupName' }, name),
+          h('span', { className: 'mvp_groupCount', id: countId }, activeFilters
+            ? t('group.matchCount', { matches: models.length, total: allCount, enabled: models.length - off.length })
+            : t('group.count', { enabled: allCount - off.length, total: allCount })),
+        ),
+        h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', disabled: disabled || !routes.length,
+          onClick: (event) => startConfirm({ kind: 'visibility', routes, visible, group: group.id, scope: name }, event) }, t(actionKey, { count: routes.length })),
+      ))
+      if (!folded) for (const model of models) {
+        const id = overrideIdentity(group.id, model.id)
+        const shown = !hidden.has(keyOf(group.id, model.id))
+        rows.push(modelRow({ group, model, rowId: id, editorId, t, shown, disabled,
+          exposeEditor: supportsOverrides && overrideState.available !== false, canOpenEditor, editDisabled: busy || overrideState.pending,
+          isEditing: editing?.id === id, edit: (event) => askEditor(group, model, event),
+          toggle: () => changeVisibility([{ provider: group.id, model: model.id }], !shown), facts: facts === id, showFacts: (open) => setFacts(open ? id : null),
+        }))
+        if (editor && editing.id === id) rows.push(editor)
+        if (note && receipt.route === id) { rows.push(note); placedReceipt = true }
       }
-      const groupName = providerLabel(group, t)
-      const collapsedNow = collapsed.has(group.id)
-      const collapseLabel = t(collapsedNow ? 'group.expandNamed' : 'group.collapseNamed', {
-        name: groupName,
-      })
-      const probe = probeOf(state, group, t)
-      rows.push(
-        h(
-          'div',
-          { key: group.id, className: 'mvp_group' },
-          h(
-            'div',
-            { className: 'mvp_groupHead' },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'mvp_groupTitle',
-                'aria-expanded': !collapsedNow,
-                'aria-label': collapseLabel,
-                title: collapseLabel,
-                onClick: () => toggleGroupCollapsed(group.id),
-              },
-              h('span', { className: 'mvp_chevron' }, collapsedNow ? '▸' : '▾'),
-              h('span', { className: 'mvp_groupName' }, groupName),
-              h('span', { className: 'mvp_groupCount', title: t('group.enabledCount') }, shown + '/' + allGroupModels.length),
-              kindParts.length > 0
-                ? h('span', { className: 'mvp_groupCap' }, kindNodes)
-                : null,
-              probe !== null
-                ? h(
-                    'span',
-                    {
-                      className: 'mvp_groupProbe' + (probe.failed === true ? ' mvp_groupProbe--warn' : ''),
-                      title: probe.title || undefined,
-                    },
-                    probe.label,
-                  )
-                : null,
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'mvp_button mvp_button--quiet',
-                disabled: disabled,
-                onClick: () => setGroup(group, models, !allShown),
-              },
-              allShown
-                ? t(hasActiveFilters ? 'group.hideFiltered' : 'group.hideAll')
-                : t(hasActiveFilters ? 'group.showFiltered' : 'group.showAll'),
-            ),
-          ),
-          collapsedNow
-            ? null
-            : models.map((model) => {
-              const rowKey = keyOf(group.id, model.id)
-              const overrideId = overrideIdentity(group.id, model.id)
-              const currentRevision = overrideState.revisions?.get(overrideId) ?? null
-              const isEditing = editing?.id === overrideId
-              const shownModel = !hidden.has(rowKey)
-              const tags = capabilityTags(model, t)
-              const kind = kindOf(model)
-              const generation = isGenerationKind(kind)
-              const kindTint =
-                kind !== 'chat' &&
-                ['image', 'video', 'embedding', 'rerank', 'audio', 'classifier', 'translation'].includes(kind)
-                  ? ' mvp_row--kind-' + kind
-                  : ''
-              const row = h(
-                'div',
-                {
-                  className:
-                    'mvp_row' +
-                    (generation ? ' mvp_row--gen' : '') +
-                    (shownModel ? '' : ' mvp_row--off') +
-                    kindTint,
-                },
-                h(
-                  'div',
-                  { className: 'mvp_rowText' },
-                  h(
-                    'div',
-                    { className: 'mvp_rowHead' },
-                    h('span', { className: 'mvp_rowTitle' }, model.name),
-                    model.id === model.name
-                      ? null
-                      : h('span', { className: 'mvp_rowMeta' }, model.id),
-                  ),
-                  h(
-                    'div',
-                    { className: 'mvp_tags' },
-                    tags.map((tag) =>
-                      h(
-                        'span',
-                        {
-                          key: tag.key,
-                          className: tagClassOf(tag),
-                          title: tag.title || undefined,
-                        },
-                        tag.label,
-                      ),
-                    ),
-                  ),
-                ),
-                h(
-                  'div',
-                  { className: 'mvp_rowActions' },
-                  supportsOverrides && overrideState.available !== false
-                    ? h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'mvp_button mvp_button--quiet mvp_editButton',
-                          'aria-pressed': isEditing,
-                          'aria-label': t('row.edit') + ': ' + model.name,
-                          title: t(canOpenEditor || isEditing ? 'row.editTitle' : 'override.listNotReady'),
-                          disabled: busy || overrideState.pending || (!canOpenEditor && !isEditing),
-                          onClick: (event) => {
-                            if (isEditing) closeEditor()
-                            else if (canOpenEditor) {
-                              editTrigger.current = event?.currentTarget ?? null
-                              setEditing({ id: overrideId, revision: currentRevision,
-                                entry: overrideEntries.get(overrideId) ?? { provider: group.id, model: model.id } })
-                            }
-                          },
-                        },
-                        t('row.edit'),
-                      )
-                    : null,
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      role: 'switch',
-                      className: 'mvp_switch',
-                      'aria-checked': shownModel,
-                      'aria-label': model.name,
-                      disabled: disabled,
-                      onClick: () => toggleModel(group, model),
-                    },
-                    h('span', { className: 'mvp_thumb' }),
-                  ),
-                ),
-              )
-              const editor =
-                supportsOverrides && isEditing
-                  ? h(ModelOverrideEditor, {
-                      key: 'editor',
-                      entry: editing.entry,
-                      revision: editing.revision,
-                      hasOverride: editing.revision !== null,
-                      stale: overridesReady && currentRevision !== editing.revision,
-                      blocked: !overridesReady || overrideState.pending || state.status !== 'ready',
-                      name: model.name,
-                      t,
-                      overrides,
-                      canMap: hostFeatures.includes('reasoningMappings'),
-                      hasStandard: hostFeatures.includes('standardEffort'),
-                      canUseStandard: model.standardEffort === true,
-                      canReferencePrefill: hostFeatures.includes('referencePrefill'),
-                      referenceEfforts: kind === 'chat' ? model.referenceReasoning?.efforts ?? model.reasoning?.efforts : [],
-                      referenceSource: model.referenceReasoning
-                        ? model.referenceReasoningSource === 'snapshot' || !model.referenceReasoningSource
-                          ? sourceLabel('snapshot', t) : model.referenceReasoningSource
-                        : model.reasoningCatalog ?? sourceLabel(sourceOf(model, 'reasoning'), t),
-                      referenceAlias: Boolean(model.learned?.publicAlias),
-                      onClose: closeEditor,
-                      onSaved: (result) => {
-                        setEditing((active) => active?.id === overrideId ? null : active)
-                        const message = providerWriteNote(result?.provider, t)
-                        setProviderNote(message === null ? null : { rowKey, message })
-                        void catalog.afterChange()
-                      },
-                    })
-                  : null
-              const note = providerNote?.rowKey === rowKey
-                ? h('div', { className: 'mvp_note', role: 'status' }, providerNote.message) : null
-              return h(React.Fragment, { key: model.id }, row, editor, note)
-            }),
-        ),
-      )
     }
-
-    /* ------------------------------------------------------------- status */
-
+    if (note && !placedReceipt) rows.unshift(note)
     const loading = state.status === 'loading' || state.status === 'idle'
-    const providerList = Array.isArray(state.providers) ? state.providers : []
-    const probeOk = providerList.filter(
-      (provider) => provider && (provider.status === 'ok' || provider.status === 'partial'),
-    ).length
-    const probeCaps = providerList.reduce(
-      (count, provider) => count + (Number(provider && provider.capabilities) || 0),
-      0,
-    )
-    const probeNote =
-      state.source === 'host'
-        ? providerList.length > 0
-          ? t('page.probeSummary', { ok: probeOk, caps: probeCaps })
-          : t('page.probeSummaryNone')
-        : null
-    const hostStale = state.source === 'host' && !hostFeatures.includes('applyInput')
-    const canReload = state.source === 'host' && hostFeatures.includes('reload')
-    const anyCollapsed = groups.some((group) => collapsed.has(group.id))
-    const learnedDate =
-      catalogMeta && Number.isFinite(catalogMeta.updatedAt)
-        ? catalogMeta.updatedAt > 0
-          ? new Date(catalogMeta.updatedAt).toISOString().slice(0, 10)
-          : null
-        : null
-    const catalogNote =
-      catalogMeta !== null
-        ? t('page.learnedNote', {
-            models: catalogMeta.models ?? 0,
-            date: learnedDate || '?',
-          })
-        : null
-    const filterOptions = [
-      ['all', t('page.filter.all'), total],
-      ['chat', t('page.filter.chat'), allKinds.chat],
-      ['image', t('page.filter.image'), allKinds.image],
-      ['video', t('page.filter.video'), allKinds.video],
-      ['other', t('page.filter.other'), allKinds.other],
-    ]
-    // A relay that answered with a diagnostic is worth surfacing next to the
-    // group, but only failed routes belong in the page-level warning list.
-    const failedRoutes = providerList.filter(
-      (provider) => provider && (provider.status === 'failed' || provider.status === 'unauthorized'),
-    )
-    const summaryText =
-      total === 0
-        ? loading
-          ? t('page.loading')
-          : t('page.empty')
-        : t('page.summary', { visible: total - hiddenCount, total })
-
-    /* ------------------------------------------------------------- render */
-
-    return h(
-      'div',
-      { className: 'mvp_page' },
-      // Title + summary + the two actions that are worth a permanent slot.
-      h(
-        'div',
-        { className: 'mvp_head' },
-        h(
-          'div',
-          { className: 'mvp_headMain' },
-          h('h2', { className: 'mvp_title' }, t('page.title')),
-          h('span', { className: 'mvp_summary' }, summaryText),
-          hasActiveFilters && total > 0
-            ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.matchCount', { count: countModels(filteredGroups) }))
-            : null,
-          hiddenCount > 0
-            ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.hiddenSummary', { count: hiddenCount }))
-            : null,
-          generationCount > 0
-            ? h('span', { className: 'mvp_summary mvp_summary--dim' }, t('page.kindSummary', { count: generationCount }))
-            : null,
-        ),
-        h(
-          'div',
-          { className: 'mvp_headActions' },
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'mvp_button mvp_button--quiet',
-              'aria-pressed': aboutOpen,
-              title: t('page.aboutTitle'),
-              onClick: toggleAbout,
-            },
-            t('page.about') + (aboutOpen ? ' ▴' : ' ▾'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'mvp_button',
-              disabled: busy || refreshing || reloading,
-              title: t('page.refreshTitle'),
-              onClick: refreshCatalog,
-            },
-            t(refreshing ? 'page.refreshing' : 'page.refresh'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'mvp_button mvp_button--accent',
-              disabled: !canReload || busy || reloading,
-              title: t(canReload ? 'page.reloadTitle' : 'page.reloadUnavailable'),
-              onClick: reloadCatalog,
-            },
-            t(reloading ? 'page.reloading' : 'page.reload'),
-          ),
+    const options = [['all', total], ['chat', allKinds.chat], ['image', allKinds.image], ['video', allKinds.video], ['other', allKinds.other]]
+    const failed = (state.providers ?? []).filter((provider) => provider && (provider.status === 'failed' || provider.status === 'unauthorized'))
+    const applyCap = featuresKnown && features.includes('applyInput')
+    const filterButton = (key, label, pressed, action, tooltip) => h('button', { key, type: 'button', className: 'mvp_filter', 'aria-pressed': pressed, title: tooltip,
+      onClick: () => { action(); clientTrace('filters', 'change', { status: key }) } }, label)
+    const actionButton = (label, title, action, off, accent = false) => h('button', { type: 'button', className: 'mvp_button' + (accent ? ' mvp_button--accent' : ''),
+      disabled: off, title: t(title), onClick: action }, t(label))
+    const banner = (text, warn = false) => h('div', { className: 'mvp_banner' + (warn ? ' mvp_banner--warn' : ''), role: warn ? 'alert' : 'status' }, text)
+    let confirmation = null
+    if (confirm?.kind === 'visibility') {
+      const current = affectedRoutes(confirm.group === undefined ? filtered : filtered.filter((group) => group.id === confirm.group), hidden, confirm.visible)
+      const currentIds = new Set(current.map((r) => overrideIdentity(r.provider, r.model)))
+      const changed = confirm.epoch !== state.epoch || currentIds.size !== confirm.routes.length || confirm.routes.some((r) => !currentIds.has(overrideIdentity(r.provider, r.model)))
+      const count = confirm.routes.length
+      confirmation = h(SettingsConfirm, { title: t(confirm.visible ? 'page.confirmEnable' : 'page.confirmDisable', { count }),
+        description: t('page.confirmScope', { scope: confirm.scope, count }), targets: confirm.routes, targetLabel: t('page.confirmTargets', { count }),
+        confirmLabel: t(confirm.visible ? 'page.doEnable' : 'page.doDisable', { count }), cancelLabel: t('page.cancel'),
+        disabled, changed: changed ? t('page.confirmChanged') : null,
+        onCancel: cancelConfirm, onConfirm: () => { if (disabled || changed) return; changeVisibility(confirm.routes, confirm.visible); cancelConfirm() },
+      })
+    } else if (confirm?.kind === 'discard') {
+      confirmation = h(SettingsConfirm, { title: t('override.discardTitle'), description: t('override.discardDescription', { name: editing?.entry.model ?? '' }),
+        confirmLabel: t('override.discard'), cancelLabel: t('override.keepEditing'), disabled: overrideState.pending,
+        onCancel: cancelConfirm, onConfirm: () => { if (overrideState.pending) return; setConfirm(null); if (confirm.next) openEditor(confirm.next.group, confirm.next.model, confirm.trigger); else closeEditor() },
+      })
+    }
+    return h('div', { className: 'mvp_page' },
+      h('div', { className: 'mvp_head' }, h('div', { className: 'mvp_headMain' }, h('h2', { className: 'mvp_title' }, t('page.title')),
+        h('span', { className: 'mvp_summary' }, total ? t('page.summary', { visible: total - hiddenCount, total }) : t(loading ? 'page.loading' : 'page.empty'))),
+        h('div', { className: 'mvp_headActions' },
+          actionButton(refreshing ? 'page.refreshing' : 'page.refresh', 'page.refreshTitle', () => runCatalogAction(false), busy || refreshing || reloading),
+          actionButton(reloading ? 'page.reloading' : 'page.reload', features.includes('reload') ? 'page.reloadTitle' : 'page.reloadUnavailable', () => runCatalogAction(true), busy || reloading || !features.includes('reload')),
         ),
       ),
-      aboutOpen
-        ? h(
-            'div',
-            { className: 'mvp_about' },
-            h('p', { className: 'mvp_aboutP' }, t('page.description')),
-            h('p', { className: 'mvp_aboutP' }, t('page.legend')),
-            h('p', { className: 'mvp_aboutP' }, t('page.kindLegend')),
-            h('p', { className: 'mvp_aboutP' }, t('page.manualNote')),
-          )
-        : null,
-      hostFeaturesKnown && !hostFeatures.includes('usage')
-        ? h('div', { className: 'mvp_usage mvp_usage--off' }, t('usage.hostStale'))
-        : h(UsageToolbar, { usage, t, features: hostFeatures }),
-      h(
-        'div',
-        { className: 'mvp_filters' },
-        h('input', {
-          className: 'mvp_searchInput',
-          type: 'search',
-          value: query,
-          placeholder: t('page.searchPlaceholder'),
-          'aria-label': t('page.searchPlaceholder'),
-          onInput: (event) => setQuery(event.target.value),
-        }),
-        h(
-          'div',
-          { className: 'mvp_filterGroup' },
-          filterOptions.map(([value, label, count]) =>
-            h(
-              'button',
-              {
-                key: value,
-                type: 'button',
-                className: 'mvp_filter',
-                'aria-pressed': filter === value,
-                onClick: () => setFilter(value),
-              },
-              label + ' ' + count,
-            ),
-          ),
-        ),
-        h(
-          'select',
-          {
-            className: 'mvp_contextSelect',
-            value: visibility,
-            'aria-label': t('page.visibility.label'),
-            title: t('page.visibility.label'),
-            onChange: (event) => setVisibility(event.target.value),
-          },
-          ['all', 'enabled', 'disabled'].map((value) =>
-            h('option', { key: value, value }, t('page.visibility.' + value)),
-          ),
-        ),
-        h(
-          'div',
-          { className: 'mvp_filterGroup' },
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'mvp_filter',
-              'aria-pressed': multimodalOnly,
-              title: t('page.capability.multimodalTitle'),
-              onClick: () => setMultimodalOnly(!multimodalOnly),
-            },
-            t('page.capability.multimodal'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'mvp_filter',
-              'aria-pressed': reasoningOnly,
-              title: t('page.capability.reasoningTitle'),
-              onClick: () => setReasoningOnly(!reasoningOnly),
-            },
-            t('page.capability.reasoning'),
-          ),
-          h(
-            'select',
-            {
-              className: 'mvp_contextSelect',
-              value: String(minContext),
-              'aria-label': t('page.contextLabel'),
-              title: t('page.contextLabel'),
-              onChange: (event) => setMinContext(Number(event.target.value)),
-            },
-            [
-              [0, 'page.context.any'],
-              [128000, 'page.context.128k'],
-              [256000, 'page.context.256k'],
-              [512000, 'page.context.512k'],
-              [1000000, 'page.context.1m'],
-            ].map(([value, label]) => h('option', { key: value, value: String(value) }, t(label))),
-          ),
-        ),
-        h(
-          'div',
-          { className: 'mvp_filterGroup mvp_filterGroup--push' },
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'mvp_button mvp_button--quiet',
-              disabled: disabled || hiddenCount === 0,
-              title: t('page.showAllTitle'),
-              onClick: () => commit(new Set()),
-            },
-            t('page.showAll'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'mvp_button mvp_button--quiet',
-              disabled: groups.length === 0,
-              title: t(anyCollapsed ? 'page.expandGroupsTitle' : 'page.collapseGroupsTitle'),
-              onClick: toggleAllCollapsed,
-            },
-            t(anyCollapsed ? 'page.expandGroups' : 'page.collapseGroups'),
-          ),
+      h(DebugPanel, { key: 'debug:' + state.epoch, t, features }),
+      featuresKnown && !features.includes('usage') ? h('div', { className: 'mvp_usage mvp_usage--off' }, t('usage.hostStale'), h('div', { className: 'mvp_usageStatus' })) : h(UsageToolbar, { usage, t, features }),
+      h('div', { className: 'mvp_filters' },
+        h('input', { className: 'mvp_searchInput', type: 'search', value: query, ref: searchInput, placeholder: t('page.searchPlaceholder'), 'aria-label': t('page.searchPlaceholder'),
+          onInput: (event) => setQuery(event.target.value) }),
+        h('div', { className: 'mvp_filterGroup', role: 'group', 'aria-label': t('override.kind') }, options.map(([key, count]) => filterButton(key, t('page.filter.' + key) + ' ' + count, filter === key, () => setFilter(key)))),
+        h('select', { className: 'mvp_contextSelect', value: visibility, 'aria-label': t('page.visibility.label'), onChange: (event) => setVisibility(event.target.value) },
+          ['all', 'enabled', 'disabled'].map((key) => h('option', { key, value: key }, t('page.visibility.' + key)))),
+        h('div', { className: 'mvp_filterGroup' },
+          filterButton('multimodal', t('page.capability.multimodal'), multimodalOnly, () => setMultimodalOnly(!multimodalOnly), t('page.capability.multimodalTitle')),
+          filterButton('reasoning', t('page.capability.reasoning'), reasoningOnly, () => setReasoningOnly(!reasoningOnly), t('page.capability.reasoningTitle')),
+          h('select', { className: 'mvp_contextSelect', value: String(minContext), 'aria-label': t('page.contextLabel'), onChange: (event) => setMinContext(Number(event.target.value)) },
+            [[0, 'any'], [128000, '128k'], [256000, '256k'], [512000, '512k'], [1000000, '1m']].map(([value, key]) => h('option', { key, value: String(value) }, t('page.context.' + key)))),
         ),
       ),
-      h(
-        'div',
-        { className: 'mvp_applyRow' },
-        h(
-          'button',
-          {
-            type: 'button',
-            role: 'switch',
-            className: 'mvp_switch',
-            'aria-checked': applyInput,
-            'aria-label': t('page.applyInput'),
-            'aria-describedby': 'mvp-apply-hint',
-            disabled: disabled,
-            onClick: () => commitApply(!applyInput),
-          },
-          h('span', { className: 'mvp_thumb' }),
-        ),
-        h(
-          'div',
-          { className: 'mvp_applyText' },
-          h('span', { className: 'mvp_applyTitle' }, t('page.applyInput')),
-          h('span', { className: 'mvp_applyHint', id: 'mvp-apply-hint' }, t('page.applyInputShort')),
-        ),
+      h('div', { className: 'mvp_listTools' },
+        activeFilters ? h('span', { className: 'mvp_summary', role: 'status' }, t('page.matchCount', { count: matchCount })) : null,
+        activeFilters ? h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', onClick: resetFilters }, t('page.clearFilters')) : null,
+        h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', disabled: disabled || !hiddenMatches.length,
+          onClick: (event) => startConfirm({ kind: 'visibility', visible: true, routes: hiddenMatches, scope: t(activeFilters ? 'page.scopeFiltered' : 'page.scopeCatalog') }, event) },
+          t(activeFilters ? 'page.showMatches' : 'page.showAll', { count: hiddenMatches.length })),
+        h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', disabled: !filtered.length, onClick: foldAll },
+          t(activeFilters ? anyCollapsed ? 'page.expandMatches' : 'page.collapseMatches' : anyCollapsed ? 'page.expandGroups' : 'page.collapseGroups')),
+        h('details', { className: 'mvp_details' }, h('summary', null, t('page.listHelp')), h('p', null, t('page.listHint')), h('p', null, t('page.filterHint'))),
       ),
-      failedRoutes.length > 0
-        ? h(
-            'div',
-            {
-              className: 'mvp_banner mvp_banner--warn',
-              title: failedRoutes
-                .map((route) => (route.name || route.id) + ': ' + (route.message || route.status))
-                .join('\n'),
-            },
-            t('page.probeFailures', {
-              names: failedRoutes.map((route) => route.name || route.id).join(' · '),
-            }),
-          )
-        : null,
-      hostStale ? h('div', { className: 'mvp_banner' }, t('page.hostStale')) : null,
-      state.detailsError !== null && state.source === 'catalog'
-        ? h('div', { className: 'mvp_banner', title: state.detailsError }, t('page.metaFallback'))
-        : null,
-      state.failures.length > 0
-        ? h(
-            'div',
-            {
-              className: 'mvp_banner mvp_banner--warn',
-              title: state.failures
-                .map((failure) => (failure.name || failure.id) + ': ' + failure.message)
-                .join('\n'),
-            },
-            t('page.providerFailures', {
-              names: state.failures
-                .map((failure) => failure.name || failure.id)
-                .join(' · '),
-            }),
-          )
-        : null,
-      supportsOverrides && overrideState.available === false
-        ? h('div', { className: 'mvp_banner' }, t('override.unavailable'))
-        : null,
-      supportsOverrides && overrideState.status === 'error'
-        ? h('div', { className: 'mvp_banner mvp_banner--warn', role: 'alert' },
-            t('override.listFailed', { message: overrideState.error }), ' ',
-            h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', onClick: () => { void overrides.load() } }, t('override.retryList')))
-        : null,
-      error !== null ? h('div', { className: 'mvp_banner mvp_banner--error', role: 'alert' }, error) : null,
-      state.error !== null
-        ? h(
-            'div',
-            { className: 'mvp_banner mvp_banner--error', role: 'alert' },
-            t('page.error', { message: state.error }),
-          )
-        : null,
+      applyCap ? h('div', { className: 'mvp_applyRow' },
+        h('button', { type: 'button', role: 'switch', className: 'mvp_switch', 'aria-checked': applyInput, 'aria-label': t('page.applyInput'), 'aria-describedby': applyHintId,
+          disabled: applyDisabled, onClick: () => { if (!applyDisabled) runWrite(() => form.set('applyInput', !applyInput), 'page.saveFailed') } }, h('span', { className: 'mvp_thumb' })),
+        h('span', { className: 'mvp_applyTitle' }, t('page.applyInput')),
+        h('details', { className: 'mvp_details' }, h('summary', null, t('page.applyHelp')), h('p', { id: applyHintId }, t('page.applyInputHint'))),
+      ) : null,
+      !hiddenWritable && snapshot.status !== 'loading' && snapshot.status !== 'idle' ? banner(t('page.visibilityReadOnly')) : null,
+      failed.length ? banner(t('page.probeFailures', { names: failed.map((entry) => entry.name || entry.id).join(' · ') }), true) : null,
+      featuresKnown && !applyCap ? banner(t('page.hostStale')) : null,
+      state.source === 'catalog' && state.detailsError ? banner(t('page.metaFallback')) : null,
+      state.failures.length ? banner(t('page.providerFailures', { names: state.failures.map((entry) => entry.name || entry.id).join(' · ') }), true) : null,
+      supportsOverrides && overrideState.available === false ? banner(t('override.unavailable')) : null,
+      supportsOverrides && overrideState.status === 'error' ? banner(h(React.Fragment, null, t('override.listFailed', { message: overrideState.error }), ' ',
+        h('button', { type: 'button', className: 'mvp_button', onClick: () => { void overrides.load() } }, t('override.retryList'))), true) : null,
+      error ? banner(error, true) : null,
+      state.error ? banner(t('page.error', { message: state.error }), true) : null,
       h('div', { className: 'mvp_groups' }, rows),
-      total > 0 && hasActiveFilters && rows.length === 0
-        ? h('div', { className: 'mvp_note' }, t('page.filterEmpty'))
-        : null,
-      rows.length === 0 && !loading && state.error === null && total === 0
-        ? h('div', { className: 'mvp_note' }, t('page.empty'))
-        : null,
-      h(
-        'div',
-        { className: 'mvp_footer' },
-        probeNote !== null
-          ? h('span', { className: 'mvp_footerItem', title: t('page.probeSummaryTitle') }, probeNote)
-          : null,
-        catalogNote !== null ? h('span', { className: 'mvp_footerItem' }, catalogNote) : null,
-      ),
-      observeVerify ? h(VerifyPanel, {
-        verify,
-        catalog: state,
-        t,
-        canUse: canVerify,
-        onFinished: catalog.afterChange,
-        canFullScan: canVerify && hostFeatures.includes('verifyFullScan'),
-        canSetMode: hostFeatures.includes('verifyModes'),
-        canSetSourceMode,
-      }) : h('div', { className: 'mvp_banner' }, t('checker.hostStale')),
+      !matchCount && !loading && !state.error ? h('p', { className: 'mvp_note' }, t(total && activeFilters ? 'page.filterEmpty' : 'page.empty')) : null,
+      confirmation,
+      observeVerify ? h(VerifyPanel, { verify, catalog: state, t, canUse: featuresKnown && state.status === 'ready' && supportsVerify, onFinished: catalog.afterChange,
+        canFullScan: supportsVerify && features.includes('verifyFullScan'), canSetMode: features.includes('verifyModes'), canSetSourceMode }) : banner(t('checker.hostStale')),
+      h(AboutPanel, { key: 'about:' + state.epoch, t, features }),
     )
   }
 }

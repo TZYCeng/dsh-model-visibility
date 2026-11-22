@@ -497,7 +497,7 @@ test('a route change detaches an inflight sweep without assigning stale capabili
   const latestResult = await newest
   assert.equal(latestResult.discovered.get('relay').get('grok-4.7').contextWindow, 222)
   assert.equal(probe.peek(), latestResult)
-  assert.equal(calls.length, 4)
+  assert.equal(calls.length, 3, 'no /pricing continuation on the retired endpoint')
 })
 
 test('a sweep detects a routing change even before a settings notification', async () => {

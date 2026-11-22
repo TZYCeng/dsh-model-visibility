@@ -1,0 +1,26 @@
+export const SUPPORT_DICT = {
+  zh: {
+    'support.debug': '调试记录', 'support.traceOn': '记录中', 'support.traceOff': '未开启',
+    'support.debugHint': '仅记录本机步骤、字段名和处理结果；不记录原文、上游请求值或密钥。关闭后停止采集，已有记录保留。',
+    'support.debugSwitch': '开启本机调试记录', 'support.view': '查看记录', 'support.hide': '收起记录',
+    'support.copy': '复制脱敏记录', 'support.copied': '已复制', 'support.clear': '清空本轮记录', 'support.refresh': '刷新',
+    'support.empty': '本轮还没有记录。开启后重做一次要排查的操作。', 'support.file': '本轮本机日志：{path}',
+    'support.diskError': '本机日志未能写入，仍可复制内存中的记录。', 'support.dropped': '有 {count} 条较早或超限记录未显示。',
+    'support.error': '操作未完成，请重试。', 'support.about': '关于插件 · 版本与反馈', 'support.current': '当前版本', 'support.latest': 'npm 最新版',
+    'support.unchecked': '尚未检查', 'support.check': '检查更新', 'support.checking': '正在检查…', 'support.unavailable': '暂时无法查询',
+    'support.checkFailed': '本次检查失败，无法确认最新版', 'support.cached': '上次查询', 'support.ahead': '本地版本较新', 'support.update': '有新版本', 'support.same': '已是最新版',
+    'support.star': '去 GitHub 点个 Star，让作者开心一天 ↗', 'support.bug': '去 GitHub 提交 Bug ↗', 'support.old': '重新加载新版宿主后可用。',
+  },
+  en: {
+    'support.debug': 'Debug trace', 'support.traceOn': 'Recording', 'support.traceOff': 'Off',
+    'support.debugHint': 'Records local steps, field names, and outcomes only. No raw content, upstream parameter values, or secrets. Turning it off stops collection and retains existing records.',
+    'support.debugSwitch': 'Record a local debug trace', 'support.view': 'View events', 'support.hide': 'Hide events',
+    'support.copy': 'Copy redacted trace', 'support.copied': 'Copied', 'support.clear': 'Clear this trace', 'support.refresh': 'Refresh',
+    'support.empty': 'No events yet. Turn on recording and repeat the operation.', 'support.file': 'Local log for this run: {path}',
+    'support.diskError': 'Could not write the local log. In-memory events can still be copied.', 'support.dropped': '{count} earlier or excess events are not shown.',
+    'support.error': 'The action did not complete. Please retry.', 'support.about': 'About · Versions & feedback', 'support.current': 'Installed version', 'support.latest': 'Latest on npm',
+    'support.unchecked': 'Not checked', 'support.check': 'Check for updates', 'support.checking': 'Checking…', 'support.unavailable': 'Unavailable',
+    'support.checkFailed': 'Check failed; the latest release is unconfirmed', 'support.cached': 'Last check', 'support.ahead': 'Local version is newer', 'support.update': 'Update available', 'support.same': 'Up to date',
+    'support.star': 'Give the author a star on GitHub ↗', 'support.bug': 'Report a bug on GitHub ↗', 'support.old': 'Reload the updated Host to use this feature.',
+  },
+}

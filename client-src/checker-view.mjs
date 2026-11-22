@@ -1,5 +1,6 @@
-import { formatTokens, checkerRoutesOf } from './pure.mjs'
+import { formatTokens, bucketTotalOf, checkerRoutesOf, checkerModelsOf, checkerScopeOf } from './pure.mjs'
 import { useSource } from './hooks.mjs'
+import { BulkEffortsControl } from './checker-bulk.mjs'
 
 const React = require('react')
 const h = React.createElement
@@ -81,12 +82,16 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
   const modeGroup = React.useId()
   const modeHint = React.useId()
 
-  React.useEffect(() => { verify.load() }, [verify])
+  const features = Array.isArray(catalog?.learned?.features) ? catalog.learned.features : []
+  const canBulk = features.includes('bulkEfforts') && !!verify.bulk
+  const scopeHint = React.useId()
+  const requiresRunId = features.includes('runId')
 
   const progress = state.snapshot?.state
   const running = progress?.running === true
   const pending = state.pending === true
-  const locked = running || pending
+  const stateUnknown = ['idle', 'loading', 'error'].includes(state.status)
+  const locked = running || pending || stateUnknown
   const stopping = running && progress.phase === 'cancelled'
   const pendingWrite = progress?.pendingWrite
   const latestWrite = progress?.latestWriteSettlement
@@ -99,11 +104,20 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
   const autoFullScan = canSetSourceMode && shownMode === 'checker'
   const fuzzyMatch = pick.fuzzyMatch ?? canSetSourceMode
   const writeBack = usesChecker && pick.writeBack
-  const routeOptions = checkerRoutesOf(catalog?.groups)
+  const groups = catalog?.groups
+  const routeOptions = React.useMemo(() => checkerRoutesOf(groups), [groups])
   const selectedRoute = running && progress?.checker ? progress.checker : pick
   const route = routeOptions.find((entry) => entry.id === selectedRoute.provider) ?? null
-  const models = (catalog?.groups ?? []).find((group) => group.id === selectedRoute.provider)?.models ?? []
-  const missingChecker = usesChecker && (route === null || !models.some((model) => model.id === selectedRoute.model))
+  const models = React.useMemo(() => checkerModelsOf((groups ?? []).find((group) => group.id === selectedRoute.provider)),
+    [groups, selectedRoute.provider])
+  const validModel = models.some((model) => model.id === selectedRoute.model)
+  const missingChecker = usesChecker && (route === null || !validModel)
+  const excludedId = usesChecker && validModel ? selectedRoute.model : undefined
+  const scope = React.useMemo(() => checkerScopeOf(groups, excludedId), [groups, excludedId])
+  const runId = typeof progress?.runId === 'string' && progress.runId !== '' ? progress.runId : undefined
+  const cancelLocked = pending || stopping || (requiresRunId && runId === undefined)
+  const showWriteWarning = running ? progress?.writeBack === true : writeBack
+  const showFullWarning = running ? progress?.fullScan === true : autoFullScan || (canFullScan && fullScan)
 
   React.useEffect(() => {
     if (running || !canFullScan || autoFullScan) setFullScan(false)
@@ -133,7 +147,7 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
   }
 
   const run = () => {
-    if (!canUse || locked || missingChecker) return
+    if (!canUse || locked || missingChecker || verify.getSnapshot().epoch !== state.epoch) return
     setMessage(null)
     setFullScan(false)
     verify.start({
@@ -151,9 +165,9 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
   }
 
   const cancel = () => {
-    if (!running || pending || stopping) return
+    if (!running || cancelLocked || verify.getSnapshot().epoch !== state.epoch) return
     setMessage(null)
-    verify.cancel().catch((error) => {
+    verify.cancel(runId).catch((error) => {
       setOpen(true)
       setMessage(String(error?.message ?? error))
     })
@@ -168,7 +182,7 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
     skippedKnown: progress?.skippedKnown ?? 0,
     searchCalls: progress?.searchCalls ?? 0,
     fetchCalls: progress?.fetchCalls ?? 0,
-    tokens: formatTokens((progress?.tokenUsage?.[0] ?? 0) + (progress?.tokenUsage?.[1] ?? 0)),
+    tokens: formatTokens(bucketTotalOf(progress?.tokenUsage)),
   }
   const finished = ['done', 'cancelled', 'error'].includes(progress?.phase)
   const allSkipped = progress?.phase === 'done' && counts.total === 0 && counts.skippedKnown > 0
@@ -188,8 +202,11 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
 
   const routing = []
   if (Number.isFinite(progress?.catalogTargets)) routing.push(t('checker.catalogTargets', { count: progress.catalogTargets }))
-  if (progress?.catalogMatches > 0 && progress.catalogMatches !== progress.publicOnly) {
+  if (runMode !== 'checker' && Number.isFinite(progress?.catalogMatches)) {
     routing.push(t('checker.catalogMatches', { count: progress.catalogMatches }))
+  }
+  if (runMode !== 'checker' && Number.isFinite(progress?.publicReliable) && progress?.phase !== 'idle') {
+    routing.push(t('checker.reliable', { count: progress.publicReliable }))
   }
   if (Number.isFinite(progress?.checkerTargets)) routing.push(t('checker.checkerTargets', { count: progress.checkerTargets }))
   if (routeLabel(progress?.checker) !== null && runMode !== 'public') {
@@ -204,6 +221,7 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
   const notices = [...new Set([message, state.error].filter((error) => error != null))]
   const errors = [...new Set([...notices, ...(Array.isArray(progress?.errors) ? progress.errors : [])])]
   const sources = Array.isArray(progress?.sources) ? progress.sources : []
+  const sourceFailures = progress?.sourceFailures ?? sources.filter((s) => ['http', 'failed', 'too-large', 'bad-json'].includes(s.status)).length
   const showWebUsage = runMode !== 'public' && progress?.useChecker !== false && (counts.searchCalls > 0 || counts.fetchCalls > 0 || counts.tokens !== '0' || (counts.total > 0 && progress?.checkerTargets !== 0))
 
   const checkbox = (key, checked, change) => h('label', { className: 'mvp_check', title: t(key + 'Title') },
@@ -228,8 +246,8 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
         h('span', { className: 'mvp_checkerSummary', 'aria-live': 'polite', 'aria-atomic': true }, summary),
         errors.length > 0 ? h('span', { className: 'mvp_badge' }, t('checker.errorBadge', { count: errors.length })) : null,
       ),
-      running ? h('button', { type: 'button', className: 'mvp_button', disabled: pending || stopping,
-        title: t('checker.cancelTitle'), onClick: cancel }, t(stopping ? 'checker.stopping' : 'checker.cancel')) : null,
+      running ? h('button', { type: 'button', className: 'mvp_button', disabled: cancelLocked,
+        title: t(requiresRunId && !runId ? 'checker.stopNoId' : 'checker.cancelTitle'), onClick: cancel }, t(stopping ? 'checker.stopping' : 'checker.cancel')) : null,
     ),
     pendingWrite?.waitEnded != null ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn mvp_checkerNotice', role: 'status' },
       t('checker.pendingWrite', { target: routeLabel(pendingWrite) })) : null,
@@ -247,21 +265,24 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
         ? 'checker.hint.' + shownMode : usesChecker ? 'checker.description' : 'checker.publicDescription')),
       h('div', { className: 'mvp_checkerForm' },
         !canSetSourceMode && canSetMode ? checkbox('checker.useChecker', usesChecker, (useChecker) => commit({ ...pick, useChecker })) : null,
-        usesChecker ? select('checker.provider', selectedRoute.provider,
+        usesChecker ? select('checker.provider', route?.id ?? '',
           routeOptions.map((entry) => [entry.id, entry.name]), (provider) => commit({ ...pick, provider, model: '' }),
           { placeholder: 'checker.chooseProvider' }) : null,
-        usesChecker ? select('checker.model', selectedRoute.model,
+        usesChecker ? select('checker.model', validModel ? selectedRoute.model : '',
           models.map((model) => [model.id, model.name ?? model.id]), (model) => commit({ ...pick, model }),
           { placeholder: 'checker.chooseModel', disabled: route === null }) : null,
-        !running ? h('button', { type: 'button', className: 'mvp_button mvp_button--accent',
-          disabled: !canUse || pending || missingChecker, title: t('checker.startTitle'), onClick: run },
-        t(usesChecker ? 'checker.start' : 'checker.startPublic')) : null,
       ),
       !locked && canUse && missingChecker ? h('p', { className: 'mvp_checkerHint mvp_checkerNotice' },
         routeOptions.length === 0 ? t(canSetMode || canSetSourceMode ? 'checker.noRoute' : 'checker.noLegacyRoute') : t('checker.chooseRoute')) : null,
+      h('div', { className: 'mvp_checkerNotice', id: scopeHint },
+        h('div', { className: 'mvp_checkerProgressText' }, t('checker.scopeNow', scope)),
+        showWriteWarning ? h('div', { className: 'mvp_checkerOptionNote' }, t('checker.writeWarning')) : null,
+        showFullWarning ? h('div', { className: 'mvp_checkerOptionNote' }, t('checker.fullWarning')) : null),
+      !running ? h('button', { type: 'button', className: 'mvp_button mvp_button--accent', 'aria-describedby': scopeHint,
+        disabled: !canUse || locked || missingChecker, title: t('checker.startTitle'), onClick: run },
+        t(usesChecker ? 'checker.start' : 'checker.startPublic')) : null,
       usesChecker || canSetMode || canSetSourceMode || canFullScan ? h('details', { className: 'mvp_checkerDetails' },
-        h('summary', null, t('checker.advanced'), (running ? progress?.writeBack === true : writeBack)
-          ? h('span', { className: 'mvp_checkerOptionNote' }, ' · ' + t('checker.writeBackEnabled')) : null),
+        h('summary', null, t('checker.advanced')),
         h('div', { className: 'mvp_checkerAdvanced' },
           usesCatalog && (canSetSourceMode || canSetMode)
             ? checkbox('checker.fuzzyMatch', running ? progress?.fuzzyMatch ?? fuzzyMatch : fuzzyMatch,
@@ -276,7 +297,7 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
             CONCURRENCY_CHOICES.map((count) => [String(count), t('checker.concurrencyValue', { count })]),
             (concurrency) => commit({ ...pick, concurrency: Number(concurrency) }), { title: t('checker.concurrencyTitle') }) : null,
         ),
-        h('div', { className: 'mvp_usageHint' }, t('checker.targetScope'), usesChecker ? ' ' + t('checker.resultsScope') : null),
+        usesChecker ? h('div', { className: 'mvp_usageHint' }, t('checker.resultsScope')) : null,
         usesChecker && (running ? progress?.writeBack === true : writeBack) && !autoFullScan && !(running ? progress?.fullScan : fullScan)
           ? h('div', { className: 'mvp_usageHint' }, t('checker.writeBackScope')) : null,
       ) : null,
@@ -293,9 +314,11 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
           t('checker.webCalls', counts), ' · ', t('checker.tokens', counts),
           searchBackends.length > 0 ? ' · ' + t('checker.searchBreakdown', { breakdown: searchBackends.join(' · ') }) : null,
         ) : null,
-      (progress?.publicOnly ?? 0) > 0 || (progress?.aliasMatches ?? 0) > 0
+      sourceFailures > 0 ? h('div', { className: 'mvp_usageHint mvp_checkerNotice mvp_checkerOptionNote' },
+        t('checker.sourceFailures', { count: sourceFailures })) : null,
+      (!Number.isFinite(progress?.publicReliable) && progress?.publicOnly > 0) || (progress?.aliasMatches ?? 0) > 0
         ? h('div', { className: 'mvp_checkerProgressText mvp_checkerNotice' }, [
-          progress?.publicOnly > 0 ? t('checker.catalogResults', { count: progress.publicOnly }) : null,
+          !Number.isFinite(progress?.publicReliable) && progress?.publicOnly > 0 ? t('checker.catalogResults', { count: progress.publicOnly }) : null,
           progress?.aliasMatches > 0 ? t('checker.aliasMatches', { count: progress.aliasMatches }) : null,
         ].filter(Boolean).join(' · ')) : null,
       latestWrite?.finishedAt != null ? h('div', { className: 'mvp_usageHint mvp_checkerNotice',
@@ -328,6 +351,7 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
             source.message ? h('span', { className: 'mvp_sourceMsg', title: String(source.message) }, shortError(source.message)) : null,
           ))),
       ) : null,
+      canBulk ? h(BulkEffortsControl, { api: verify.bulk, t, canUse }) : null,
     ) : null,
   )
 }

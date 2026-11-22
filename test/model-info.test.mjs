@@ -230,73 +230,33 @@ test('createModelInfoService shares one in-flight sweep', async () => {
   assert.equal(left, right)
 })
 
-test('invalidate during an in-flight sweep discards that sweep', async () => {
-  let release
-  const gate = new Promise((resolve) => {
-    release = resolve
-  })
+test('an invalidation cancels old work and keeps the newer in-flight slot', async () => {
+  const gates = [Promise.withResolvers(), Promise.withResolvers()]
+  const started = [Promise.withResolvers(), Promise.withResolvers()]
   let calls = 0
-  const service = createModelInfoService(
-    {
-      listProviders: () => [{ id: 'acme', name: 'Acme' }],
-      listModels: async () => [{ id: 'acme-large', name: 'Acme Large' }],
-      resolveModelInfo: async () => {
-        calls += 1
-        await gate
-        return FULL_INFO
-      },
+  const service = createModelInfoService({
+    listProviders: () => [{ id: 'acme' }], listModels: async () => [{ id: 'model' }],
+    async resolveModelInfo(_p, _m, signal) {
+      const i = calls++
+      started[i].resolve(signal)
+      await gates[i].promise // Simulate an adapter that ignores the abort.
+      return FULL_INFO
     },
-    { ttlMs: 60_000 },
-  )
-
-  const first = service.read()
-  service.invalidate()
-  release()
-  const stale = await first
-  assert.equal(stale.groups[0].models[0].contextWindow, 200000)
-
-  // The late sweep must not have repopulated the cache, so this read probes again.
-  await service.read()
-  assert.equal(calls, 2)
-})
-
-test('an invalidated sweep does not clear the newer in-flight slot', async () => {
-  let releaseFirst
-  const firstGate = new Promise((resolve) => {
-    releaseFirst = resolve
   })
-  let releaseSecond
-  const secondGate = new Promise((resolve) => {
-    releaseSecond = resolve
-  })
-  let calls = 0
-  const service = createModelInfoService(
-    {
-      listProviders: () => [{ id: 'acme', name: 'Acme' }],
-      listModels: async () => [{ id: 'acme-large', name: 'Acme Large' }],
-      resolveModelInfo: async () => {
-        calls += 1
-        await (calls === 1 ? firstGate : secondGate)
-        return FULL_INFO
-      },
-    },
-    { ttlMs: 60_000 },
-  )
-
-  const first = service.read()
+  const old = service.read()
+  const firstSignal = await started[0].promise
+  const rejected = assert.rejects(old, /aborted|cancelled/i)
   service.invalidate()
-  const second = service.read()
-  releaseFirst()
-  await first
-
-  // The old sweep's finally must not free the slot owned by the new sweep.
-  const third = service.read()
+  assert.equal(firstSignal.aborted, true)
+  const current = service.read()
+  await started[1].promise
+  await rejected
+  gates[0].resolve()
+  assert.equal(service.read(), current, 'an old finally cannot clear a newer slot')
+  gates[1].resolve()
+  assert.equal((await current).groups[0].models[0].contextWindow, 200000)
   assert.equal(calls, 2)
-  assert.equal(third, second)
-
-  releaseSecond()
-  await second
-  await third
+  await service.dispose()
 })
 
 test('specialist IDs beat generic relay/snapshot chat while keeping vision chat intact', async () => {
@@ -316,7 +276,7 @@ test('specialist IDs beat generic relay/snapshot chat while keeping vision chat 
     const context = { profile, discovered, learned, standardEffort: true }
     const row = await describeModel(llm, 'relay', model, context)
     assert.equal(row.kind, kind, id)
-    assert.equal(imageInputDecision('relay', id, context).allowed, kind === 'chat', id)
+    assert.equal(imageInputDecision('relay', id, context).allowed, false, 'only alias/inferred input for ' + id)
     if (kind === 'chat') {
       assert.equal(row.reasoningSupported, true)
       assert.equal(row.standardEffort, true)
@@ -457,7 +417,7 @@ test('request reasoning stays adapter-owned despite an unrelated manual ladder',
   const model = { id: 'scoped-levels', name: 'scoped-levels' }
   const row = mergeCapabilities(model, {
     adapter: { reasoning: FULL_INFO.reasoning },
-    learned: { reasoning: true, reasoningEfforts: [{ id: 'low', name: 'Low' }], reasoningCatalog: 'models.dev' },
+    learned: { id: model.id, publicLookupId: model.id, origins: ['public'], reasoning: true, reasoningEfforts: [{ id: 'low', name: 'Low' }], reasoningCatalog: 'models.dev' },
     override: { efforts: [{ id: 'custom', name: 'Custom' }], defaultEffort: 'custom' },
     profile: { api: 'openai-completions', compat: { supportsReasoningEffort: false } },
   })
@@ -505,8 +465,8 @@ test('ambiguous public provenance remains visible but does not enable image atta
     const model = { id: 'mystery-model' }
     const row = await describeModel({ resolveModelInfo: async () => ({ inputModalities: ['text'] }) }, 'relay', model, { profile, learned })
     assert.deepEqual(row.inputModalities, ['text', 'image'])
-    assert.equal(row.sources.modalities, 'snapshot')
-    assert.equal(row.sources.context, 'snapshot')
+    assert.equal(row.sources.modalities, 'public')
+    assert.equal(row.sources.context, 'public')
     for (const [key, value] of Object.entries(provenance)) assert.equal(row.learned[key], value)
     assert.equal(imageInputDecision('relay', model.id, { profile, learned }).allowed, false)
   }
@@ -516,7 +476,5 @@ test('ambiguous public provenance remains visible but does not enable image atta
     profile, discovered, learned: { id: 'mystery-model', type: 'image', publicAlias: true },
   }).reason, 'non-chat')
   const alias = { id: 'mystery-model', input: ['text', 'image'], publicAlias: true }
-  const localStore = { get: (id) => id === alias.id ? alias : undefined, meta: () => ({}) }
-  await describeCatalog(fakeLlm(), { learned: localStore })
-  assert.equal(imageInputDecision('relay', alias.id, { profile }).allowed, false)
+  assert.equal(imageInputDecision('relay', alias.id, { profile, learned: alias }).allowed, false)
 })
