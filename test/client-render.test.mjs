@@ -260,6 +260,12 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
     cursor = 0
     return Section({ t })
   }
+  const aboutFrame = []
+  const renderAbout = () => {
+    render(); const about = elements.find(node => node.type?.name === 'AboutPanel'); assert.ok(about)
+    slots = aboutFrame; cursor = 0; elements.length = 0
+    return about.type(about.props)
+  }
   const renderUsage = (snapshot) => {
     render(); const toolbar = elements.find(node => node.type?.name === 'UsageToolbar'); assert.ok(toolbar)
     slots = usageFrame; cursor = 0; elements.length = 0
@@ -284,7 +290,7 @@ function createHarness({ catalog = CATALOG, formValue = { hidden: ['relay/plain-
         element.props.disabled !== true,
     )
 
-  return { render, renderEditor, renderUsage, effects, elements, controls, writes, postedOverrides, exported, formState, t, remoteEvents, lifecycleEvents, fetches }
+  return { render, renderEditor, renderUsage, renderAbout, effects, elements, controls, writes, postedOverrides, exported, formState, t, remoteEvents, lifecycleEvents, fetches }
 }
 
 /** Run data effects so the section sees a loaded catalog. */
@@ -422,7 +428,8 @@ test('the applyInput switch writes its own field', async () => {
   )
   assert.ok(toggle !== undefined)
   toggle.props.onClick()
-  assert.equal(harness.writes[0].field, 'applyInput')
+  await pause()
+  assert.deepEqual(plain(harness.writes), [{ field: 'applyInput', value: false }])
 })
 
 test('a verified (snapshot) source renders a dashed tag, not a declaration', async () => {
@@ -860,6 +867,19 @@ test('a partial provider receipt names confirmed fields, local fields and unreso
   assert.match(byClass(missing.harness, 'mvp_receipt').props.children.join(' '), /providerUnconfirmed/)
 })
 
+test('the editor preserves the provider receipt when the local list cannot be read', async () => {
+  const provider = { written: true, fields: ['contextWindow'] }
+  const ui = await referenceEditor({ overrideWrite: () => Response.json({ ok: true, value: { localReadUnavailable: true, provider } }) })
+  ui.button('override.saveProvider').props.onClick(); await pause(); ui.harness.render()
+  const note = byClass(ui.harness, 'mvp_receipt')
+  assert.ok(note)
+  const message = note.props.children.filter(x => typeof x === 'string').join(' ')
+  assert.match(message, /providerWritten.*contextWindow/)
+  assert.match(message, /override\.localReadUnavailable/)
+  assert.doesNotMatch(message, /providerUnconfirmed|localOnly/)
+  assert.ok(byText(ui.harness, 'override.retryList'))
+})
+
 test('confirmed reuse is not called a new write, a skip or an entirely local ladder', async () => {
   const receipt = async (provider) => {
     const ui = await referenceEditor({ overrideWrite: () => Response.json({ ok: true, value: { overrides: [], revisions: [], provider } }) })
@@ -937,6 +957,17 @@ test('Debug is above the catalog and About follows verification as the very last
   const ui = await loaded(); const children = ui.render().props.children
   assert.ok(children.findIndex(c => c?.type?.name === 'DebugPanel') < children.findIndex(c => c?.props.className === 'mvp_groups')); assert.equal(children.at(-1).type.name, 'AboutPanel')
   assert.equal(children.at(-2).type.name, 'VerifyPanel')
+})
+
+test('About explains the maintenance release and links only to the successor', async () => {
+  const ui = await loaded()
+  ui.renderAbout().props.onToggle({ currentTarget: { open: true } })
+  ui.renderAbout()
+  const links = ui.elements.filter(node => node.type === 'a')
+  assert.deepEqual(links.map(node => node.props.href), ['https://github.com/TZYCeng/DSH-The-Model-List'])
+  assert.equal(links[0].props.rel, 'noopener noreferrer')
+  assert.ok(byText(ui, 'support.frozen'))
+  assert.ok(byText(ui, 'support.roadmap'))
 })
 
 test('model updates are observed lazily and refresh only an active settings catalog', async () => {

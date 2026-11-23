@@ -23,7 +23,7 @@ import {
 } from '../client-src/pure.mjs'
 import { DICT } from '../client-src/dict.mjs'
 import { CSS } from '../client-src/css.mjs'
-import { createCatalog, createOverrides, createUsageApi, createVerifyApi, createBulkEffortsApi } from '../client-src/catalog-store.mjs'
+import { catalogAdvertisesBulk, createCatalog, createOverrides, createUsageApi, createVerifyApi, createBulkEffortsApi } from '../client-src/catalog-store.mjs'
 import { CHECKER_EN, CHECKER_ZH } from '../client-src/checker-dict.mjs'
 import { patchDirectoryStore } from '../client-src/composer-filter.mjs'
 
@@ -327,7 +327,7 @@ test('bulk requests only hit the same-origin Host, store no ticket, and return a
     calls.push({ url, init }); const action = init.body && JSON.parse(init.body).action
     return json(action === 'preview' ? preview : action === 'enable' ? receipt : emptyBulk())
   })
-  const s = createBulkEffortsApi(); t.after(() => s.dispose()); await s.load()
+  const s = createBulkEffortsApi({ canEnableBulk: () => true }); t.after(() => s.dispose()); await s.load()
   const plan = await s.preview(); assert.equal(s.getSnapshot().snapshot.enabled, false)
   assert.equal(JSON.stringify(s.getSnapshot()).includes(plan.ticket), false)
   await assert.rejects(s.enable(''), /ticket/); await s.enable(plan.ticket); assert.deepEqual(s.getSnapshot().snapshot.rows, written); await s.disable()
@@ -348,13 +348,62 @@ test('resetting while bulk enable is in flight clears authority, preserves only 
   const deferred = Promise.withResolvers()
   const posts = []
   t.mock.method(globalThis, 'fetch', async (_url, init) => { if (init.method === 'POST') { posts.push(init); return deferred.promise }; return json(emptyBulk()) })
-  const s = createBulkEffortsApi(); t.after(() => s.dispose()); const off = s.subscribe(() => {}); await s.load()
+  const s = createBulkEffortsApi({ canEnableBulk: () => true }); t.after(() => s.dispose()); const off = s.subscribe(() => {}); await s.load()
   const submitting = assert.rejects(s.enable('ticket'), { name: 'AbortError' })
   await s.invalidate({ reset: true }); await submitting
   assert.equal(s.getSnapshot().lostReply, true); assert.equal(s.getSnapshot().snapshot.enabled, false)
   assert.equal(posts.length, 1); assert.ok(posts[0].signal.aborted)
   deferred.resolve(json({ ...emptyBulk(), enabled: true })); await tick(); assert.equal(s.getSnapshot().snapshot.enabled, false)
   s.clearLostReply(); assert.equal(s.getSnapshot().lostReply, false); off()
+})
+
+test('fresh bulk authorization requires live Host catalog advertisement; known active state still permits disable', async t => {
+  const active = { ...emptyBulk(), enabled: true, running: true }
+  let mode = 'active'
+  const posts = []
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    if (init.method === 'POST') { posts.push(JSON.parse(init.body)); return json(emptyBulk()) }
+    return mode === 'active' ? json(active) : new Response(null, { status: 503 })
+  })
+  const advertised = { source: 'host', status: 'ready', learned: { features: ['bulkEfforts'] } }
+  let catalog = advertised
+  const s = createBulkEffortsApi({ canEnableBulk: () => catalogAdvertisesBulk(catalog) }); t.after(() => s.dispose())
+  await s.load(); assert.equal(s.getSnapshot().snapshot.enabled, true)
+  mode = 'failure'; catalog = { ...advertised, status: 'error' }; await s.load()
+  assert.equal(s.getSnapshot().status, 'error'); assert.equal(s.getSnapshot().snapshot.enabled, true)
+  await s.disable(); assert.equal(s.getSnapshot().snapshot.enabled, false)
+  for (catalog of [{ ...advertised, source: 'catalog' }, { ...advertised, status: 'error' }, { ...advertised, learned: { features: [] } }]) {
+    await assert.rejects(s.preview(), /not available/)
+    await assert.rejects(s.enable('stale-ticket'), /not available/)
+    await assert.rejects(s.disable(), /No known/)
+  }
+  assert.deepEqual(posts, [{ action: 'disable' }])
+})
+
+test('a lost same-Host enable receipt can stop future fills, but connection reset clears that authority', async t => {
+  const posts = []
+  let old = false
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    if (!init.method) return old ? new Response(null, { status: 404 }) : json(emptyBulk())
+    const body = JSON.parse(init.body); posts.push(body)
+    if (body.action === 'enable') throw new Error('lost transport')
+    return json(emptyBulk())
+  })
+  let advertised = true
+  const s = createBulkEffortsApi({ canEnableBulk: () => advertised }); t.after(() => s.dispose()); await s.load()
+  await assert.rejects(s.enable('one'), /lost transport/)
+  assert.equal(s.getSnapshot().snapshot.enabled, false, 'a missing reply does not confirm enable')
+  assert.equal(s.getSnapshot().mayBeEnabled, true)
+  advertised = false; old = true; await s.load()
+  assert.equal(s.getSnapshot().mayBeEnabled, true, 'an endpoint disappearing after good status is not a successful disable')
+  await s.disable(); assert.equal(s.getSnapshot().mayBeEnabled, false)
+  advertised = true; await assert.rejects(s.enable('two'), /lost transport/)
+  await s.invalidate({ reset: true }); await s.load()
+  assert.equal(s.getSnapshot().available, false, 'a first 404 is an unsupported Host, not an action failure')
+  assert.equal(s.getSnapshot().error, null)
+  assert.equal(s.getSnapshot().mayBeEnabled, false)
+  await assert.rejects(s.disable(), /No known/)
+  assert.deepEqual(posts, [{ action: 'enable', ticket: 'one' }, { action: 'disable' }, { action: 'enable', ticket: 'two' }])
 })
 
 test('the dedicated checker dictionary covers disclosure, outcome statuses and row-level reasons in both languages', () => {

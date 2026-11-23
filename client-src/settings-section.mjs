@@ -2,7 +2,7 @@ const React = require('react')
 const h = React.createElement
 
 import { keyOf, kindOf, providerLabel, countModels, sourceOf, sourceLabel, readCollapsedGroups, persistCollapsedGroups } from './format.mjs'
-import { canWriteHidden, writeHiddenRoutes } from './visibility-identity.mjs'
+import { canWriteHidden, queueVisibilityWrite, visibilityEpoch, writeHiddenRoutes } from './visibility-identity.mjs'
 import { overrideIdentity } from './catalog-store.mjs'
 import { computeFilteredGroups, countKinds } from './pure.mjs'
 import { ModelOverrideEditor } from './override-editor.mjs'
@@ -30,8 +30,11 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const { hidden, snapshot } = useHidden(form)
     const state = useSource(catalog)
     const overrideState = useSource(overrides)
-    const [busy, setBusy] = React.useState(false)
-    const [error, setError] = React.useState(null)
+    const [operation, setOperation] = React.useState(null)
+    const [writeError, setError] = React.useState(null)
+    const writeEpoch = visibilityEpoch(form)
+    const busy = operation?.epoch === writeEpoch
+    const error = writeError?.epoch === writeEpoch ? writeError.message : null
     const [refreshing, setRefreshing] = React.useState(false)
     const [reloading, setReloading] = React.useState(false)
     const [collapsed, setCollapsed] = React.useState(readCollapsedGroups)
@@ -70,8 +73,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const canOpenEditor = state.status === 'ready' && supportsOverrides && overridesReady && !overrideState.pending && !overrideState.refreshing
     const canSetSourceMode = features.includes('verifySourceModes')
     const supportsVerify = canSetSourceMode || features.includes('verifyWeb')
-    const verifyState = verify.getSnapshot()
-    const observeVerify = !featuresKnown || features.includes('verify') || supportsVerify || verifyState.snapshot?.state?.running === true || verifyState.pending
+    const observeVerify = !featuresKnown || features.includes('verify') || supportsVerify
     const entryById = React.useMemo(() => new Map(overrideState.entries.map((entry) => [overrideIdentity(entry.provider, entry.model), entry])), [overrideState.entries])
     const catalogById = React.useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups])
     const total = countModels(groups)
@@ -108,18 +110,20 @@ function makeSection(form, catalog, overrides, usage, verify) {
     const applyInput = snapshot.value?.applyInput !== false
     const applyDisabled = busy || snapshot.writable !== true || !features.includes('applyInput') || snapshot.status !== 'ready'
     const runWrite = (work, failText) => {
-      if (writeLock.current) return
-      writeLock.current = true; setBusy(true); setError(null)
+      if (writeEpoch !== visibilityEpoch(form) || writeLock.current?.epoch === writeEpoch) return
+      const job = { epoch: writeEpoch }
+      writeLock.current = job; setOperation(job); setError(null)
+      const report = () => { if (writeEpoch === visibilityEpoch(form)) setError({ epoch: writeEpoch, message: t(failText) }) }
       const send = async () => {
-        try { if (await work() !== true) setError(t(failText)) }
-        catch { setError(t(failText)) }
-        finally { writeLock.current = false; setBusy(false) }
+        try { if (await work() !== true) report() }
+        catch { report() }
+        finally { if (writeLock.current === job) { writeLock.current = null; setOperation(null) } }
       }
       void send()
     }
     const changeVisibility = (routes, visible) => {
       if (disabled || !routes.length) return
-      runWrite(() => writeHiddenRoutes(form, routes, visible), 'page.visibilityFailed')
+      runWrite(() => writeHiddenRoutes(form, routes, visible, writeEpoch), 'page.visibilityFailed')
     }
     const startConfirm = (spec, event) => { setConfirm({ ...spec, epoch: state.epoch, trigger: event?.currentTarget ?? null }) }
     const cancelConfirm = () => { pendingFocus.current = confirm?.trigger || searchInput.current; setConfirm(null) }
@@ -171,7 +175,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
       onClose: closeEditor,
       onSaved: (result, action) => {
         closeEditor()
-        setReceipt({ route: editing.id, epoch: state.epoch, name: editing.entry.provider + ' / ' + editing.entry.model, message: providerWriteNote(result?.provider, t, action) })
+        setReceipt({ route: editing.id, epoch: state.epoch, name: editing.entry.provider + ' / ' + editing.entry.model, message: providerWriteNote(result?.provider, t, action, result) })
         void catalog.afterChange({ fresh: false })
       },
     }) : null
@@ -277,7 +281,7 @@ function makeSection(form, catalog, overrides, usage, verify) {
       ),
       applyCap ? h('div', { className: 'mvp_applyRow' },
         h('button', { type: 'button', role: 'switch', className: 'mvp_switch', 'aria-checked': applyInput, 'aria-label': t('page.applyInput'), 'aria-describedby': applyHintId,
-          disabled: applyDisabled, onClick: () => { if (!applyDisabled) runWrite(() => form.set('applyInput', !applyInput), 'page.saveFailed') } }, h('span', { className: 'mvp_thumb' })),
+          disabled: applyDisabled, onClick: () => { if (!applyDisabled) runWrite(() => queueVisibilityWrite(form, writeEpoch, () => form.set('applyInput', !applyInput)), 'page.saveFailed') } }, h('span', { className: 'mvp_thumb' })),
         h('span', { className: 'mvp_applyTitle' }, t('page.applyInput')),
         h('details', { className: 'mvp_details' }, h('summary', null, t('page.applyHelp')), h('p', { id: applyHintId }, t('page.applyInputHint'))),
       ) : null,
@@ -294,8 +298,8 @@ function makeSection(form, catalog, overrides, usage, verify) {
       h('div', { className: 'mvp_groups' }, rows),
       !matchCount && !loading && !state.error ? h('p', { className: 'mvp_note' }, t(total && activeFilters ? 'page.filterEmpty' : 'page.empty')) : null,
       confirmation,
-      observeVerify ? h(VerifyPanel, { verify, catalog: state, t, canUse: featuresKnown && state.status === 'ready' && supportsVerify, onFinished: catalog.afterChange,
-        canFullScan: supportsVerify && features.includes('verifyFullScan'), canSetMode: features.includes('verifyModes'), canSetSourceMode }) : banner(t('checker.hostStale')),
+      h(VerifyPanel, { verify, catalog: state, t, observeVerify, canUse: featuresKnown && state.status === 'ready' && supportsVerify, onFinished: catalog.afterChange,
+        canFullScan: supportsVerify && features.includes('verifyFullScan'), canSetMode: features.includes('verifyModes'), canSetSourceMode }),
       h(AboutPanel, { key: 'about:' + state.epoch, t, features }),
     )
   }

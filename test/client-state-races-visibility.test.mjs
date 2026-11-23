@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { editHiddenRoutes, hiddenIndex, routeFields, routeKey } from '../client-src/visibility-codec.mjs'
-import { writeHiddenRoutes, canWriteHidden } from '../client-src/visibility-identity.mjs'
+import { writeHiddenRoutes, canWriteHidden, queueVisibilityWrite, resetVisibilityWrites, visibilityEpoch } from '../client-src/visibility-identity.mjs'
 import { hiddenSetOf, keyOf } from '../client-src/format.mjs'
 import { patchDirectoryStore } from '../client-src/composer-filter.mjs'
 import { toModelListCsv } from '../lib/export-csv.js'
@@ -108,4 +108,48 @@ test('missing or refused CAS never falls back to a stale form.set; a failed queu
   const form = { getSnapshot:()=>ready, async mutate() { if (++calls === 1) throw Error('offline'); return false } }
   const failed = writeHiddenRoutes(form,[left],false), refused = writeHiddenRoutes(form,[other],false)
   await assert.rejects(failed,/offline/); assert.equal(await refused,false); assert.equal(calls,2)
+})
+
+test('Host reset fences both a refused CAS retry and queued clicks, even with a ready replacement form', async () => {
+  const ready = (revision, hidden) => ({ status: 'ready', writable: true, revision, value: { hidden } })
+  let frame = ready(4, ['old/only'])
+  const calls = [], dispatched = Promise.withResolvers(), oldReply = Promise.withResolvers()
+  const form = { getSnapshot: () => frame, mutate(ops, revision) {
+    calls.push({ revision, hidden: ops[0].value })
+    if (calls.length === 1) { dispatched.resolve(); return oldReply.promise }
+    frame = ready(revision + 1, ops[0].value)
+    return Promise.resolve(true)
+  } }
+  const oldEpoch = visibilityEpoch(form)
+  const first = writeHiddenRoutes(form, [left], false), queued = writeHiddenRoutes(form, [right], false)
+  await dispatched.promise
+  resetVisibilityWrites(form); frame = ready(17, ['new/only'])
+  const middleEpoch = visibilityEpoch(form)
+  assert.notEqual(middleEpoch, oldEpoch)
+  assert.equal(await writeHiddenRoutes(form, [left], false, oldEpoch), false, 'an old rendered click is refused too')
+  let preferenceWrites = 0
+  const middle = queueVisibilityWrite(form, middleEpoch, () => { preferenceWrites++; return true })
+  await Promise.resolve()
+  assert.equal(calls.length, 1); assert.equal(preferenceWrites, 0, 'never stack a second request in the official ConfigForm queue')
+  resetVisibilityWrites(form)
+  const current = writeHiddenRoutes(form, [other], false)
+  oldReply.resolve(false)
+  assert.deepEqual(await Promise.all([first, queued, middle, current]), [false, false, false, true])
+  assert.equal(preferenceWrites, 0, 'applyInput from an intermediate epoch must not dispatch on the next Host')
+  assert.deepEqual(calls.map(c => c.revision), [4, 17]); assert.deepEqual(frame.value.hidden, ['new/only', 'other/m'])
+})
+
+test('reset before the first dispatch drops the write; after dispatch a former Host acceptance is not rollback', async () => {
+  const oldHost = { revision: 7, value: { hidden: [] } }
+  const entered = Promise.withResolvers(), reply = Promise.withResolvers()
+  const form = formFor(oldHost, () => { entered.resolve(); return reply.promise })
+  const unsent = writeHiddenRoutes(form, [right], false)
+  resetVisibilityWrites(form)
+  assert.equal(await unsent, false); assert.equal(form.calls.length, 0)
+
+  const sent = writeHiddenRoutes(form, [left], false), queued = writeHiddenRoutes(form, [other], false)
+  await entered.promise
+  resetVisibilityWrites(form); reply.resolve()
+  assert.deepEqual(await Promise.all([sent, queued]), [true, false]); assert.equal(form.calls.length, 1)
+  assert.deepEqual(states(oldHost.value.hidden), [true, false, false], 'the accepted write remains on the previous Host')
 })

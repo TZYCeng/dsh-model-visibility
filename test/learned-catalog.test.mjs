@@ -33,6 +33,29 @@ test('learned facts round-trip through the shadow file with provenance', () => {
   assert.deepEqual(fact.origins, ['checker'])
 })
 
+test('exact scope cannot be inherited by or promoted from a different learned snapshot', t => {
+  const home = tempHome(), file = path.join(home, 'learned.json'), id = 'vendor/shared'
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  fs.writeFileSync(file, JSON.stringify({ version: 2, models: {
+    [id]: { id, provider: 'old', input: ['text', 'image'], origins: ['public', 'checker'], verifiedAt: 10 },
+  } }))
+  const store = createLearnedCatalog({ file })
+  assert.equal(store.getExact(id).legacyRouteScope, true, 'old provider strings have no field-level provenance')
+  store.upsertEntries({ id, provider: 'old', contextWindow: 1000, origins: ['checker'] }, { verifiedAt: 11 })
+  assert.equal(store.getExact(id).legacyRouteScope, undefined)
+  assert.equal(store.getExact(id).input, undefined, 'new explicit scope cannot authorize stale fields')
+  store.upsertEntries({ id, provider: 'other', input: ['text'], origins: ['checker'] }, { verifiedAt: 9 })
+  assert.equal(store.getExact(id).provider, 'old', 'an older mismatched update cannot alter the winning scope')
+  store.upsertEntries({ id, provider: 'other', input: ['text'], origins: ['checker'] }, { verifiedAt: 12 })
+  assert.equal(store.getExact(id).provider, 'other')
+  assert.equal(store.getExact(id).contextWindow, undefined)
+  store.upsertEntries({ id, publicLookupId: id, contextWindow: 16000, origins: ['public'] }, { verifiedAt: 13 })
+  const unscoped = createLearnedCatalog({ file }).getExact(id)
+  assert.equal(unscoped.provider, undefined)
+  assert.equal(unscoped.input, undefined)
+  assert.equal(unscoped.publicFacts.contextWindow, 16000, 'the new independently attributed public reference stays visible')
+})
+
 test('upsert merges field by field and keeps the freshest timestamp', () => {
   const store = createLearnedCatalog({ file: path.join(tempHome(), 'dsh-model-visibility', 'learned.json') })
   store.upsertEntries(

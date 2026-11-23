@@ -1,5 +1,5 @@
 import { formatTokens, bucketTotalOf, checkerRoutesOf, checkerModelsOf, checkerScopeOf } from './pure.mjs'
-import { useSource } from './hooks.mjs'
+import { catalogAdvertisesBulk } from './catalog-store.mjs'
 import { BulkEffortsControl } from './checker-bulk.mjs'
 
 const React = require('react')
@@ -72,8 +72,13 @@ function routeLabel(checker) {
   return checker?.provider && checker?.model ? `${checker.provider}/${checker.model}` : null
 }
 
-export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, canSetMode = false, canSetSourceMode = false, onFinished }) {
-  const state = useSource(verify)
+const noSubscription = () => () => {}
+const noBulk = () => null
+
+export function VerifyPanel({ verify, catalog, t, canUse, observeVerify = true, canFullScan = false, canSetMode = false, canSetSourceMode = false, onFinished }) {
+  const cachedVerify = verify.getSnapshot()
+  const keepVerify = cachedVerify.pending || cachedVerify.snapshot?.state?.running || cachedVerify.snapshot?.state?.pendingWrite
+  const state = React.useSyncExternalStore(observeVerify || keepVerify ? verify.subscribe : noSubscription, verify.getSnapshot)
   const [pick, setPick] = React.useState(readPick)
   const [open, setOpen] = React.useState(false)
   const [message, setMessage] = React.useState(null)
@@ -83,7 +88,16 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
   const modeHint = React.useId()
 
   const features = Array.isArray(catalog?.learned?.features) ? catalog.learned.features : []
-  const canBulk = features.includes('bulkEfforts') && !!verify.bulk
+  const hasFeatureList = catalog?.source === 'host' && Array.isArray(catalog.learned?.features)
+  const canEnableBulk = catalogAdvertisesBulk(catalog)
+  const readBulk = open && (canEnableBulk || catalog?.status === 'error' || (!hasFeatureList && catalog?.status === 'ready'))
+  const bulk = verify.bulk
+  // Observe an already-known operation even when catalog/verification is no
+  // longer usable, but don't probe unsupported Hosts or an unopened checker.
+  const cachedBulk = bulk?.getSnapshot()
+  const keepBulk = (next) => Boolean(next?.snapshot?.enabled || next?.snapshot?.running || next?.mayBeEnabled || next?.pending || next?.lostReply || next?.snapshot?.rows?.length)
+  const bulkState = React.useSyncExternalStore(bulk && (readBulk || keepBulk(cachedBulk)) ? bulk.subscribe : noSubscription, bulk?.getSnapshot ?? noBulk)
+  const showBulk = bulk && (keepBulk(bulkState) || (readBulk && (canEnableBulk || bulkState?.available !== false)))
   const scopeHint = React.useId()
   const requiresRunId = features.includes('runId')
 
@@ -137,8 +151,8 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
     if (latestWrite.written === true && !running) onFinished?.()
   }, [latestWrite?.finishedAt, running, onFinished])
 
-  if (!canUse && !running && !pending && !progress && !state.error) {
-    return h('div', { className: 'mvp_banner' }, t('checker.catalogNeeded'))
+  if (!observeVerify && !running && !pending && !pendingWrite && !canEnableBulk && !showBulk) {
+    return h('div', { className: 'mvp_banner' }, t('checker.hostStale'))
   }
 
   const commit = (next) => {
@@ -351,7 +365,8 @@ export function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, c
             source.message ? h('span', { className: 'mvp_sourceMsg', title: String(source.message) }, shortError(source.message)) : null,
           ))),
       ) : null,
-      canBulk ? h(BulkEffortsControl, { api: verify.bulk, t, canUse }) : null,
     ) : null,
+    // Its own shallow child position survives collapsing verification and catalog fallback.
+    showBulk ? h(BulkEffortsControl, { api: bulk, t, canUse: open && canEnableBulk }) : null,
   )
 }

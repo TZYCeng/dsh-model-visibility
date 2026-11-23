@@ -1,6 +1,6 @@
 {
   "name": "@tzyc/dsh-model-visibility",
-  "version": "1.16.0",
+  "version": "1.16.1",
   "publishConfig": {
     "access": "public"
   },
@@ -8,7 +8,7 @@
   "engines": {
     "node": ">=24"
   },
-  "description": "DSH model visibility, field-level capability evidence, guarded reasoning-level writes, usage, and opt-in local diagnostics.",
+  "description": "Final maintenance release of DSH Model visibility: chat picker, capability evidence, guarded settings writes, and usage. New development moves to github.com/TZYCeng/DSH-The-Model-List.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -55,9 +55,6 @@
     "url": "git+https://github.com/TZYCeng/dsh-model-visibility.git"
   },
   "homepage": "https://github.com/TZYCeng/dsh-model-visibility#readme",
-  "bugs": {
-    "url": "https://github.com/TZYCeng/dsh-model-visibility/issues"
-  },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",

@@ -13,6 +13,7 @@ const DICT = { en: { ...BASE.en, ...CHECKER_EN }, zh: { ...BASE.zh, ...CHECKER_Z
 import * as pure from '../client-src/pure.mjs'
 import * as format from '../client-src/format.mjs'
 import * as constants from '../client-src/constants.mjs'
+import * as catalogStore from '../client-src/catalog-store.mjs'
 
 /** Minimal ESM adapter for just the two React modules under test, entirely in memory. */
 function loadComponent(name, requireModule, window, globals = {}) {
@@ -37,6 +38,7 @@ function renderPanel(progress = {}, options = {}) {
   const { pick, storage, language = 'en', canFullScan = true, canSetMode = false, canSetSourceMode = false,
     pending = false, canUse = true, groups = [{ id: 'relay', name: 'Relay', models: [{ id: 'checker' }] }],
     startError, loadError = null, features = [], bulk } = options
+  const catalog = options.catalog ?? { groups, learned: { features }, source: 'host', status: 'ready' }
   const slots = []
   const writes = []
   const starts = []
@@ -70,7 +72,7 @@ function renderPanel(progress = {}, options = {}) {
       setItem: (key, value) => writes.push({ key, value: JSON.parse(value) }),
     },
   }
-  const modules = { react: React, pure, format }
+  const modules = { react: React, pure, format, 'catalog-store': catalogStore }
   const requireModule = (name) => {
     assert.ok(name in modules, `unexpected dependency: ${name}`)
     return modules[name]
@@ -99,14 +101,15 @@ function renderPanel(progress = {}, options = {}) {
     cursor = 0
     layouts.length = 0
     if (options.bulkPart) {
-      tree = modules['checker-bulk'][options.bulkPart]({ api: bulk, t, canUse, ...options.componentProps })
+      tree = modules['checker-bulk'][options.bulkPart]({ api: bulk, t, canUse: options.canUse ?? canUse, ...options.componentProps })
       return
     }
     tree = VerifyPanel({
       verify,
-      catalog: { groups, learned: { features } },
+      catalog,
       t,
-      canUse,
+      canUse: options.canUse ?? canUse,
+      observeVerify: options.observeVerify,
       canFullScan,
       canSetMode,
       canSetSourceMode,
@@ -569,7 +572,7 @@ const PREVIEW = { ticket: 'opaque-one-use', expiresAt: Date.now() + 3600_000, sc
   total: 1, eligible: 1, skipped: 0, rows: [{ provider: 'relay', model: 'x', status: 'pending', authorized: true, reason: 'ready' }] }
 const bulkShape = () => ({ status: 'ready', epoch: 1, pending: false, snapshot: { enabled: false, running: false, rows: [],
   counts: { pending: 0, written: 0, failed: 0, skipped: 0 }, scopeCount: 0 } })
-function bulkFixture(preview = Promise.resolve(PREVIEW)) {
+function bulkFixture(preview = Promise.resolve(PREVIEW), options = {}) {
   const state = bulkShape(), calls = []
   const api = { subscribe: () => () => {}, getSnapshot: () => state,
     preview(signal) { calls.push({ action: 'preview', signal }); return preview },
@@ -577,7 +580,7 @@ function bulkFixture(preview = Promise.resolve(PREVIEW)) {
     async disable() { calls.push({ action: 'disable' }); state.snapshot.enabled = false },
     async load() { calls.push({ action: 'status' }) },
   }
-  const p = renderPanel({}, { bulkPart: 'BulkEffortsControl', bulk: api })
+  const p = renderPanel({}, { bulkPart: 'BulkEffortsControl', bulk: api, ...options })
   return { state, calls, api, p, toggle: () => p.findAll(n => n.props.role === 'switch')[0].props.onClick(),
     dialog: () => p.findAll(n => n.type?.name === 'BulkConfirmDialog')[0]?.props }
 }
@@ -588,6 +591,40 @@ test('only the advertised/enabled panel mounts its bulk control, never an old Ho
   const old = renderPanel({}, { bulk: api }); old.open(); assert.equal(ctrls(old).length, 0)
   const now = renderPanel({}, { bulk: api, features: ['bulkEfforts'] }); assert.equal(ctrls(now).length, 0)
   now.open(); assert.equal(ctrls(now).length, 1)
+})
+
+test('bulk remains reachable across verification collapse and catalog loss; a cold fallback discovers status only after opening', () => {
+  const f = bulkFixture(), controls = (p) => p.findAll(n => n.type?.name === 'BulkEffortsControl')
+  const catalog = { groups: [], source: 'host', status: 'ready', learned: { features: ['bulkEfforts'] } }
+  const options = { catalog, bulk: f.api, canUse: true }
+  const p = renderPanel(undefined, options); assert.equal(controls(p).length, 0)
+  p.open(); assert.equal(controls(p)[0].props.canUse, true)
+  options.canUse = false; f.state.pending = true; catalog.source = 'catalog'; catalog.learned = null
+  p.render(); assert.equal(controls(p)[0].props.canUse, false, 'pending controls stay reachable when both sources degrade')
+  p.open(); assert.equal(controls(p).length, 1, 'collapsing verification does not unmount pending actions')
+  f.state.pending = false; f.state.snapshot.enabled = true; p.render(); assert.equal(controls(p).length, 1)
+  catalog.source = 'host'; catalog.learned = { features: [] }; options.observeVerify = false
+  p.render(); assert.equal(controls(p).length, 1, 'an already-known operation survives an explicit missing advertisement')
+
+  const cold = bulkFixture(); cold.state.snapshot = null; cold.state.available = null
+  const c = renderPanel(undefined, { bulk: cold.api, canUse: false, catalog: { groups: [], source: 'catalog', status: 'ready' } })
+  assert.equal(controls(c).length, 0)
+  c.open(); assert.equal(controls(c)[0].props.canUse, false, 'read-only status discovery under fallback')
+  cold.state.available = false; c.render(); assert.equal(controls(c).length, 0, 'an old Host 404 does not expose an enable action')
+})
+
+test('under catalog fallback the confirmed switch can disable; an unconfirmed one gets an explicit stop action', async () => {
+  const f = bulkFixture(Promise.resolve(PREVIEW), { canUse: false })
+  f.toggle(); assert.deepEqual(f.calls, [], 'cannot preview or write with unknown catalog capability')
+  f.state.snapshot.enabled = true; f.state.status = 'error'; f.state.error = 'status polling failed'; f.p.render()
+  const switchNode = () => f.p.findAll(n => n.props.role === 'switch')[0]
+  assert.equal(switchNode().props['aria-disabled'], false)
+  f.toggle(); await new Promise(setImmediate); assert.deepEqual(f.calls.map(c => c.action), ['disable'])
+  f.state.mayBeEnabled = true; f.p.render()
+  assert.equal(switchNode().props['aria-checked'], false, 'do not show unconfirmed authorization as verified')
+  const [stop] = f.p.findAll(n => n.type === 'button' && f.p.text(n) === f.p.t('bulk.stop'))
+  assert.ok(stop); stop.props.onClick(); await new Promise(setImmediate)
+  assert.deepEqual(f.calls.map(c => c.action), ['disable', 'disable'])
 })
 
 test('opening the switch only previews; cancellation/Escape cannot authorize a late preview', async () => {

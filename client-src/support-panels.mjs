@@ -2,7 +2,7 @@ import { API } from './constants.mjs'
 import { setClientTraceSession, tracedFetch } from './diagnostic-events.mjs'
 const React = require('react')
 const h = React.createElement
-const REPOSITORY = 'https://github.com/TZYCeng/dsh-model-visibility'
+const SUCCESSOR = 'https://github.com/TZYCeng/DSH-The-Model-List'
 const has = (features, flag) => Array.isArray(features) && features.includes(flag)
 const button = (label, click, disabled = false) => h('button', { className: 'mvp_button mvp_button--quiet', type: 'button', onClick: click, disabled }, label)
 const css = `.mvp_support{margin:6px 0;color:var(--dsw-alias-label-primary);font-size:12px}.mvp_supportLine{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.mvp_support .mvp_supportHint{font-size:11px;color:var(--dsw-alias-label-secondary)}.mvp_support summary,.mvp_support input{cursor:pointer}.mvp_support .mvp_supportList{max-height:13rem;overflow:auto;display:grid;gap:2px;padding:4px;background:var(--dsw-alias-bg-layer-1);border-radius:5px}.mvp_supportList code{overflow-wrap:anywhere;font:11px/1.4 ui-monospace,monospace}.mvp_supportAbout{margin-top:12px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:9px}.mvp_supportAbout summary{font-weight:500}.mvp_supportAbout a{color:var(--dsw-alias-label-primary);text-decoration:underline;text-underline-offset:2px}.mvp_supportResult{margin-top:6px;overflow-wrap:anywhere}`
@@ -80,7 +80,6 @@ export function AboutPanel({ t, features }) {
   React.useEffect(() => { if (open && supported) void s.call('version?check=1') }, [open, supported])
   const v = s.data
   const label = v?.comparison === 0 ? 'support.same' : v?.comparison > 0 ? 'support.ahead' : 'support.update'
-  const link = (path, label) => h('a', { href: REPOSITORY + path, target: '_blank', rel: 'noopener noreferrer' }, t(label))
   return h('details', { className: 'mvp_support mvp_supportAbout', open, onToggle: e => setOpen(e.currentTarget.open) },
     h('summary', null, t('support.about')), open ? h('div', { className: 'mvp_supportResult' },
       supported ? h('div', { className: 'mvp_supportLine', role: 'status' },
@@ -88,5 +87,7 @@ export function AboutPanel({ t, features }) {
         v?.latest && !v.error && !s.error ? h('small', null, t(label)) : null,
         v?.error || s.error ? h('small', { role: 'status' }, t('support.checkFailed') + (v?.latest && Number.isFinite(v?.checkedAt) ? ' · ' + t('support.cached') + ' ' + new Date(v.checkedAt).toLocaleString() : '')) : null,
         button(t('support.check'), () => void s.call('version?check=1'), s.busy)) : h('p', null, t('support.old')),
-      h('p', { className: 'mvp_supportLine' }, link('', 'support.star'), link('/issues/new', 'support.bug'))) : null)
+      h('p', null, t('support.frozen')),
+      h('p', null, t('support.roadmap')),
+      h('p', null, h('a', { href: SUCCESSOR, target: '_blank', rel: 'noopener noreferrer' }, t('support.successor')))) : null)
 }

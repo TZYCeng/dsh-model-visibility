@@ -472,9 +472,13 @@ test('ambiguous public provenance remains visible but does not enable image atta
   }
   const discovered = { id: 'mystery-model', kind: 'chat', weakKind: true, inputModalities: ['text', 'image'] }
   assert.equal(imageInputDecision('relay', 'mystery-model', { profile, discovered }).allowed, true)
-  assert.equal(imageInputDecision('relay', 'mystery-model', {
-    profile, discovered, learned: { id: 'mystery-model', type: 'image', publicAlias: true },
-  }).reason, 'non-chat')
+  const aliasKind = { id: 'mystery-model', type: 'image', publicAlias: true }
+  const advisory = await describeModel({ resolveModelInfo: async () => ({}) }, 'relay', { id: aliasKind.id }, {
+    profile, discovered: new Map([[discovered.id, discovered]]), learned: aliasKind,
+  })
+  assert.equal(advisory.kind, 'image', 'the alias kind stays available for display')
+  assert.equal(imageInputDecision('relay', aliasKind.id, { profile, discovered, learned: aliasKind }).allowed, true)
+  assert.equal(imageInputDecision('relay', aliasKind.id, { profile, discovered: { ...discovered, kind: 'embedding', weakKind: false }, learned: aliasKind }).allowed, false)
   const alias = { id: 'mystery-model', input: ['text', 'image'], publicAlias: true }
   assert.equal(imageInputDecision('relay', alias.id, { profile, learned: alias }).allowed, false)
 })

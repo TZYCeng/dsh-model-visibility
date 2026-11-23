@@ -243,7 +243,9 @@ export function createOverrides(options) {
     if ((state.revisions.get(overrideIdentity(payload.provider, payload.model)) ?? null) !== expectedRevision) {
       throw Object.assign(new Error('Override changed.'), { status: 409 })
     }
-    return store.mutate(payload.remove ? 'remove' : 'save', (signal) => request('/overrides', signal, { ...payload, expectedRevision }), readyState,
+    return store.mutate(payload.remove ? 'remove' : 'save', (signal) => request('/overrides', signal, { ...payload, expectedRevision }),
+      (value) => value.localReadUnavailable === true && typeof value.provider?.written === 'boolean'
+        ? { ...state, status: 'error', error: 'overrides/read-after-save' } : readyState(value),
       (error) => error.status === 404 ? unavailable : { ...state, status: 'error', error: failureText(error) })
   }
   return { ...store, save: write, remove: (provider, model, revision) => write({ remove: true, provider, model }, revision) }
@@ -288,42 +290,83 @@ export function createVerifyApi(options) {
   }
 }
 
+export function catalogAdvertisesBulk(state) {
+  return state?.status === 'ready' && state.source === 'host' &&
+    Array.isArray(state.learned?.features) && state.learned.features.includes('bulkEfforts')
+}
+
 /** The preview ticket lives only in the open confirmation, never in preferences, traces, or a cached GET. */
 export function createBulkEffortsApi(options) {
   const outcomes = ['pending', 'written', 'skipped', 'failed']
   const count = (n) => Number.isSafeInteger(n) && n >= 0
-  const validRows = (rows) => Array.isArray(rows) && rows.every(row => record(row) && outcomes.includes(row.status) &&
-    typeof row.provider === 'string' && row.provider !== '' && typeof row.model === 'string' && row.model !== '') &&
-    new Set(rows.map(row => overrideIdentity(row.provider, row.model))).size === rows.length
+  const scanRows = (rows) => {
+    if (!Array.isArray(rows)) return null
+    const keys = new Set(), counts = { pending: 0, written: 0, skipped: 0, failed: 0 }
+    for (const row of rows) {
+      if (!record(row) || !outcomes.includes(row.status) || typeof row.provider !== 'string' || !row.provider ||
+          typeof row.model !== 'string' || !row.model) return null
+      const key = overrideIdentity(row.provider, row.model)
+      if (keys.has(key)) return null
+      keys.add(key); counts[row.status]++
+    }
+    return counts
+  }
   const valueOf = (value) => {
     if (typeof value?.enabled !== 'boolean' || typeof value.running !== 'boolean') throw new Error('Malformed bulk-effort status.')
-    const { rows, counts } = value
-    if (!validRows(rows) || !record(counts) || !outcomes.every(k => count(counts[k]) && counts[k] === rows.filter(r => r.status === k).length) ||
+    const counts = scanRows(value.rows)
+    if (!counts || !record(value.counts) || !outcomes.every(k => value.counts[k] === counts[k]) ||
         (value.enabled && !count(value.scopeCount))) throw Object.assign(new Error('Incomplete bulk-effort receipt.'), { code: 'bulk/receipt' })
-    return snapshotOf(value)
+    return { ...snapshotOf(value), available: true, mayBeEnabled: false }
   }
-  const store = mirror({ name: 'bulk-efforts', initial: emptySnapshot(), timeoutMs: options?.timeoutMs, warnOnLost: (action) => action !== 'preview',
-    read: async (signal) => valueOf(await request('/bulk-efforts', signal)),
-    cadence: (state) => state.snapshot?.running ? 2_000 : state.snapshot?.enabled ? 10_000 : 60_000,
+  const store = mirror({ name: 'bulk-efforts', initial: { ...emptySnapshot(), available: null, mayBeEnabled: false },
+    timeoutMs: options?.timeoutMs, warnOnLost: (action) => action !== 'preview',
+    read: async (signal) => {
+      try { return valueOf(await request('/bulk-efforts', signal)) } catch (error) {
+        // Older Hosts lack this endpoint. A lost endpoint after a good read is
+        // not proof that this Host's authorization was revoked.
+        if (error.status === 404 && store.getSnapshot().available !== true) return { available: false }
+        throw error
+      }
+    },
+    cadence: (state) => state.available === false ? 0 : state.snapshot?.running ? 2_000 : state.snapshot?.enabled || state.mayBeEnabled ? 10_000 : 60_000,
   })
+  const requireEnable = () => {
+    const { status, snapshot, mayBeEnabled } = store.getSnapshot()
+    if (!options?.canEnableBulk?.() || status !== 'ready' || snapshot?.enabled !== false || snapshot.running || mayBeEnabled) {
+      throw new Error('Bulk-effort authorization is not available.')
+    }
+  }
   const change = (action, ticket) => store.mutate(action, (signal) => request('/bulk-efforts', signal, ticket ? { action, ticket } : { action }),
-    valueOf, (error) => ({ ...store.getSnapshot(), status: 'error', error: failureText(error) }))
+    valueOf, (error) => {
+      const state = store.getSnapshot()
+      // A refused ticket does not grant anything. Timeout, transport, or a
+      // damaged receipt cannot prove the enable never took effect.
+      const mayBeEnabled = state.mayBeEnabled || (action === 'enable' && ![400, 404, 409].includes(error.status))
+      return { ...state, status: 'error', error: failureText(error), mayBeEnabled }
+    })
   return { ...store,
     async preview(signal) {
+      requireEnable()
       const value = await store.mutate('preview', (requestSignal) => request('/bulk-efforts', requestSignal, { action: 'preview' }), null, null, signal)
       const { rows, scopeCount, total, eligible, skipped, expiresAt } = value
+      const counts = scanRows(rows)
       if (typeof value.ticket !== 'string' || !value.ticket || !Number.isFinite(expiresAt) ||
-          ![total, eligible, skipped, scopeCount].every(count) || eligible + skipped !== total || !validRows(rows) || rows.length !== total ||
+          ![total, eligible, skipped, scopeCount].every(count) || eligible + skipped !== total || !counts || rows.length !== total ||
           rows.some(row => typeof row.authorized !== 'boolean' || row.status === 'written' || (row.status === 'pending' && !row.authorized)) ||
-          rows.filter(row => row.status === 'pending').length !== eligible || rows.filter(row => row.authorized).length !== scopeCount) {
+          counts.pending !== eligible || rows.filter(row => row.authorized).length !== scopeCount) {
         throw new Error('Incomplete bulk-effort preview; nothing was authorized.')
       }
       return value
     },
-    enable(ticket) {
-      if (typeof ticket !== 'string' || !ticket) return Promise.reject(new Error('A confirmed preview ticket is required.'))
+    async enable(ticket) {
+      if (typeof ticket !== 'string' || !ticket) throw new Error('A confirmed preview ticket is required.')
+      requireEnable()
       return change('enable', ticket)
     },
-    disable: () => change('disable'),
+    async disable() {
+      const state = store.getSnapshot()
+      if (state.snapshot?.enabled !== true && !state.mayBeEnabled) throw new Error('No known bulk-effort authorization to turn off.')
+      return change('disable')
+    },
   }
 }

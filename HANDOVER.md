@@ -1,6 +1,6 @@
 # 模型显示 · 开发与发布
 
-当前基线 **v1.16.0** · Node.js 24 · ESM。用户用法见 [README](README.md)，发布给用户的改动摘要见 [Release notes](docs/RELEASE-1.16.0.md)。
+归档基线 **v1.16.1** · Node.js 24 · ESM。用户用法见 [README](README.md)，最终维护版改动见 [v1.16.1 发布说明](docs/RELEASE-1.16.1.md)。下文保留作为旧版开发与发布记录；新功能、协议适配与后续开发见 [DSH-The-Model-List](https://github.com/TZYCeng/DSH-The-Model-List)。旧包名、运行数据位置和既有安装不变。
 
 ## 1. 本地启动与验证
 

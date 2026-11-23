@@ -167,6 +167,53 @@ test('createModelInfoService exposes the same image decision', () => {
   assert.equal(service.imageInputAllowed('relay', 'deepseek/deepseek-v4.1-flash'), true)
 })
 
+test('warm images follow current exact route membership without relisting or fetching metadata', async () => {
+  const id = 'vendor/shared', route = 'relay', second = 'custom', native = 'native'
+  const adapter = piAiAdapter()
+  let membership = new Map([[route, new Set([id])]])
+  const snapshot = { profiles: new Map(), models: {
+    getModel(provider, id) { return membership.get(provider)?.has(id) ? { provider, id } : undefined },
+  } }
+  for (const provider of [route, second, native]) snapshot.profiles.set(provider, { provider })
+  adapter.current = () => snapshot
+  const base = relayProfile([id])
+  adapter.modelOf = (_snapshot, provider, id) => ({ provider, id, input: provider === native ? ['text', 'image'] : ['text'], api: base.api, baseUrl: base.baseURL })
+  const profile = provider => ({ ...base, id: provider, catalogModels: false, inputProvenance: true, adapter, adapterSnapshot: snapshot })
+  const profiles = new Map([[route, profile(route)]])
+  const adapters = new Map([[route, { adapter }]])
+  const llm = { adapters, listModels: () => assert.fail('the gate must not start a listing'),
+    resolveModelInfo: () => assert.fail('the gate must not resolve additional adapter metadata') }
+  let learned = { id, type: 'chat', input: ['text', 'image'], origins: ['checker'] }
+  const discovered = new Map()
+  const service = createModelInfoService(llm, { context: () => ({ profiles, discovered, learned }) })
+  const gate = installImageInputGate(llm, { allow: service.imageInputAllowed })
+  const input = provider => adapter.modelOf(snapshot, provider, id).input
+  try {
+    assert.equal(service.imageInputAllowed(route, id), true)
+    assert.deepEqual(input(route), ['text', 'image'])
+    // The adapter registry and local model collection can change before the
+    // plugin gets the event that updates its cached provider context.
+    membership.set(second, new Set([id]))
+    adapters.set(second, { adapter })
+    assert.equal(service.imageInputAllowed(route, id), false)
+    assert.deepEqual(input(route), ['text'])
+    profiles.set(second, profile(second))
+    assert.deepEqual(input(second), ['text'])
+    learned = { id, origins: ['public'], publicLookupId: id, input: ['text', 'image'] }
+    assert.deepEqual(input(route), ['text'], 'exact public identity is not deployment attribution')
+    assert.deepEqual(input(second), ['text'])
+    discovered.set(route, new Map([[id, { id, inputModalities: ['text', 'image'] }]]))
+    assert.deepEqual(input(route), ['text', 'image'], 'matching exact relay evidence still authorizes')
+    assert.deepEqual(input(second), ['text'])
+    discovered.clear()
+    learned = { ...learned, provider: second }
+    assert.deepEqual(input(route), ['text'], 'a scope mismatch never widens another route')
+    assert.deepEqual(input(second), ['text', 'image'], 'explicit route evidence stays usable on its own route')
+    adapters.set(native, { adapter })
+    assert.deepEqual(input(native), ['text', 'image'], 'native input bypasses the plugin widening policy')
+  } finally { gate.dispose(); await service.dispose() }
+})
+
 test('installImageInputGate adds image only to allowed pi-ai relay models', () => {
   const adapter = piAiAdapter(['text'])
   const llm = { adapters: new Map([['relay', { adapter }]]) }

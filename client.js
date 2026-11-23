@@ -269,7 +269,9 @@ window.__ModuleLoader__.load({
         if ((state.revisions.get(overrideIdentity(payload.provider, payload.model)) ?? null) !== expectedRevision) {
           throw Object.assign(new Error('Override changed.'), { status: 409 })
         }
-        return store.mutate(payload.remove ? 'remove' : 'save', (signal) => request('/overrides', signal, { ...payload, expectedRevision }), readyState,
+        return store.mutate(payload.remove ? 'remove' : 'save', (signal) => request('/overrides', signal, { ...payload, expectedRevision }),
+          (value) => value.localReadUnavailable === true && typeof value.provider?.written === 'boolean'
+            ? { ...state, status: 'error', error: 'overrides/read-after-save' } : readyState(value),
           (error) => error.status === 404 ? unavailable : { ...state, status: 'error', error: failureText(error) })
       }
       return { ...store, save: write, remove: (provider, model, revision) => write({ remove: true, provider, model }, revision) }
@@ -314,43 +316,84 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function catalogAdvertisesBulk(state) {
+      return state?.status === 'ready' && state.source === 'host' &&
+        Array.isArray(state.learned?.features) && state.learned.features.includes('bulkEfforts')
+    }
+
     /** The preview ticket lives only in the open confirmation, never in preferences, traces, or a cached GET. */
     function createBulkEffortsApi(options) {
       const outcomes = ['pending', 'written', 'skipped', 'failed']
       const count = (n) => Number.isSafeInteger(n) && n >= 0
-      const validRows = (rows) => Array.isArray(rows) && rows.every(row => record(row) && outcomes.includes(row.status) &&
-        typeof row.provider === 'string' && row.provider !== '' && typeof row.model === 'string' && row.model !== '') &&
-        new Set(rows.map(row => overrideIdentity(row.provider, row.model))).size === rows.length
+      const scanRows = (rows) => {
+        if (!Array.isArray(rows)) return null
+        const keys = new Set(), counts = { pending: 0, written: 0, skipped: 0, failed: 0 }
+        for (const row of rows) {
+          if (!record(row) || !outcomes.includes(row.status) || typeof row.provider !== 'string' || !row.provider ||
+              typeof row.model !== 'string' || !row.model) return null
+          const key = overrideIdentity(row.provider, row.model)
+          if (keys.has(key)) return null
+          keys.add(key); counts[row.status]++
+        }
+        return counts
+      }
       const valueOf = (value) => {
         if (typeof value?.enabled !== 'boolean' || typeof value.running !== 'boolean') throw new Error('Malformed bulk-effort status.')
-        const { rows, counts } = value
-        if (!validRows(rows) || !record(counts) || !outcomes.every(k => count(counts[k]) && counts[k] === rows.filter(r => r.status === k).length) ||
+        const counts = scanRows(value.rows)
+        if (!counts || !record(value.counts) || !outcomes.every(k => value.counts[k] === counts[k]) ||
             (value.enabled && !count(value.scopeCount))) throw Object.assign(new Error('Incomplete bulk-effort receipt.'), { code: 'bulk/receipt' })
-        return snapshotOf(value)
+        return { ...snapshotOf(value), available: true, mayBeEnabled: false }
       }
-      const store = mirror({ name: 'bulk-efforts', initial: emptySnapshot(), timeoutMs: options?.timeoutMs, warnOnLost: (action) => action !== 'preview',
-        read: async (signal) => valueOf(await request('/bulk-efforts', signal)),
-        cadence: (state) => state.snapshot?.running ? 2_000 : state.snapshot?.enabled ? 10_000 : 60_000,
+      const store = mirror({ name: 'bulk-efforts', initial: { ...emptySnapshot(), available: null, mayBeEnabled: false },
+        timeoutMs: options?.timeoutMs, warnOnLost: (action) => action !== 'preview',
+        read: async (signal) => {
+          try { return valueOf(await request('/bulk-efforts', signal)) } catch (error) {
+            // Older Hosts lack this endpoint. A lost endpoint after a good read is
+            // not proof that this Host's authorization was revoked.
+            if (error.status === 404 && store.getSnapshot().available !== true) return { available: false }
+            throw error
+          }
+        },
+        cadence: (state) => state.available === false ? 0 : state.snapshot?.running ? 2_000 : state.snapshot?.enabled || state.mayBeEnabled ? 10_000 : 60_000,
       })
+      const requireEnable = () => {
+        const { status, snapshot, mayBeEnabled } = store.getSnapshot()
+        if (!options?.canEnableBulk?.() || status !== 'ready' || snapshot?.enabled !== false || snapshot.running || mayBeEnabled) {
+          throw new Error('Bulk-effort authorization is not available.')
+        }
+      }
       const change = (action, ticket) => store.mutate(action, (signal) => request('/bulk-efforts', signal, ticket ? { action, ticket } : { action }),
-        valueOf, (error) => ({ ...store.getSnapshot(), status: 'error', error: failureText(error) }))
+        valueOf, (error) => {
+          const state = store.getSnapshot()
+          // A refused ticket does not grant anything. Timeout, transport, or a
+          // damaged receipt cannot prove the enable never took effect.
+          const mayBeEnabled = state.mayBeEnabled || (action === 'enable' && ![400, 404, 409].includes(error.status))
+          return { ...state, status: 'error', error: failureText(error), mayBeEnabled }
+        })
       return { ...store,
         async preview(signal) {
+          requireEnable()
           const value = await store.mutate('preview', (requestSignal) => request('/bulk-efforts', requestSignal, { action: 'preview' }), null, null, signal)
           const { rows, scopeCount, total, eligible, skipped, expiresAt } = value
+          const counts = scanRows(rows)
           if (typeof value.ticket !== 'string' || !value.ticket || !Number.isFinite(expiresAt) ||
-              ![total, eligible, skipped, scopeCount].every(count) || eligible + skipped !== total || !validRows(rows) || rows.length !== total ||
+              ![total, eligible, skipped, scopeCount].every(count) || eligible + skipped !== total || !counts || rows.length !== total ||
               rows.some(row => typeof row.authorized !== 'boolean' || row.status === 'written' || (row.status === 'pending' && !row.authorized)) ||
-              rows.filter(row => row.status === 'pending').length !== eligible || rows.filter(row => row.authorized).length !== scopeCount) {
+              counts.pending !== eligible || rows.filter(row => row.authorized).length !== scopeCount) {
             throw new Error('Incomplete bulk-effort preview; nothing was authorized.')
           }
           return value
         },
-        enable(ticket) {
-          if (typeof ticket !== 'string' || !ticket) return Promise.reject(new Error('A confirmed preview ticket is required.'))
+        async enable(ticket) {
+          if (typeof ticket !== 'string' || !ticket) throw new Error('A confirmed preview ticket is required.')
+          requireEnable()
           return change('enable', ticket)
         },
-        disable: () => change('disable'),
+        async disable() {
+          const state = store.getSnapshot()
+          if (state.snapshot?.enabled !== true && !state.mayBeEnabled) throw new Error('No known bulk-effort authorization to turn off.')
+          return change('disable')
+        },
       }
     }
 
@@ -360,6 +403,7 @@ window.__ModuleLoader__.load({
     exports.createOverrides = createOverrides
     exports.createUsageApi = createUsageApi
     exports.createVerifyApi = createVerifyApi
+    exports.catalogAdvertisesBulk = catalogAdvertisesBulk
     exports.createBulkEffortsApi = createBulkEffortsApi
   })
 
@@ -473,6 +517,7 @@ window.__ModuleLoader__.load({
       const opener = React.useRef(null), previewing = React.useRef(null), action = React.useRef(null)
       const hint = React.useId()
       const value = state.snapshot, enabled = value?.enabled === true
+      const mayBeEnabled = state.mayBeEnabled === true && !enabled
       const close = () => {
         previewing.current?.abort(); previewing.current = null
         setReview(null); setExpired(false)
@@ -485,10 +530,12 @@ window.__ModuleLoader__.load({
         const timer = setTimeout(() => setExpired(true), Math.min(remaining, 2_147_483_647))
         return () => clearTimeout(timer)
       }, [review, state.epoch])
-      React.useEffect(() => { if (review && (review.epoch !== state.epoch || enabled || !canUse)) close() }, [review, state.epoch, enabled, canUse])
+      React.useEffect(() => { if (review && (review.epoch !== state.epoch || enabled || mayBeEnabled || !canUse)) close() }, [review, state.epoch, enabled, mayBeEnabled, canUse])
 
       const open = async () => {
-        if (previewing.current || action.current || review || !canUse || state.pending || state.status !== 'ready' || !value || enabled) return
+        const current = api.getSnapshot()
+        if (previewing.current || action.current || review || !canUse || current.epoch !== state.epoch ||
+            current.pending || current.status !== 'ready' || current.snapshot?.enabled !== false || current.mayBeEnabled) return
         const ctl = new AbortController(), epoch = state.epoch
         previewing.current = ctl
         setError(null); setExpired(false); setReview({ epoch, controller: ctl })
@@ -500,13 +547,13 @@ window.__ModuleLoader__.load({
         }
       }
       const send = async (kind, ticket) => {
-        if (action.current) return
-        const marker = {}; action.current = marker
-        const epoch = api.getSnapshot().epoch
-        setError(null); setSubmitting(kind)
+        const current = api.getSnapshot(), epoch = state.epoch
+        if (current.epoch !== epoch || action.current?.epoch === epoch || current.pending) return
+        const marker = { epoch }; action.current = marker
+        setError(null); setSubmitting(marker)
         try { if (kind === 'enable') await api.enable(ticket); else await api.disable() } catch (e) {
           if (action.current === marker && api.getSnapshot().epoch === epoch) {
-            setError(t('bulk.actionError', { message: failText(e) }))
+            setError({ epoch, message: t('bulk.actionError', { message: failText(e) }) })
             // A timed-out POST may still have been dispatched. Read status, never retry the write or silently obtain another ticket.
             void api.load()
           }
@@ -519,31 +566,36 @@ window.__ModuleLoader__.load({
         // A detached confirmation must never authorize a ticket from an earlier dialog on this same Host.
         if (!data || previewing.current !== review.controller) return
         if (expired || data.expiresAt <= Date.now() || data.scopeCount < 1 || !previewing.current || previewing.current.signal.aborted ||
-            action.current || !canUse || current.epoch !== review.epoch || current.pending || current.status !== 'ready' || current.snapshot?.enabled !== false) {
+            action.current?.epoch === current.epoch || !canUse || current.epoch !== review.epoch || current.pending ||
+            current.status !== 'ready' || current.snapshot?.enabled !== false || current.mayBeEnabled) {
           setExpired(true); return
         }
         close(); void send('enable', data.ticket)
       }
       // Disabling only stops future dispatches. Keep it reachable even if refreshing the catalog or a receipt failed.
-      const locked = !!submitting || !!action.current || state.pending || !value || (!enabled && (!canUse || value.running || state.status !== 'ready'))
+      const pending = submitting?.epoch === state.epoch || action.current?.epoch === state.epoch || state.pending
+      const locked = pending || !value || (!enabled && (!canUse || mayBeEnabled || value.running || state.status !== 'ready'))
+      const ownError = error?.epoch === state.epoch ? error.message : null
       const counts = value?.counts
       const unverified = value?.rows?.filter(unverifiedWrite).length ?? 0
       return h('section', { className: 'mvp_bulkSection', 'aria-label': t('bulk.title') },
         h('div', { className: 'mvp_applyRow' },
           h('button', { type: 'button', role: 'switch', ref: opener, className: 'mvp_switch', 'aria-checked': enabled,
             'aria-label': t('bulk.title'), 'aria-describedby': hint, 'aria-disabled': locked, onClick: () => {
-              if (locked || review || action.current) return
-              if (enabled) void send('disable'); else void open()
+              if (locked) return
+              if (enabled) { close(); void send('disable') } else void open()
             } }, h('span', { className: 'mvp_thumb' })),
           h('div', { className: 'mvp_applyText' }, h('span', { className: 'mvp_applyTitle' }, t('bulk.title')),
-            h('span', { className: 'mvp_applyHint', id: hint, role: 'status' }, t(submitting ? 'bulk.submitting' : state.error ? 'bulk.unconfirmed' :
+            h('span', { className: 'mvp_applyHint', id: hint, role: 'status' }, t(pending ? 'bulk.submitting' : state.error || mayBeEnabled ? 'bulk.unconfirmed' :
               !value ? 'bulk.unknown' : enabled ? 'bulk.onHint' : 'bulk.offHint')))),
+        mayBeEnabled ? h('button', { type: 'button', className: 'mvp_button', disabled: pending, onClick: () => { close(); void send('disable') } },
+          t('bulk.stop')) : null,
         state.lostReply ? h('div', { className: 'mvp_banner mvp_banner--warn', role: 'alert' }, t('bulk.previousHost'), ' ',
           h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', onClick: api.clearLostReply }, t('bulk.dismiss'))) : null,
         enabled ? h('details', { className: 'mvp_checkerDetails' }, h('summary', null, t('bulk.scopeDetails')),
           h('p', null, t('bulk.scopeCount', { count: value.scopeCount })), termsView(t)) : null,
-        error || state.error ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn', role: 'alert' },
-          error ?? t('bulk.readError', { message: state.error }), ' ',
+        ownError || state.error ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn', role: 'alert' },
+          ownError ?? t('bulk.readError', { message: state.error }), ' ',
           h('button', { className: 'mvp_button mvp_button--quiet', type: 'button', disabled: state.pending || state.refreshing,
             onClick: () => { setError(null); void api.load() } }, t('bulk.retry'))) : null,
         value?.running ? h('div', { className: 'mvp_usageHint', role: 'status' }, t('bulk.running')) : null,
@@ -552,8 +604,8 @@ window.__ModuleLoader__.load({
             { ...counts, failed: counts.failed - unverified, unverified }) : t('bulk.receipt', counts)),
           unverified ? h('div', { className: 'mvp_checkerOptionNote', role: 'status' }, t('bulk.verifyManually')) : null,
           h(BulkRows, { rows: value.rows, t })) : null,
-        review && review.epoch === state.epoch && !enabled && canUse ? h(BulkConfirmDialog, { review, t, close, agree, expired, trigger: opener,
-          onUnavailable: () => { close(); setError(t('bulk.dialogUnavailable')) } }) : null,
+        review && review.epoch === state.epoch && !enabled && !mayBeEnabled && canUse ? h(BulkConfirmDialog, { review, t, close, agree, expired, trigger: opener,
+          onUnavailable: () => { close(); setError({ epoch: state.epoch, message: t('bulk.dialogUnavailable') }) } }) : null,
       )
     }
 
@@ -579,7 +631,7 @@ window.__ModuleLoader__.load({
       'bulk.unknown': '正在读取总开关状态…', 'bulk.unconfirmed': '当前状态未知，请重新读取。',
       'bulk.submitting': '正在提交，请等待宿主回执…', 'bulk.scopeDetails': '查看本次授权说明',
       'bulk.previousHost': '与原宿主的连接在提交后重置，结果未知。请回原宿主核对回执，不要重复提交。',
-      'bulk.dismiss': '知道了', 'bulk.receiptDamaged': '回执不完整，不能确认逐项结果。',
+      'bulk.dismiss': '知道了', 'bulk.stop': '停止后续补填', 'bulk.receiptDamaged': '回执不完整，不能确认逐项结果。',
       'bulk.retry': '重新读取状态',
       'bulk.readError': '无法确认总开关状态：{message}',
       'bulk.actionError': '未能确认操作结果：{message}。请先核对状态和回执，不要重复提交。',
@@ -646,7 +698,7 @@ window.__ModuleLoader__.load({
       'bulk.unknown': 'Reading the switch state…', 'bulk.unconfirmed': 'The current state is unknown. Read it again.',
       'bulk.submitting': 'Submitting; waiting for the Host receipt…', 'bulk.scopeDetails': 'Review this authorization',
       'bulk.previousHost': 'The connection to the previous Host reset after dispatch. Its outcome is unknown. Check the receipt on that Host; do not submit again.',
-      'bulk.dismiss': 'Dismiss', 'bulk.receiptDamaged': 'The receipt is incomplete. Individual outcomes could not be confirmed.',
+      'bulk.dismiss': 'Dismiss', 'bulk.stop': 'Stop future fills', 'bulk.receiptDamaged': 'The receipt is incomplete. Individual outcomes could not be confirmed.',
       'bulk.retry': 'Read status again',
       'bulk.readError': 'Could not confirm the switch state: {message}',
       'bulk.actionError': 'The result was not confirmed: {message}. Check the state and receipt before submitting again.',
@@ -737,7 +789,7 @@ window.__ModuleLoader__.load({
   // -------------------------------------------------------- checker-view
   define("checker-view", function (require, module, exports) {
     const { formatTokens, bucketTotalOf, checkerRoutesOf, checkerModelsOf, checkerScopeOf } = require("pure")
-    const { useSource } = require("hooks")
+    const { catalogAdvertisesBulk } = require("catalog-store")
     const { BulkEffortsControl } = require("checker-bulk")
 
     const React = require('react')
@@ -810,8 +862,13 @@ window.__ModuleLoader__.load({
       return checker?.provider && checker?.model ? `${checker.provider}/${checker.model}` : null
     }
 
-    function VerifyPanel({ verify, catalog, t, canUse, canFullScan = false, canSetMode = false, canSetSourceMode = false, onFinished }) {
-      const state = useSource(verify)
+    const noSubscription = () => () => {}
+    const noBulk = () => null
+
+    function VerifyPanel({ verify, catalog, t, canUse, observeVerify = true, canFullScan = false, canSetMode = false, canSetSourceMode = false, onFinished }) {
+      const cachedVerify = verify.getSnapshot()
+      const keepVerify = cachedVerify.pending || cachedVerify.snapshot?.state?.running || cachedVerify.snapshot?.state?.pendingWrite
+      const state = React.useSyncExternalStore(observeVerify || keepVerify ? verify.subscribe : noSubscription, verify.getSnapshot)
       const [pick, setPick] = React.useState(readPick)
       const [open, setOpen] = React.useState(false)
       const [message, setMessage] = React.useState(null)
@@ -821,7 +878,16 @@ window.__ModuleLoader__.load({
       const modeHint = React.useId()
 
       const features = Array.isArray(catalog?.learned?.features) ? catalog.learned.features : []
-      const canBulk = features.includes('bulkEfforts') && !!verify.bulk
+      const hasFeatureList = catalog?.source === 'host' && Array.isArray(catalog.learned?.features)
+      const canEnableBulk = catalogAdvertisesBulk(catalog)
+      const readBulk = open && (canEnableBulk || catalog?.status === 'error' || (!hasFeatureList && catalog?.status === 'ready'))
+      const bulk = verify.bulk
+      // Observe an already-known operation even when catalog/verification is no
+      // longer usable, but don't probe unsupported Hosts or an unopened checker.
+      const cachedBulk = bulk?.getSnapshot()
+      const keepBulk = (next) => Boolean(next?.snapshot?.enabled || next?.snapshot?.running || next?.mayBeEnabled || next?.pending || next?.lostReply || next?.snapshot?.rows?.length)
+      const bulkState = React.useSyncExternalStore(bulk && (readBulk || keepBulk(cachedBulk)) ? bulk.subscribe : noSubscription, bulk?.getSnapshot ?? noBulk)
+      const showBulk = bulk && (keepBulk(bulkState) || (readBulk && (canEnableBulk || bulkState?.available !== false)))
       const scopeHint = React.useId()
       const requiresRunId = features.includes('runId')
 
@@ -875,8 +941,8 @@ window.__ModuleLoader__.load({
         if (latestWrite.written === true && !running) onFinished?.()
       }, [latestWrite?.finishedAt, running, onFinished])
 
-      if (!canUse && !running && !pending && !progress && !state.error) {
-        return h('div', { className: 'mvp_banner' }, t('checker.catalogNeeded'))
+      if (!observeVerify && !running && !pending && !pendingWrite && !canEnableBulk && !showBulk) {
+        return h('div', { className: 'mvp_banner' }, t('checker.hostStale'))
       }
 
       const commit = (next) => {
@@ -1089,8 +1155,9 @@ window.__ModuleLoader__.load({
                 source.message ? h('span', { className: 'mvp_sourceMsg', title: String(source.message) }, shortError(source.message)) : null,
               ))),
           ) : null,
-          canBulk ? h(BulkEffortsControl, { api: verify.bulk, t, canUse }) : null,
         ) : null,
+        // Its own shallow child position survives collapsing verification and catalog fallback.
+        showBulk ? h(BulkEffortsControl, { api: bulk, t, canUse: open && canEnableBulk }) : null,
       )
     }
 
@@ -1670,6 +1737,9 @@ window.__ModuleLoader__.load({
         'override.resetDone': '已清除本地覆盖；提供商设置未改动。',
         'override.providerUnconfirmed': '宿主未能确认提供商写入结果。请查看提供商设置，勿重复提交。',
         'override.localRetained': '保留本地副本：{fields}',
+        'override.localReadUnavailable': '宿主暂时无法读取当前本地覆盖。请先刷新核对，不要重复提交。',
+        'override.localCleanupChanged': '本地覆盖已被另一次编辑修改，未清除其内容。',
+        'override.localCleanupUnavailable': '本地副本未能清理，请核对当前覆盖。',
         'override.partialEfforts': '部分档位已写入提供商；完整档位草稿仍保存在本地。',
         'override.reason.already-mapped': '已沿用提供商已有映射，无需重复写入。',
         'override.reusedEfforts': '沿用已有映射的档位：{levels}',
@@ -2099,6 +2169,9 @@ window.__ModuleLoader__.load({
         'override.resetDone': 'Local overrides cleared. Provider settings were not changed.',
         'override.providerUnconfirmed': 'The Host could not confirm the provider write. Check the provider settings before submitting again.',
         'override.localRetained': 'Local copy retained: {fields}',
+        'override.localReadUnavailable': 'The Host could not reload local overrides. Refresh and check before submitting again.',
+        'override.localCleanupChanged': 'Another edit changed the local override; that edit was not removed.',
+        'override.localCleanupUnavailable': 'The local copy could not be cleaned up. Check the current override.',
         'override.partialEfforts': 'Some levels were written to the provider; the complete ladder draft is retained locally.',
         'override.reason.already-mapped': 'Existing provider mappings were reused. No new write was needed.',
         'override.reusedEfforts': 'Levels using existing mappings: {levels}',
@@ -2498,9 +2571,13 @@ window.__ModuleLoader__.load({
     const { effortLabel } = require("format")
 
     /** A 200 response to the local save is not evidence of a provider write. */
-    function providerWriteNote(result, t, action = {}) {
-      if (action.mode === 'reset') return t('override.resetDone')
-      if (action.mode === 'local') return t('override.localDone')
+    function providerWriteNote(result, t, action = {}, receipt = {}) {
+      const localWarning = receipt.localReadUnavailable === true ? t('override.localReadUnavailable')
+        : receipt.localCleanup === 'changed' ? t('override.localCleanupChanged')
+        : receipt.localCleanup === 'unavailable' ? t('override.localCleanupUnavailable') : ''
+      const join = (...messages) => [...messages, localWarning].filter(Boolean).join(' · ')
+      if (action.mode === 'reset') return join(t('override.resetDone'))
+      if (action.mode === 'local') return join(t('override.localDone'))
       const strings = (value) => Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string' && v !== ''))] : []
       const labels = (fields) => fields.map((field) => {
         const key = 'override.field.' + field
@@ -2531,7 +2608,7 @@ window.__ModuleLoader__.load({
         for (const field of partial) localFields.delete(field)
       } else if (alreadyMapped) {
         messages.push(t('override.reason.already-mapped'))
-      } else if (!result || result.written !== false || !reason || ['settings-unverified', 'write-pending'].includes(reason)) {
+      } else if (!result || result.written !== false || !reason || ['settings-unverified', 'settings-failed', 'write-pending'].includes(reason)) {
         // The server may have accepted the mutation: do not tell the user to retry it.
         messages.push(t('override.providerUnconfirmed'))
         if (reason === 'write-pending') messages.push(t('override.reason.write-pending'))
@@ -2540,9 +2617,9 @@ window.__ModuleLoader__.load({
         const label = t(key)
         messages.push(t('override.providerSkipped', { reason: label === key ? reason : label }))
       }
-      if (localFields.size > 0) {
+      if (localFields.size > 0 && !localWarning) {
         // With an unverified write the local copy is retained, but we cannot claim the fields exist *only* locally.
-        messages.push(t(!writtenFields.length && (!reason || reason === 'settings-unverified' || result?.written !== false)
+        messages.push(t(!writtenFields.length && (!reason || ['settings-unverified', 'settings-failed', 'write-pending'].includes(reason) || result?.written !== false)
           ? 'override.localRetained' : 'override.localOnly', { fields: labels([...localFields]) }))
       }
       if (reused.length) messages.push(t('override.reusedEfforts', { levels: reused.map((id) => effortLabel(id, t)).join(' / ') }))
@@ -2560,7 +2637,7 @@ window.__ModuleLoader__.load({
       if (typeof conflict === 'string' && (writtenFields.length || reason !== result.reasoningConflict)) messages.push(t(conflict))
       const kept = strings(result?.protectedEfforts)
       if (kept.length) messages.push(t('override.referencePreservedEfforts', { levels: kept.map((id) => effortLabel(id, t)).join(' / ') }))
-      return messages.join(' · ')
+      return join(...messages)
     }
 
     exports.providerWriteNote = providerWriteNote
@@ -3324,7 +3401,7 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const { keyOf, kindOf, providerLabel, countModels, sourceOf, sourceLabel, readCollapsedGroups, persistCollapsedGroups } = require("format")
-    const { canWriteHidden, writeHiddenRoutes } = require("visibility-identity")
+    const { canWriteHidden, queueVisibilityWrite, visibilityEpoch, writeHiddenRoutes } = require("visibility-identity")
     const { overrideIdentity } = require("catalog-store")
     const { computeFilteredGroups, countKinds } = require("pure")
     const { ModelOverrideEditor } = require("override-editor")
@@ -3352,8 +3429,11 @@ window.__ModuleLoader__.load({
         const { hidden, snapshot } = useHidden(form)
         const state = useSource(catalog)
         const overrideState = useSource(overrides)
-        const [busy, setBusy] = React.useState(false)
-        const [error, setError] = React.useState(null)
+        const [operation, setOperation] = React.useState(null)
+        const [writeError, setError] = React.useState(null)
+        const writeEpoch = visibilityEpoch(form)
+        const busy = operation?.epoch === writeEpoch
+        const error = writeError?.epoch === writeEpoch ? writeError.message : null
         const [refreshing, setRefreshing] = React.useState(false)
         const [reloading, setReloading] = React.useState(false)
         const [collapsed, setCollapsed] = React.useState(readCollapsedGroups)
@@ -3392,8 +3472,7 @@ window.__ModuleLoader__.load({
         const canOpenEditor = state.status === 'ready' && supportsOverrides && overridesReady && !overrideState.pending && !overrideState.refreshing
         const canSetSourceMode = features.includes('verifySourceModes')
         const supportsVerify = canSetSourceMode || features.includes('verifyWeb')
-        const verifyState = verify.getSnapshot()
-        const observeVerify = !featuresKnown || features.includes('verify') || supportsVerify || verifyState.snapshot?.state?.running === true || verifyState.pending
+        const observeVerify = !featuresKnown || features.includes('verify') || supportsVerify
         const entryById = React.useMemo(() => new Map(overrideState.entries.map((entry) => [overrideIdentity(entry.provider, entry.model), entry])), [overrideState.entries])
         const catalogById = React.useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups])
         const total = countModels(groups)
@@ -3430,18 +3509,20 @@ window.__ModuleLoader__.load({
         const applyInput = snapshot.value?.applyInput !== false
         const applyDisabled = busy || snapshot.writable !== true || !features.includes('applyInput') || snapshot.status !== 'ready'
         const runWrite = (work, failText) => {
-          if (writeLock.current) return
-          writeLock.current = true; setBusy(true); setError(null)
+          if (writeEpoch !== visibilityEpoch(form) || writeLock.current?.epoch === writeEpoch) return
+          const job = { epoch: writeEpoch }
+          writeLock.current = job; setOperation(job); setError(null)
+          const report = () => { if (writeEpoch === visibilityEpoch(form)) setError({ epoch: writeEpoch, message: t(failText) }) }
           const send = async () => {
-            try { if (await work() !== true) setError(t(failText)) }
-            catch { setError(t(failText)) }
-            finally { writeLock.current = false; setBusy(false) }
+            try { if (await work() !== true) report() }
+            catch { report() }
+            finally { if (writeLock.current === job) { writeLock.current = null; setOperation(null) } }
           }
           void send()
         }
         const changeVisibility = (routes, visible) => {
           if (disabled || !routes.length) return
-          runWrite(() => writeHiddenRoutes(form, routes, visible), 'page.visibilityFailed')
+          runWrite(() => writeHiddenRoutes(form, routes, visible, writeEpoch), 'page.visibilityFailed')
         }
         const startConfirm = (spec, event) => { setConfirm({ ...spec, epoch: state.epoch, trigger: event?.currentTarget ?? null }) }
         const cancelConfirm = () => { pendingFocus.current = confirm?.trigger || searchInput.current; setConfirm(null) }
@@ -3493,7 +3574,7 @@ window.__ModuleLoader__.load({
           onClose: closeEditor,
           onSaved: (result, action) => {
             closeEditor()
-            setReceipt({ route: editing.id, epoch: state.epoch, name: editing.entry.provider + ' / ' + editing.entry.model, message: providerWriteNote(result?.provider, t, action) })
+            setReceipt({ route: editing.id, epoch: state.epoch, name: editing.entry.provider + ' / ' + editing.entry.model, message: providerWriteNote(result?.provider, t, action, result) })
             void catalog.afterChange({ fresh: false })
           },
         }) : null
@@ -3599,7 +3680,7 @@ window.__ModuleLoader__.load({
           ),
           applyCap ? h('div', { className: 'mvp_applyRow' },
             h('button', { type: 'button', role: 'switch', className: 'mvp_switch', 'aria-checked': applyInput, 'aria-label': t('page.applyInput'), 'aria-describedby': applyHintId,
-              disabled: applyDisabled, onClick: () => { if (!applyDisabled) runWrite(() => form.set('applyInput', !applyInput), 'page.saveFailed') } }, h('span', { className: 'mvp_thumb' })),
+              disabled: applyDisabled, onClick: () => { if (!applyDisabled) runWrite(() => queueVisibilityWrite(form, writeEpoch, () => form.set('applyInput', !applyInput)), 'page.saveFailed') } }, h('span', { className: 'mvp_thumb' })),
             h('span', { className: 'mvp_applyTitle' }, t('page.applyInput')),
             h('details', { className: 'mvp_details' }, h('summary', null, t('page.applyHelp')), h('p', { id: applyHintId }, t('page.applyInputHint'))),
           ) : null,
@@ -3616,8 +3697,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mvp_groups' }, rows),
           !matchCount && !loading && !state.error ? h('p', { className: 'mvp_note' }, t(total && activeFilters ? 'page.filterEmpty' : 'page.empty')) : null,
           confirmation,
-          observeVerify ? h(VerifyPanel, { verify, catalog: state, t, canUse: featuresKnown && state.status === 'ready' && supportsVerify, onFinished: catalog.afterChange,
-            canFullScan: supportsVerify && features.includes('verifyFullScan'), canSetMode: features.includes('verifyModes'), canSetSourceMode }) : banner(t('checker.hostStale')),
+          h(VerifyPanel, { verify, catalog: state, t, observeVerify, canUse: featuresKnown && state.status === 'ready' && supportsVerify, onFinished: catalog.afterChange,
+            canFullScan: supportsVerify && features.includes('verifyFullScan'), canSetMode: features.includes('verifyModes'), canSetSourceMode }),
           h(AboutPanel, { key: 'about:' + state.epoch, t, features }),
         )
       }
@@ -3637,10 +3718,12 @@ window.__ModuleLoader__.load({
         'support.copy': '复制脱敏记录', 'support.copied': '已复制', 'support.clear': '清空本轮记录', 'support.refresh': '刷新',
         'support.empty': '本轮还没有记录。开启后重做一次要排查的操作。', 'support.file': '本轮本机日志：{path}',
         'support.diskError': '本机日志未能写入，仍可复制内存中的记录。', 'support.dropped': '有 {count} 条较早或超限记录未显示。',
-        'support.error': '操作未完成，请重试。', 'support.about': '关于插件 · 版本与反馈', 'support.current': '当前版本', 'support.latest': 'npm 最新版',
+        'support.error': '操作未完成，请重试。', 'support.about': '关于插件 · 版本与后续开发', 'support.current': '当前版本', 'support.latest': 'npm 最新版',
         'support.unchecked': '尚未检查', 'support.check': '检查更新', 'support.checking': '正在检查…', 'support.unavailable': '暂时无法查询',
         'support.checkFailed': '本次检查失败，无法确认最新版', 'support.cached': '上次查询', 'support.ahead': '本地版本较新', 'support.update': '有新版本', 'support.same': '已是最新版',
-        'support.star': '去 GitHub 点个 Star，让作者开心一天 ↗', 'support.bug': '去 GitHub 提交 Bug ↗', 'support.old': '重新加载新版宿主后可用。',
+        'support.frozen': '这个版本保留原名和现有功能，作为归档前的最后一个维护版。如果你只需要模型显隐、能力目录和用量，可以继续用，不必迁移。',
+        'support.roadmap': '后续开发转到 DSH-The-Model-List，将探索协议转换、将上游 thinking 与正文分开，以及可选的响应兼容层。这些是新项目的计划，不会加入本版。',
+        'support.successor': '查看后续项目：DSH-The-Model-List ↗', 'support.old': '当前宿主未提供版本信息。',
       },
       en: {
         'support.debug': 'Debug trace', 'support.traceOn': 'Recording', 'support.traceOff': 'Off',
@@ -3649,10 +3732,12 @@ window.__ModuleLoader__.load({
         'support.copy': 'Copy redacted trace', 'support.copied': 'Copied', 'support.clear': 'Clear this trace', 'support.refresh': 'Refresh',
         'support.empty': 'No events yet. Turn on recording and repeat the operation.', 'support.file': 'Local log for this run: {path}',
         'support.diskError': 'Could not write the local log. In-memory events can still be copied.', 'support.dropped': '{count} earlier or excess events are not shown.',
-        'support.error': 'The action did not complete. Please retry.', 'support.about': 'About · Versions & feedback', 'support.current': 'Installed version', 'support.latest': 'Latest on npm',
+        'support.error': 'The action did not complete. Please retry.', 'support.about': 'About · Versions and future development', 'support.current': 'Installed version', 'support.latest': 'Latest on npm',
         'support.unchecked': 'Not checked', 'support.check': 'Check for updates', 'support.checking': 'Checking…', 'support.unavailable': 'Unavailable',
         'support.checkFailed': 'Check failed; the latest release is unconfirmed', 'support.cached': 'Last check', 'support.ahead': 'Local version is newer', 'support.update': 'Update available', 'support.same': 'Up to date',
-        'support.star': 'Give the author a star on GitHub ↗', 'support.bug': 'Report a bug on GitHub ↗', 'support.old': 'Reload the updated Host to use this feature.',
+        'support.frozen': 'This final maintenance release keeps the original name and features. If you only need the model picker, capability catalog, and usage reports, you can keep using it without migrating.',
+        'support.roadmap': 'Development continues in DSH-The-Model-List, where protocol translation, separation of upstream thinking from reply text, and optional response compatibility are planned. They are not part of this release.',
+        'support.successor': 'Visit DSH-The-Model-List ↗', 'support.old': 'This Host does not report version information.',
       },
     }
 
@@ -3666,7 +3751,7 @@ window.__ModuleLoader__.load({
     const { setClientTraceSession, tracedFetch } = require("diagnostic-events")
     const React = require('react')
     const h = React.createElement
-    const REPOSITORY = 'https://github.com/TZYCeng/dsh-model-visibility'
+    const SUCCESSOR = 'https://github.com/TZYCeng/DSH-The-Model-List'
     const has = (features, flag) => Array.isArray(features) && features.includes(flag)
     const button = (label, click, disabled = false) => h('button', { className: 'mvp_button mvp_button--quiet', type: 'button', onClick: click, disabled }, label)
     const css = `.mvp_support{margin:6px 0;color:var(--dsw-alias-label-primary);font-size:12px}.mvp_supportLine{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.mvp_support .mvp_supportHint{font-size:11px;color:var(--dsw-alias-label-secondary)}.mvp_support summary,.mvp_support input{cursor:pointer}.mvp_support .mvp_supportList{max-height:13rem;overflow:auto;display:grid;gap:2px;padding:4px;background:var(--dsw-alias-bg-layer-1);border-radius:5px}.mvp_supportList code{overflow-wrap:anywhere;font:11px/1.4 ui-monospace,monospace}.mvp_supportAbout{margin-top:12px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:9px}.mvp_supportAbout summary{font-weight:500}.mvp_supportAbout a{color:var(--dsw-alias-label-primary);text-decoration:underline;text-underline-offset:2px}.mvp_supportResult{margin-top:6px;overflow-wrap:anywhere}`
@@ -3744,7 +3829,6 @@ window.__ModuleLoader__.load({
       React.useEffect(() => { if (open && supported) void s.call('version?check=1') }, [open, supported])
       const v = s.data
       const label = v?.comparison === 0 ? 'support.same' : v?.comparison > 0 ? 'support.ahead' : 'support.update'
-      const link = (path, label) => h('a', { href: REPOSITORY + path, target: '_blank', rel: 'noopener noreferrer' }, t(label))
       return h('details', { className: 'mvp_support mvp_supportAbout', open, onToggle: e => setOpen(e.currentTarget.open) },
         h('summary', null, t('support.about')), open ? h('div', { className: 'mvp_supportResult' },
           supported ? h('div', { className: 'mvp_supportLine', role: 'status' },
@@ -3752,7 +3836,9 @@ window.__ModuleLoader__.load({
             v?.latest && !v.error && !s.error ? h('small', null, t(label)) : null,
             v?.error || s.error ? h('small', { role: 'status' }, t('support.checkFailed') + (v?.latest && Number.isFinite(v?.checkedAt) ? ' · ' + t('support.cached') + ' ' + new Date(v.checkedAt).toLocaleString() : '')) : null,
             button(t('support.check'), () => void s.call('version?check=1'), s.busy)) : h('p', null, t('support.old')),
-          h('p', { className: 'mvp_supportLine' }, link('', 'support.star'), link('/issues/new', 'support.bug'))) : null)
+          h('p', null, t('support.frozen')),
+          h('p', null, t('support.roadmap')),
+          h('p', null, h('a', { href: SUCCESSOR, target: '_blank', rel: 'noopener noreferrer' }, t('support.successor')))) : null)
     }
 
 
@@ -4324,49 +4410,77 @@ window.__ModuleLoader__.load({
     // The fixed revision fences other browser tabs and other editors of the field.
     const writes = new WeakMap()
 
+    function queueOf(form) {
+      let queue = writes.get(form)
+      if (!queue) { queue = { epoch: Symbol('visibility Host epoch'), tail: null }; writes.set(form, queue) }
+      return queue
+    }
+
+    function visibilityEpoch(form) { return queueOf(form).epoch }
+
+    function resetVisibilityWrites(form) {
+      // Keep the tail: ConfigForm internally serializes too, but doesn't accept
+      // our epoch guard. Do not hand it another mutation while one may be queued
+      // or in flight there. Once it settles, old entries skip and new ones run.
+      const queue = writes.get(form)
+      if (queue) queue.epoch = Symbol('visibility Host epoch')
+    }
+
     function canWriteHidden(form, snapshot) {
       return typeof form?.mutate === 'function' && snapshot?.status === 'ready' && snapshot.writable === true &&
         Number.isSafeInteger(snapshot.revision) && snapshot.revision >= 0 && Array.isArray(snapshot.value?.[FIELD])
     }
 
-    async function commit(form, routes, visible) {
-      // The official form reloads its mirror on a latest refused write. Retry an
-      // unrelated revision change against that accepted value, but don't spin on
-      // a read-only/missing/refused document or an endlessly moving revision.
+    async function commit(form, routes, visible, isCurrent) {
+      // The official form reloads its mirror on a latest refused write. Rebase on
+      // a changed revision ONLY within the same connection; a different Host can
+      // expose the same form and revision numbers.
       for (let attempt = 0; attempt < 3; attempt++) {
+        if (!isCurrent()) return false
         const snapshot = form.getSnapshot()
         if (!canWriteHidden(form, snapshot)) return false
         const original = snapshot.value[FIELD]
         const value = editHiddenRoutes(original, routes, visible)
         if (value === original) return true
         const accepted = await form.mutate([{ op: 'set', path: [FIELD], value }], snapshot.revision)
+        // A reset is not a rollback of a write already handed to the former Host.
         if (accepted === true) return true
-        if (form.getSnapshot().revision === snapshot.revision) return false
+        if (!isCurrent() || form.getSnapshot().revision === snapshot.revision) return false
       }
       return false
     }
 
+    function queueVisibilityWrite(form, epoch, work) {
+      const queue = queueOf(form)
+      const isCurrent = () => queue.epoch === epoch
+      if (!isCurrent()) return Promise.resolve(false)
+      const result = (queue.tail ?? Promise.resolve()).then(() => isCurrent() ? work(isCurrent) : false)
+      // A failed write must not poison the queue or produce an unhandled rejection.
+      const tail = result.then(() => {}, () => {})
+      queue.tail = tail
+      void tail.then(() => { if (queue.tail === tail) queue.tail = null })
+      return result
+    }
+
     /** Explicit desired visibility of the specified routes, never a stale whole list. */
-    function writeHiddenRoutes(form, routes, visible) {
+    function writeHiddenRoutes(form, routes, visible, epoch = visibilityEpoch(form)) {
       if (!Array.isArray(routes) || typeof visible !== 'boolean' || !routes.every(item =>
         typeof item?.provider === 'string' && item.provider !== '' && typeof item.model === 'string' && item.model !== '')) {
         return Promise.reject(new TypeError('Invalid model visibility edit'))
       }
       const owned = routes.map(({ provider, model }) => ({ provider, model }))
-      const run = () => commit(form, owned, visible)
-      const result = (writes.get(form) ?? Promise.resolve()).then(run)
-      const settle = (accepted) => {
-        clientTrace('visibility', accepted ? 'accepted' : 'refused', { count: owned.length, enabled: visible })
-      }
-      // A failed write must not poison the queue or produce an unhandled rejection.
-      const tail = result.then(accepted => { settle(accepted); }, () => { settle(false) })
-      writes.set(form, tail)
-      tail.then(() => { if (writes.get(form) === tail) writes.delete(form) })
-      return result
+      return queueVisibilityWrite(form, epoch, async (isCurrent) => {
+        let accepted
+        try { accepted = await commit(form, owned, visible, isCurrent); return accepted }
+        finally { if (isCurrent()) clientTrace('visibility', accepted ? 'accepted' : 'refused', { count: owned.length, enabled: visible }) }
+      })
     }
 
 
+    exports.visibilityEpoch = visibilityEpoch
+    exports.resetVisibilityWrites = resetVisibilityWrites
     exports.canWriteHidden = canWriteHidden
+    exports.queueVisibilityWrite = queueVisibilityWrite
     exports.writeHiddenRoutes = writeHiddenRoutes
   })
 
@@ -4390,9 +4504,10 @@ window.__ModuleLoader__.load({
     const { CSS } = require("css")
     const { CHECKER_CSS } = require("checker-style")
     const { setClientTraceSession } = require("diagnostic-events")
-    const { createCatalog, createOverrides, createUsageApi, createVerifyApi } = require("catalog-store")
+    const { catalogAdvertisesBulk, createCatalog, createOverrides, createUsageApi, createVerifyApi } = require("catalog-store")
     const { makeSection } = require("settings-section")
     const { installComposerFilter } = require("composer-filter")
+    const { resetVisibilityWrites } = require("visibility-identity")
 
     const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.session']
 
@@ -4415,7 +4530,7 @@ window.__ModuleLoader__.load({
       const catalog = createCatalog(ctx)
       const overrides = createOverrides()
       const usage = createUsageApi()
-      const verify = createVerifyApi()
+      const verify = createVerifyApi({ canEnableBulk: () => catalogAdvertisesBulk(catalog.getSnapshot()) })
 
       ctx.effect(() => {
         const disposers = []
@@ -4423,8 +4538,9 @@ window.__ModuleLoader__.load({
           ctx.on('connection/reset', () => {
             // Never flush buffered diagnostics into a different Host identity.
             setClientTraceSession(null)
-            // A different Host may now own the same URL; discard previous capabilities,
-            // receipts and in-flight reads/writes even when no page is observing.
+            // A different Host may now own the same URL; fence queued visibility
+            // intents before publishing the reset or reading the replacement Host.
+            resetVisibilityWrites(form)
             for (const store of [catalog, overrides, usage, verify, verify.bulk]) void store.invalidate({ reset: true })
           }),
         )
@@ -4449,6 +4565,7 @@ window.__ModuleLoader__.load({
         }
         return () => {
           setClientTraceSession(null)
+          resetVisibilityWrites(form)
           for (const store of [catalog, overrides, usage, verify]) store.dispose()
           for (const dispose of disposers) {
             try {

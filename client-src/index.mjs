@@ -16,9 +16,10 @@ import { SUPPORT_DICT } from './support-dict.mjs'
 import { CSS } from './css.mjs'
 import { CHECKER_CSS } from './checker-style.mjs'
 import { setClientTraceSession } from './diagnostic-events.mjs'
-import { createCatalog, createOverrides, createUsageApi, createVerifyApi } from './catalog-store.mjs'
+import { catalogAdvertisesBulk, createCatalog, createOverrides, createUsageApi, createVerifyApi } from './catalog-store.mjs'
 import { makeSection } from './settings-section.mjs'
 import { installComposerFilter } from './composer-filter.mjs'
+import { resetVisibilityWrites } from './visibility-identity.mjs'
 
 const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.session']
 
@@ -41,7 +42,7 @@ function apply(ctx) {
   const catalog = createCatalog(ctx)
   const overrides = createOverrides()
   const usage = createUsageApi()
-  const verify = createVerifyApi()
+  const verify = createVerifyApi({ canEnableBulk: () => catalogAdvertisesBulk(catalog.getSnapshot()) })
 
   ctx.effect(() => {
     const disposers = []
@@ -49,8 +50,9 @@ function apply(ctx) {
       ctx.on('connection/reset', () => {
         // Never flush buffered diagnostics into a different Host identity.
         setClientTraceSession(null)
-        // A different Host may now own the same URL; discard previous capabilities,
-        // receipts and in-flight reads/writes even when no page is observing.
+        // A different Host may now own the same URL; fence queued visibility
+        // intents before publishing the reset or reading the replacement Host.
+        resetVisibilityWrites(form)
         for (const store of [catalog, overrides, usage, verify, verify.bulk]) void store.invalidate({ reset: true })
       }),
     )
@@ -75,6 +77,7 @@ function apply(ctx) {
     }
     return () => {
       setClientTraceSession(null)
+      resetVisibilityWrites(form)
       for (const store of [catalog, overrides, usage, verify]) store.dispose()
       for (const dispose of disposers) {
         try {

@@ -101,9 +101,11 @@ test('an incremental supplement can refresh a missing ladder without spending ag
 test('write-back uses only this run’s independently confirmed, finally winning route fields', async t => {
   const learned = storeFor(t)
   const fresh = 'vendor/fresh', manual = 'vendor/manual', official = 'z-ai/glm-5.3', onlyCtx = 'vendor/ctx', observed = 'vendor/observed'
-  const ids = [fresh, manual, official, onlyCtx, observed]
+  const unique = 'vendor/unique'
+  const ids = [fresh, manual, official, onlyCtx, observed, unique]
   for (const id of ids) learned.upsertEntries({ id, input: ['text'], contextWindow: 4096, origins: ['checker'] }, { verifiedAt: 5 })
-  const providers = Object.fromEntries(['relay', 'other'].map(route => [route, { models: ids.map(id => ({ id, input: route === 'other' && id === fresh ? ['text'] : [] })) }]))
+  const providers = Object.fromEntries(['relay', 'other'].map(route => [route, { models: ids
+    .filter(id => route === 'relay' || id !== unique).map(id => ({ id, input: route === 'other' && id === fresh ? ['text'] : [] })) }]))
   const settings = { describe: () => [{ ns: 'llm-pi-ai', revision: 14, value: { providers } }],
     mutate: async (_ns, ops, revision) => {
       assert.equal(revision, 14)
@@ -129,16 +131,63 @@ test('write-back uses only this run’s independently confirmed, finally winning
     automaticWriteFact: service.automaticWriteFact, fetch: catalogs({ free }) })
   const state = await verifier.start({ checker, fullScan: true, writeBack: true })
   assert.equal(state.done, ids.length)
-  assert.equal(state.publicReliable, 4)
+  assert.equal(state.publicReliable, 5)
   assert.deepEqual(providers.relay.models.map(({ id, input, contextWindow }) => [id, input, contextWindow]), [
-    [fresh, ['text', 'image'], 128000], [manual, [], undefined], [official, [], 128000], [onlyCtx, [], 128000], [observed, [], undefined],
+    [fresh, [], undefined], [manual, [], undefined], [official, [], undefined], [onlyCtx, [], undefined], [observed, [], undefined],
+    [unique, ['text', 'image'], 128000],
   ])
   assert.deepEqual(providers.other.models.map(({ id, input, contextWindow }) => [id, input, contextWindow]), [
-    [fresh, ['text'], 128000], [manual, ['text', 'image'], 128000], [official, [], 128000], [onlyCtx, [], 128000], [observed, ['image'], undefined],
+    [fresh, ['text'], undefined], [manual, [], undefined], [official, [], undefined], [onlyCtx, [], undefined], [observed, [], undefined],
   ])
+  assert.deepEqual(state.batches.flatMap(batch => batch.written ?? []), [`relay/${unique}`])
   assert.equal(learned.getExact(fresh).publicFacts.contextWindow, 128000)
   assert.equal(learned.getExact(onlyCtx).publicFacts.input, undefined, 'old checker input is not re-verified on a catalog context-only match')
   assert.equal(learned.getExact(observed).publicFacts, undefined)
+})
+
+test('the write arbiter uses explicitly scoped learned facts only on the owning route', async t => {
+  const learned = storeFor(t), id = 'vendor/scoped'
+  const profiles = new Map(['relay', 'other'].map(provider => [provider, { id: provider, catalogModels: false, models: new Map([[id, { id }]]) }]))
+  const llm = { resolveModelInfo: async (provider, id) => ({ provider, id }) }
+  const service = createModelInfoService(llm, { learned, context: { profiles, learned } })
+  const facts = { input: ['text', 'image'], contextWindow: 16000 }
+  learned.upsertEntries({ id, provider: 'other', origins: ['checker'], ...facts })
+  assert.deepEqual(await service.automaticWriteFact('other', id, facts), facts)
+  assert.equal(await service.automaticWriteFact('relay', id, facts), null)
+  await service.dispose()
+})
+
+test('write-back cannot reuse its listing when a custom route adds the same ID during resolution', async t => {
+  const learned = storeFor(t), id = 'vendor/model'
+  const providers = { relay: { models: [{ id, input: [] }] }, other: { models: [{ id: 'other-model', input: [] }] } }
+  let mutations = 0, resolutions = 0
+  const settings = { describe: () => [{ ns: 'llm-pi-ai', revision: 14, value: { providers } }],
+    mutate: () => { mutations++ } }
+  const configEditor = { configuration: () => [{ entry: { options: { id: 'llm-pi-ai', config: { providers } } }, override: { providers } }] }
+  const llm = { listProviders: () => Object.keys(providers).map(id => ({ id })),
+    listConfigurableProviders: () => Object.keys(providers).map(provider => ({ provider, declared: true, settingsNs: 'llm-pi-ai', settingsPath: ['providers', provider] })),
+    listModels: async route => providers[route].models,
+    resolveModelInfo: async (provider, model) => {
+      resolutions++
+      providers.other.models.push({ id, input: [] })
+      return { provider, id: model }
+    },
+    prepareCall: async config => ({ config, async *stream() {
+      yield { type: 'text-delta', text: JSON.stringify([{ id, input: ['text', 'image'], contextWindow: 16000 }, { id: 'other-model' }]) }
+    } }),
+  }
+  // Keep the service context stale to exercise the verifier's separate dispatch guard.
+  const profiles = readProviderProfiles(settings.describe(), { llm, configEditor })
+  const service = createModelInfoService(llm, { settings, configEditor, learned, context: { profiles, learned } })
+  const verifier = createCapabilityVerifier({ llm, settings, configEditor, learned, logger: quiet,
+    automaticWriteFact: service.automaticWriteFact, fetch: catalogs() })
+  const state = await verifier.start({ checker, fullScan: true, writeBack: true })
+  assert.equal(state.done, 1)
+  assert.equal(learned.getExact(id).contextWindow, 16000, 'the unscoped fact remains advisory')
+  assert.deepEqual([resolutions, mutations], [1, 0])
+  assert.ok(state.batches.every(batch => batch.written === undefined))
+  assert.deepEqual(providers.relay.models, [{ id, input: [] }])
+  await service.dispose()
 })
 
 test('unknown file formats, invalid JSON and stat failures keep last-good reads, and all writer entry points fail closed', async t => {

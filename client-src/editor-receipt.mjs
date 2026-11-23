@@ -1,9 +1,13 @@
 import { effortLabel } from './format.mjs'
 
 /** A 200 response to the local save is not evidence of a provider write. */
-function providerWriteNote(result, t, action = {}) {
-  if (action.mode === 'reset') return t('override.resetDone')
-  if (action.mode === 'local') return t('override.localDone')
+function providerWriteNote(result, t, action = {}, receipt = {}) {
+  const localWarning = receipt.localReadUnavailable === true ? t('override.localReadUnavailable')
+    : receipt.localCleanup === 'changed' ? t('override.localCleanupChanged')
+    : receipt.localCleanup === 'unavailable' ? t('override.localCleanupUnavailable') : ''
+  const join = (...messages) => [...messages, localWarning].filter(Boolean).join(' · ')
+  if (action.mode === 'reset') return join(t('override.resetDone'))
+  if (action.mode === 'local') return join(t('override.localDone'))
   const strings = (value) => Array.isArray(value) ? [...new Set(value.filter((v) => typeof v === 'string' && v !== ''))] : []
   const labels = (fields) => fields.map((field) => {
     const key = 'override.field.' + field
@@ -34,7 +38,7 @@ function providerWriteNote(result, t, action = {}) {
     for (const field of partial) localFields.delete(field)
   } else if (alreadyMapped) {
     messages.push(t('override.reason.already-mapped'))
-  } else if (!result || result.written !== false || !reason || ['settings-unverified', 'write-pending'].includes(reason)) {
+  } else if (!result || result.written !== false || !reason || ['settings-unverified', 'settings-failed', 'write-pending'].includes(reason)) {
     // The server may have accepted the mutation: do not tell the user to retry it.
     messages.push(t('override.providerUnconfirmed'))
     if (reason === 'write-pending') messages.push(t('override.reason.write-pending'))
@@ -43,9 +47,9 @@ function providerWriteNote(result, t, action = {}) {
     const label = t(key)
     messages.push(t('override.providerSkipped', { reason: label === key ? reason : label }))
   }
-  if (localFields.size > 0) {
+  if (localFields.size > 0 && !localWarning) {
     // With an unverified write the local copy is retained, but we cannot claim the fields exist *only* locally.
-    messages.push(t(!writtenFields.length && (!reason || reason === 'settings-unverified' || result?.written !== false)
+    messages.push(t(!writtenFields.length && (!reason || ['settings-unverified', 'settings-failed', 'write-pending'].includes(reason) || result?.written !== false)
       ? 'override.localRetained' : 'override.localOnly', { fields: labels([...localFields]) }))
   }
   if (reused.length) messages.push(t('override.reusedEfforts', { levels: reused.map((id) => effortLabel(id, t)).join(' / ') }))
@@ -63,7 +67,7 @@ function providerWriteNote(result, t, action = {}) {
   if (typeof conflict === 'string' && (writtenFields.length || reason !== result.reasoningConflict)) messages.push(t(conflict))
   const kept = strings(result?.protectedEfforts)
   if (kept.length) messages.push(t('override.referencePreservedEfforts', { levels: kept.map((id) => effortLabel(id, t)).join(' / ') }))
-  return messages.join(' · ')
+  return join(...messages)
 }
 
 export { providerWriteNote }

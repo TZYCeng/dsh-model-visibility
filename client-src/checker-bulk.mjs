@@ -106,6 +106,7 @@ export function BulkEffortsControl({ api, t, canUse }) {
   const opener = React.useRef(null), previewing = React.useRef(null), action = React.useRef(null)
   const hint = React.useId()
   const value = state.snapshot, enabled = value?.enabled === true
+  const mayBeEnabled = state.mayBeEnabled === true && !enabled
   const close = () => {
     previewing.current?.abort(); previewing.current = null
     setReview(null); setExpired(false)
@@ -118,10 +119,12 @@ export function BulkEffortsControl({ api, t, canUse }) {
     const timer = setTimeout(() => setExpired(true), Math.min(remaining, 2_147_483_647))
     return () => clearTimeout(timer)
   }, [review, state.epoch])
-  React.useEffect(() => { if (review && (review.epoch !== state.epoch || enabled || !canUse)) close() }, [review, state.epoch, enabled, canUse])
+  React.useEffect(() => { if (review && (review.epoch !== state.epoch || enabled || mayBeEnabled || !canUse)) close() }, [review, state.epoch, enabled, mayBeEnabled, canUse])
 
   const open = async () => {
-    if (previewing.current || action.current || review || !canUse || state.pending || state.status !== 'ready' || !value || enabled) return
+    const current = api.getSnapshot()
+    if (previewing.current || action.current || review || !canUse || current.epoch !== state.epoch ||
+        current.pending || current.status !== 'ready' || current.snapshot?.enabled !== false || current.mayBeEnabled) return
     const ctl = new AbortController(), epoch = state.epoch
     previewing.current = ctl
     setError(null); setExpired(false); setReview({ epoch, controller: ctl })
@@ -133,13 +136,13 @@ export function BulkEffortsControl({ api, t, canUse }) {
     }
   }
   const send = async (kind, ticket) => {
-    if (action.current) return
-    const marker = {}; action.current = marker
-    const epoch = api.getSnapshot().epoch
-    setError(null); setSubmitting(kind)
+    const current = api.getSnapshot(), epoch = state.epoch
+    if (current.epoch !== epoch || action.current?.epoch === epoch || current.pending) return
+    const marker = { epoch }; action.current = marker
+    setError(null); setSubmitting(marker)
     try { if (kind === 'enable') await api.enable(ticket); else await api.disable() } catch (e) {
       if (action.current === marker && api.getSnapshot().epoch === epoch) {
-        setError(t('bulk.actionError', { message: failText(e) }))
+        setError({ epoch, message: t('bulk.actionError', { message: failText(e) }) })
         // A timed-out POST may still have been dispatched. Read status, never retry the write or silently obtain another ticket.
         void api.load()
       }
@@ -152,31 +155,36 @@ export function BulkEffortsControl({ api, t, canUse }) {
     // A detached confirmation must never authorize a ticket from an earlier dialog on this same Host.
     if (!data || previewing.current !== review.controller) return
     if (expired || data.expiresAt <= Date.now() || data.scopeCount < 1 || !previewing.current || previewing.current.signal.aborted ||
-        action.current || !canUse || current.epoch !== review.epoch || current.pending || current.status !== 'ready' || current.snapshot?.enabled !== false) {
+        action.current?.epoch === current.epoch || !canUse || current.epoch !== review.epoch || current.pending ||
+        current.status !== 'ready' || current.snapshot?.enabled !== false || current.mayBeEnabled) {
       setExpired(true); return
     }
     close(); void send('enable', data.ticket)
   }
   // Disabling only stops future dispatches. Keep it reachable even if refreshing the catalog or a receipt failed.
-  const locked = !!submitting || !!action.current || state.pending || !value || (!enabled && (!canUse || value.running || state.status !== 'ready'))
+  const pending = submitting?.epoch === state.epoch || action.current?.epoch === state.epoch || state.pending
+  const locked = pending || !value || (!enabled && (!canUse || mayBeEnabled || value.running || state.status !== 'ready'))
+  const ownError = error?.epoch === state.epoch ? error.message : null
   const counts = value?.counts
   const unverified = value?.rows?.filter(unverifiedWrite).length ?? 0
   return h('section', { className: 'mvp_bulkSection', 'aria-label': t('bulk.title') },
     h('div', { className: 'mvp_applyRow' },
       h('button', { type: 'button', role: 'switch', ref: opener, className: 'mvp_switch', 'aria-checked': enabled,
         'aria-label': t('bulk.title'), 'aria-describedby': hint, 'aria-disabled': locked, onClick: () => {
-          if (locked || review || action.current) return
-          if (enabled) void send('disable'); else void open()
+          if (locked) return
+          if (enabled) { close(); void send('disable') } else void open()
         } }, h('span', { className: 'mvp_thumb' })),
       h('div', { className: 'mvp_applyText' }, h('span', { className: 'mvp_applyTitle' }, t('bulk.title')),
-        h('span', { className: 'mvp_applyHint', id: hint, role: 'status' }, t(submitting ? 'bulk.submitting' : state.error ? 'bulk.unconfirmed' :
+        h('span', { className: 'mvp_applyHint', id: hint, role: 'status' }, t(pending ? 'bulk.submitting' : state.error || mayBeEnabled ? 'bulk.unconfirmed' :
           !value ? 'bulk.unknown' : enabled ? 'bulk.onHint' : 'bulk.offHint')))),
+    mayBeEnabled ? h('button', { type: 'button', className: 'mvp_button', disabled: pending, onClick: () => { close(); void send('disable') } },
+      t('bulk.stop')) : null,
     state.lostReply ? h('div', { className: 'mvp_banner mvp_banner--warn', role: 'alert' }, t('bulk.previousHost'), ' ',
       h('button', { type: 'button', className: 'mvp_button mvp_button--quiet', onClick: api.clearLostReply }, t('bulk.dismiss'))) : null,
     enabled ? h('details', { className: 'mvp_checkerDetails' }, h('summary', null, t('bulk.scopeDetails')),
       h('p', null, t('bulk.scopeCount', { count: value.scopeCount })), termsView(t)) : null,
-    error || state.error ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn', role: 'alert' },
-      error ?? t('bulk.readError', { message: state.error }), ' ',
+    ownError || state.error ? h('div', { className: 'mvp_usageHint mvp_usageHint--warn', role: 'alert' },
+      ownError ?? t('bulk.readError', { message: state.error }), ' ',
       h('button', { className: 'mvp_button mvp_button--quiet', type: 'button', disabled: state.pending || state.refreshing,
         onClick: () => { setError(null); void api.load() } }, t('bulk.retry'))) : null,
     value?.running ? h('div', { className: 'mvp_usageHint', role: 'status' }, t('bulk.running')) : null,
@@ -185,7 +193,7 @@ export function BulkEffortsControl({ api, t, canUse }) {
         { ...counts, failed: counts.failed - unverified, unverified }) : t('bulk.receipt', counts)),
       unverified ? h('div', { className: 'mvp_checkerOptionNote', role: 'status' }, t('bulk.verifyManually')) : null,
       h(BulkRows, { rows: value.rows, t })) : null,
-    review && review.epoch === state.epoch && !enabled && canUse ? h(BulkConfirmDialog, { review, t, close, agree, expired, trigger: opener,
-      onUnavailable: () => { close(); setError(t('bulk.dialogUnavailable')) } }) : null,
+    review && review.epoch === state.epoch && !enabled && !mayBeEnabled && canUse ? h(BulkConfirmDialog, { review, t, close, agree, expired, trigger: opener,
+      onUnavailable: () => { close(); setError({ epoch: state.epoch, message: t('bulk.dialogUnavailable') }) } }) : null,
   )
 }

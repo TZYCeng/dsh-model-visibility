@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Model visibility",
-    "description": "Open Settings → Model visibility to organize the chat picker and inspect capability sources and token usage. Compatible settings are written only on explicit action; optional online verification may use model and search quota. Hiding a model does not disable its route."
+    "description": "Open Settings → Model visibility to organize the chat picker and inspect capability sources and token usage. Write-back requires explicit action; optional online verification may use model and search quota. Hiding a model does not disable its route. This final maintenance release keeps its original name and features. Protocol translation and separation of upstream thinking from reply text are planned at https://github.com/TZYCeng/DSH-The-Model-List."
   }
 }

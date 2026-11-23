@@ -137,7 +137,6 @@ test('mergeCapabilities ignores a defaulted text-only adapter declaration', () =
         input: ['text', 'image'],
         reasoning: true,
         contextWindow: 500000,
-        provider: 'xai',
         origins: ['checker'],
         verifiedAt: 1000,
       },

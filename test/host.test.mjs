@@ -482,6 +482,43 @@ test('Host rejects stale editor revisions and preserves independent edits during
   assert.equal(result.value.overrides[0].kind, 'chat')
 })
 
+test('a confirmed provider write retains its receipt when local cleanup cannot run', async () => {
+  for (const cause of ['busy', 'unreadable']) {
+    resetShadowStore()
+    const h = createHarness()
+    apply(h.ctx, { hidden: [], probe: false })
+    const file = path.join(process.env.DSH_HOME, 'dsh-model-visibility', 'overrides.json')
+    const write = h.settings.mutate
+    h.settings.mutate = async (...args) => {
+      await write(...args)
+      // The provider has settled; simulate local storage becoming unavailable
+      // before the separate cleanup. This is only the isolated fixture store.
+      fs.writeFileSync(cause === 'busy' ? `${file}.lock` : file, 'not an override document')
+    }
+    try {
+      const response = await h.route.overrides.fetch(new Request('http://local/overrides', { method: 'POST',
+        body: JSON.stringify({ provider: 'relay', model: 'mystery-model', expectedRevision: null, contextWindow: 400000, applyToProvider: true }) }))
+      assert.equal(response.status, 200)
+      const { ok, value } = await response.json()
+      assert.equal(ok, true)
+      assert.equal(value.provider.written, true)
+      assert.deepEqual(value.provider.fields, ['contextWindow'])
+      assert.equal(value.localCleanup, 'unavailable')
+      assert.equal(h.settings.calls.length, 1)
+      if (cause === 'busy') {
+        assert.equal(value.overrides[0].contextWindow, 400000)
+        assert.equal(value.localReadUnavailable, undefined)
+      } else {
+        assert.equal(value.localReadUnavailable, true)
+        assert.equal(value.overrides, undefined, 'unreadable local database is not a newly empty list')
+      }
+    } finally {
+      fs.rmSync(`${file}.lock`, { force: true })
+      resetShadowStore()
+    }
+  }
+})
+
 test('manual write-through retains an unsupported input list and writes valid other fields', async () => {
   resetShadowStore()
   const harness = createHarness()
